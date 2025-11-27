@@ -1,6 +1,7 @@
 from pathlib import Path
 from decouple import config
 from datetime import timedelta
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -64,6 +65,22 @@ TEMPLATES = [
 WSGI_APPLICATION = 'secretsapi.wsgi.application'
 
 
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+STATIC_URL = "/static/"
+MEDIA_URL = "/media/"
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, "static/"),
+]
+MEDIA_ROOT = os.path.join(BASE_DIR, "static/media")
+STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
+
+
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    }
+}
+
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
@@ -99,9 +116,11 @@ SPECTACULAR_SETTINGS = {
             "bearerAuth": [],
         }
     ],
-    # "TAGS": [
-    #     {"name": "Auth", "description": "Authentication endpoints"},
-    # ],
+    "TAGS": [
+        {"name": "Auth", "description": "Authentication endpoints"},
+        {"name": "Projects", "description": "Projects management endpoints"},
+        {"name": "Secrets", "description": "Secrets management endpoints"},
+    ],
 }
 
 
