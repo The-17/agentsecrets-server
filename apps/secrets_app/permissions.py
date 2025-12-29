@@ -13,8 +13,8 @@ class IsProjectOwner(BasePermission):
     
     How it works:
     1. Checks if user is authenticated
-    2. Extracts project_id from URL parameters
-    3. Verifies the project exists
+    2. Extracts project_name from URL parameters
+    3. Verifies the project exists for this user
     4. Confirms the user is the project owner
     """
     
@@ -29,18 +29,16 @@ class IsProjectOwner(BasePermission):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        # Get project_id from URL kwargs
-        project_id = view.kwargs.get('project_id')
+        # Get project_name from URL kwargs
+        project_name = view.kwargs.get('project_name')
         
-        # If no project_id in URL, allow (might be a list view)
-        if not project_id:
+        # If no project_name in URL, allow (might be a list view)
+        if not project_name:
             return True
         
         # Check if project exists and user is the owner
         try:
-            project = Project.objects.get(id=project_id)
-            if project.owner_id != request.user.id:
-                raise PermissionDenied("You don't have permission to access this project.")
+            project = Project.objects.get(name=project_name, owner=request.user)
             
             # Store project in request for later use (avoid re-querying)
             request.project = project
@@ -91,16 +89,13 @@ class IsProjectOwnerOrReadOnly(BasePermission):
             return True
         
         # For write operations, check ownership
-        project_id = view.kwargs.get('project_id')
+        project_name = view.kwargs.get('project_name')
         
-        if not project_id:
+        if not project_name:
             return True
         
         try:
-            project = Project.objects.get(id=project_id)
-            
-            if project.owner_id != request.user.id:
-                raise PermissionDenied("You don't have permission to modify this project.")
+            project = Project.objects.get(name=project_name, owner=request.user)
             
             request.project = project
             return True
@@ -138,20 +133,17 @@ class IsProjectOwnerAsync(BasePermission):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        # Get project_id from URL kwargs
-        project_id = view.kwargs.get('project_id')
+        # Get project_name from URL kwargs
+        project_name = view.kwargs.get('project_name')
         
-        if not project_id:
+        if not project_name:
             return True
 
         
-        project = await Project.objects.filter(id=project_id).afirst()
+        project = await Project.objects.filter(name=project_name, owner=request.user).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")
-        
-        if project.owner_id != request.user.id:
-            raise PermissionDenied("You don't have permission to access this project.")
         
         # Store project in request for later use
         request.project = project
@@ -176,16 +168,13 @@ class CanAccessSecret(BasePermission):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        project_id = view.kwargs.get('project_id')
+        project_name = view.kwargs.get('project_name')
         
-        if not project_id:
+        if not project_name:
             return True
         
         try:
-            project = Project.objects.get(id=project_id)
-            
-            if project.owner_id != request.user.id:
-                raise PermissionDenied("You don't have permission to access this project.")
+            project = Project.objects.get(name=project_name, owner=request.user)
             
             request.project = project
             return True

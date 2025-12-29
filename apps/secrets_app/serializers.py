@@ -94,7 +94,7 @@ class SecretOutputSerializer(serializers.Serializer):
 
 
 class SecretsBulkCreateSerializer(serializers.Serializer):
-    project_id = serializers.UUIDField()
+    project_name = serializers.CharField(max_length=255)
     secrets = SecretItemSerializer(many=True)
     
     def validate_secrets(self, value):
@@ -111,7 +111,7 @@ class SecretsBulkCreateSerializer(serializers.Serializer):
 
 
 class SecretsListOutputSerializer(serializers.Serializer):
-    project_id = serializers.UUIDField(read_only=True)
+    project_name = serializers.CharField(read_only=True)
     secrets = SecretOutputSerializer(many=True, read_only=True)
 
 

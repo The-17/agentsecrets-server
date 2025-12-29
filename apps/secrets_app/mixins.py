@@ -20,7 +20,6 @@ class ProjectsMixin:
     async def check_project_exists(self, project_id=None, owner=None, name=None):
         if name and owner:
             exists = await self.get_project(owner, name)
-            print(exists)
 
             if exists is not None:
                 return True

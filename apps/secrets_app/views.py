@@ -183,10 +183,10 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project"
+                description="Name of the project"
             )
         ],
         responses={
@@ -194,7 +194,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def get(self, request, project_id):
+    async def get(self, request, project_name):
         """Get project details"""
         project = request.project
         
@@ -220,10 +220,10 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project"
+                description="Name of the project"
             )
         ],
         request=ProjectCreateSerializer,
@@ -233,15 +233,11 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def patch(self, request, project_id):
-        project = await self.get_project_by_id(project_id)
+    async def patch(self, request, project_name):
+        project = request.project
         
         if not project:
             return CustomResponse.error(message="Project not found", status_code=404)
-        
-        # Check ownership
-        if project.owner_id != request.user.id:
-            return CustomResponse.error( message="You don't have permission to update this project", status_code=403)
         
         serializer = ProjectCreateSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -273,7 +269,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         description="""
         Delete a project and ALL its secrets permanently.
         
-        ⚠️ WARNING: This action is irreversible!
+        WARNING: This action is irreversible!
         
         When you delete a project:
         1. The project is permanently deleted
@@ -285,16 +281,16 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project to delete"
+                description="Name of the project to delete"
             )
         ],
     )
-    async def delete(self, request, project_id):
+    async def delete(self, request, project_name):
         """Delete project and all its secrets"""
-        project = await self.get_project_by_id(project_id)
+        project = request.project
         
         if not project:
             return CustomResponse.error(
@@ -302,15 +298,12 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
                 status_code=404
             )
         
-        if project.owner_id != request.user.id:
-            return CustomResponse.error(message="You don't have permission to delete this project", status_code=403)
-        
-        project_name = project.name
+        project_name_str = project.name
         secrets_count = await project.secrets.acount()
         
         await project.adelete()
         
-        return CustomResponse.success(message=f"Project '{project_name}' and {secrets_count} secrets deleted successfully")
+        return CustomResponse.success(message=f"Project '{project_name_str}' and {secrets_count} secrets deleted successfully")
 
 
 
@@ -352,7 +345,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
             OpenApiExample(
                 "Create Request",
                 value={
-                    "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "project_name": "my-web-app",
                     "secrets": [
                         {
                             "key": "DATABASE_URL",
@@ -376,7 +369,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
                     "status": "success",
                     "message": "Secrets created successfully",
                     "data": {
-                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                        "project_name": "my-web-app",
                         "secrets": [
                             {
                                 "id": "660e8400-e29b-41d4-a716-446655440000",
@@ -404,15 +397,11 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        project_id = serializer.validated_data["project_id"]
-        project = await self.get_project_by_id(project_id)
+        project_name = serializer.validated_data["project_name"]
+        project = await self.get_project(owner=request.user, project_name=project_name)
         
         if not project:
             return CustomResponse.error(message="Project not found",status_code=404)
-        
-        # Check ownership
-        if project.owner_id != request.user.id:
-            return CustomResponse.error(message="You don't have permission to add secrets to this project",status_code=403)
         
         secrets_data = serializer.validated_data["secrets"]
         created_secrets = []
@@ -458,7 +447,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         return CustomResponse.success(
             message=f"Secrets processed successfully ({len(created_secrets)} created, {len(updated_secrets)} updated)",
             data={
-                'project_id': str(project_id),
+                'project_name': project_name,
                 'secrets': decrypted_secrets
             },status_code=201)
 
@@ -492,10 +481,10 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project to list secrets from"
+                description="Name of the project to list secrets from"
             )
         ],
         responses={
@@ -509,7 +498,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
                     "status": "success",
                     "message": "Secrets retrieved successfully",
                     "data": {
-                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
+                        "project_name": "my-web-app",
                         "secrets": [
                             {
                                 "id": "660e8400-e29b-41d4-a716-446655440000",
@@ -528,7 +517,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
             )
         ]
     )
-    async def get(self, request, project_id):
+    async def get(self, request, project_name):
         """List all secrets in a project"""
         project = request.project
         
@@ -548,7 +537,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
                 # Skip corrupted secrets
                 continue
 
-        serializer = self.serializer_class({"project_id": project_id, "secrets": decrypted_secrets})
+        serializer = self.serializer_class({"project_name": project_name, "secrets": decrypted_secrets})
 
         return CustomResponse.success(message="Secrets retrieved successfully", data=serializer.data)
 
@@ -577,10 +566,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project"
+                description="Name of the project"
             ),
             OpenApiParameter(
                 name="key",
@@ -594,7 +583,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def get(self, request, project_id, key):
+    async def get(self, request, project_name, key):
         """Get a specific secret"""
         project = request.project
         
@@ -636,10 +625,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
+                name="project_name",
+                type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="UUID of the project"
+                description="Name of the project"
             ),
             OpenApiParameter(
                 name="key",
@@ -654,7 +643,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def patch(self, request, project_id, key):
+    async def patch(self, request, project_name, key):
         """Update a secret"""
         project = request.project
         
@@ -706,10 +695,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             """,
             parameters=[
                 OpenApiParameter(
-                    name="project_id",
-                    type=OpenApiTypes.UUID,
+                    name="project_name",
+                    type=OpenApiTypes.STR,
                     location=OpenApiParameter.PATH,
-                    description="UUID of the project"
+                    description="Name of the project"
                 ),
                 OpenApiParameter(
                     name="key",
@@ -719,7 +708,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
                 )
             ],
     )
-    async def delete(self, request, project_id, key):
+    async def delete(self, request, project_name, key):
         """Delete a secret"""
         project = request.project
         

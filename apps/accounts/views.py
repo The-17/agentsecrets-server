@@ -1,4 +1,4 @@
-from doctest import master
+from django.utils import timezone
 from adrf.views import APIView
 from .models import User, OneTimePassword
 from .serializers import (
@@ -59,7 +59,6 @@ class RegisterUserAPIView(APIView):
         if master_key is not None:
             encrypted_master_key = encryption_service.encrypt(master_key)
             key_salt = encryption_service.encrypt(salt)
-            print(encrypted_master_key, key_salt)
         
         user = await User.objects.acreate_user(encrypted_master_key=encrypted_master_key, key_salt=key_salt, **data)
 
@@ -103,8 +102,15 @@ class LoginUserAPIView(APIView):
         encrypted_master_key = encryption_service.decrypt(user.encrypted_master_key)
         key_salt = encryption_service.decrypt(user.key_salt)
 
+        # Calculate token expiration time
+        from django.conf import settings
+        from datetime import timedelta
+        access_token_lifetime = settings.SIMPLE_JWT.get('ACCESS_TOKEN_LIFETIME', timedelta(hours=6))
+        expires_at = timezone.now() + access_token_lifetime
+
         response_data = {
             **tokens,
+            'expires_at': expires_at.isoformat(),
             'encrypted_master_key': encrypted_master_key, 
             'key_salt': key_salt,
             'user': {
@@ -123,7 +129,7 @@ class VerifyEmailAPIView(APIView):
 
     @extend_schema(
             tags=tags,
-            summary="Login User",
+            summary="Verify Email",
             description="""This endpoint is used to verify a user's email.
                This endpoint validates the provided otp code and sets the user's email verification status to true
             """,
@@ -291,6 +297,7 @@ class LogoutUserAPIView(APIView):
     async def post(self, request):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
+        serializer.save()
 
         return CustomResponse.success(message="Logged out successfully")
 
