@@ -133,14 +133,14 @@ class IsProjectOwnerAsync(BasePermission):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        # Get project_name from URL kwargs
-        project_name = view.kwargs.get('project_name')
+        # Get project_id from URL kwargs
+        project_id = view.kwargs.get('project_id')
         
-        if not project_name:
+        if not project_id:
             return True
 
         
-        project = await Project.objects.filter(name=project_name, owner=request.user).afirst()
+        project = await Project.objects.filter(id=project_id, owner=request.user).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")
@@ -163,24 +163,23 @@ class CanAccessSecret(BasePermission):
     
     message = "You don't have permission to access this secret."
     
-    def has_permission(self, request, view):
+    async def has_permission(self, request, view):
         """Check if user can access the secret"""
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        project_name = view.kwargs.get('project_name')
+        project_id = view.kwargs.get('project_id')
         
-        if not project_name:
+        if not project_id:
             return True
         
-        try:
-            project = Project.objects.get(name=project_name, owner=request.user)
-            
-            request.project = project
-            return True
-            
-        except Project.DoesNotExist:
+        project = await Project.objects.filter(id=project_id, owner=request.user).afirst()
+        
+        if not project:
             raise PermissionDenied("Project not found.")
+        
+        request.project = project
+        return True
 
 
 class IsOwnerOrReadOnly(BasePermission):

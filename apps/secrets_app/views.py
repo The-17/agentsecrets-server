@@ -485,10 +485,10 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
+                name="project_id",
+                type=OpenApiTypes.UUID,
                 location=OpenApiParameter.PATH,
-                description="Name of the project to list secrets from"
+                description="UUID of the project to list secrets from"
             )
         ],
         responses={
@@ -502,7 +502,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
                     "status": "success",
                     "message": "Secrets retrieved successfully",
                     "data": {
-                        "project_name": "my-web-app",
+                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
                         "secrets": [
                             {
                                 "id": "660e8400-e29b-41d4-a716-446655440000",
@@ -521,7 +521,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
             )
         ]
     )
-    async def get(self, request, project_name):
+    async def get(self, request, project_id):
         """List all secrets in a project"""
         project = request.project
         
@@ -541,7 +541,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
                 # Skip corrupted secrets
                 continue
 
-        serializer = self.serializer_class({"project_name": project_name, "secrets": decrypted_secrets})
+        serializer = self.serializer_class({"project_id": project_id, "secrets": decrypted_secrets})
 
         return CustomResponse.success(message="Secrets retrieved successfully", data=serializer.data)
 
@@ -570,10 +570,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
+                name="project_id",
+                type=OpenApiTypes.UUID,
                 location=OpenApiParameter.PATH,
-                description="Name of the project"
+                description="UUID of the project"
             ),
             OpenApiParameter(
                 name="key",
@@ -587,7 +587,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def get(self, request, project_name, key):
+    async def get(self, request, project_id, key):
         """Get a specific secret"""
         project = request.project
         
@@ -629,10 +629,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
+                name="project_id",
+                type=OpenApiTypes.UUID,
                 location=OpenApiParameter.PATH,
-                description="Name of the project"
+                description="UUID of the project"
             ),
             OpenApiParameter(
                 name="key",
@@ -647,7 +647,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def patch(self, request, project_name, key):
+    async def patch(self, request, project_id, key):
         """Update a secret"""
         project = request.project
         
@@ -699,10 +699,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             """,
             parameters=[
                 OpenApiParameter(
-                    name="project_name",
-                    type=OpenApiTypes.STR,
+                    name="project_id",
+                    type=OpenApiTypes.UUID,
                     location=OpenApiParameter.PATH,
-                    description="Name of the project"
+                    description="UUID of the project"
                 ),
                 OpenApiParameter(
                     name="key",
@@ -712,7 +712,7 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
                 )
             ],
     )
-    async def delete(self, request, project_name, key):
+    async def delete(self, request, project_id, key):
         """Delete a secret"""
         project = request.project
         
