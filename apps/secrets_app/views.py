@@ -92,18 +92,18 @@ class ProjectsListCreateAPIView(APIView, ProjectsMixin):
         description="""
         Create a new project for organizing your secrets.
         
-        **What happens when you create a project?**
+        What happens when you create a project?
         1. A new container is created for your secrets
         2. You can start adding secrets to this project
         3. Each project name must be unique for your account
         
-        **Project Name Rules:**
+        Project Name Rules:
         - Minimum 2 characters
         - Maximum 255 characters
         - Only letters, numbers, hyphens (-), and underscores (_)
         - Examples: `my-app`, `production_api`, `staging-web`
         
-        **Common Project Naming Patterns:**
+        Common Project Naming Patterns:
         - By environment: `myapp-prod`, `myapp-staging`, `myapp-dev`
         - By service: `web-backend`, `mobile-api`, `worker-service`
         - By client: `client-acme`, `client-techcorp`
@@ -194,7 +194,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def get(self, request, project_name):
+    async def get(self, request):
         """Get project details"""
         project = request.project
         
@@ -345,7 +345,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
             OpenApiExample(
                 "Create Request",
                 value={
-                    "project_name": "my-web-app",
+                    "project_id": "550e8400-e29b-41d4-a716-446655440000",
                     "secrets": [
                         {
                             "key": "DATABASE_URL",
@@ -369,7 +369,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
                     "status": "success",
                     "message": "Secrets created successfully",
                     "data": {
-                        "project_name": "my-web-app",
+                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
                         "secrets": [
                             {
                                 "id": "660e8400-e29b-41d4-a716-446655440000",
@@ -397,11 +397,15 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        project_name = serializer.validated_data["project_name"]
-        project = await self.get_project(owner=request.user, project_name=project_name)
+        project_id = serializer.validated_data["project_id"]
+        project = await self.get_project_by_id(project_id)
         
         if not project:
             return CustomResponse.error(message="Project not found",status_code=404)
+        
+        # Check ownership
+        if project.owner_id != request.user.id:
+            return CustomResponse.error(message="You don't have permission to add secrets to this project",status_code=403)
         
         secrets_data = serializer.validated_data["secrets"]
         created_secrets = []
@@ -447,7 +451,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         return CustomResponse.success(
             message=f"Secrets processed successfully ({len(created_secrets)} created, {len(updated_secrets)} updated)",
             data={
-                'project_name': project_name,
+                'project_id': str(project_id),
                 'secrets': decrypted_secrets
             },status_code=201)
 
