@@ -409,6 +409,56 @@ class LogoutUserAPIView(APIView):
         return CustomResponse.success(message="Logged out successfully")
 
 
+class RefreshTokenAPIView(APIView):
+    """
+    Custom refresh token endpoint that returns expires_at for CLI token management.
+    """
+
+    @extend_schema(
+        tags=tags,
+        summary="Refresh Access Token",
+        description="""Refresh the access token using a valid refresh token.
+        
+        Returns a new access token with its expiration time.
+        The CLI uses expires_at to know when to refresh again.
+        """,
+        responses={
+            200: SuccessResponseSerializer,
+            400: ErrorResponseSerializer,
+            401: ErrorResponseSerializer
+        }
+    )
+    async def post(self, request):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        from rest_framework_simplejwt.exceptions import TokenError
+        
+        refresh_token = request.data.get('refresh')
+        
+        if not refresh_token:
+            return CustomResponse.error(message="Refresh token is required", status_code=400)
+        
+        try:
+            # Create RefreshToken instance and get new access token
+            refresh = await sync_to_async(RefreshToken, thread_sensitive=True)(refresh_token)
+            access_token = str(refresh.access_token)
+            
+            # Calculate expiration time
+            access_token_lifetime = settings.SIMPLE_JWT.get('ACCESS_TOKEN_LIFETIME', timedelta(hours=6))
+            expires_at = timezone.now() + access_token_lifetime
+            
+            return CustomResponse.success(
+                message="Token refreshed successfully",
+                data={
+                    'access': access_token,
+                    'expires_at': expires_at.isoformat()
+                },
+                status_code=200
+            )
+        except TokenError as e:
+            logger.warning(f"Token refresh failed: {str(e)}")
+            return CustomResponse.error(message="Invalid or expired refresh token", status_code=401)
+
+
 class UserPublicKeyAPIView(APIView):
     """
     Get a user's public key by email.
