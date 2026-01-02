@@ -1,26 +1,39 @@
+# Local
 from .models import Project, Secret
-from asgiref.sync import sync_to_async
+from apps.workspaces.models import Membership, MembershipStatus
 
 
 class ProjectsMixin:
     
     async def __filter__(self, filters):
-        queryset = await sync_to_async(lambda: list(Project.objects.filter(**filters)),thread_sensitive=True)()
-        return queryset
+        """Filter projects using native async ORM"""
+        return [item async for item in Project.objects.filter(**filters)]
     
-    async def get_project(self, owner, project_name):
-        return await Project.objects.aget_or_none(owner=owner, name=project_name)
+    async def get_project(self, workspace, project_name):
+        """Get a project by workspace and name"""
+        return await Project.objects.aget_or_none(workspace=workspace, name=project_name)
     
     async def get_project_by_id(self, project_id):
         return await Project.objects.aget_or_none(id=project_id)
     
-    async def get_user_projects(self, owner):
-        return await self.__filter__(filters={"owner":owner})
+    async def get_user_workspaces_ids(self, user):
+        """Get all workspace IDs the user is a member of"""
+        workspace_ids = []
+        async for membership in Membership.objects.filter(
+            user=user,
+            status=MembershipStatus.ACTIVE
+        ):
+            workspace_ids.append(membership.workspace_id)
+        return workspace_ids
     
-    async def check_project_exists(self, project_id=None, owner=None, name=None):
-        if name and owner:
-            exists = await self.get_project(owner, name)
-
+    async def get_user_projects(self, user):
+        """Get all projects in workspaces the user has access to"""
+        workspace_ids = await self.get_user_workspaces_ids(user)
+        return await self.__filter__(filters={"workspace_id__in": workspace_ids})
+    
+    async def check_project_exists(self, project_id=None, workspace=None, name=None):
+        if name and workspace:
+            exists = await self.get_project(workspace, name)
             if exists is not None:
                 return True
             return False
@@ -35,8 +48,8 @@ class ProjectsMixin:
 class SecretsMixin:
 
     async def __filter__(self, filters):
-        queryset = await sync_to_async(lambda: list(Secret.objects.filter(**filters)),thread_sensitive=True)()
-        return queryset
+        """Filter secrets using native async ORM"""
+        return [item async for item in Secret.objects.filter(**filters)]
 
     async def create_secrets(self, secrets, project):
         secrets = [

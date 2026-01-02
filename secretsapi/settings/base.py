@@ -30,7 +30,8 @@ THIRD_PARTY_APPS = [
 LOCAL_APPS = [
     "apps.accounts",
     "apps.common",
-    "apps.secrets_app"
+    "apps.secrets_app",
+    "apps.workspaces",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS

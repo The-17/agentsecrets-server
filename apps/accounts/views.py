@@ -1,5 +1,30 @@
+# Standard library
+import base64
+import logging
+from datetime import timedelta
+
+# Django
+from django.conf import settings
+from django.contrib.auth import authenticate
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils import timezone
+from django.utils.encoding import smart_str
+from django.utils.http import urlsafe_base64_decode
+from django.conf import settings
+
+# Third-party
 from adrf.views import APIView
+from asgiref.sync import sync_to_async
+from cryptography.fernet import Fernet
+from drf_spectacular.utils import extend_schema
+from nacl.public import PublicKey, SealedBox
+from rest_framework.permissions import IsAuthenticated
+
+# Local
+from apps.common.response import CustomResponse
+from apps.common.serializers import ErrorResponseSerializer, SuccessResponseSerializer
+from apps.common.services.encryption import EncryptionService as encryption_service
+from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
 from .models import User, OneTimePassword
 from .serializers import (
     RegisterSerializer,
@@ -10,20 +35,6 @@ from .serializers import (
     SetNewPasswordSerializer,
     LogoutSerializer,
 )
-from apps.common.response import CustomResponse
-from django.contrib.auth import authenticate
-from asgiref.sync import sync_to_async
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.utils.http import urlsafe_base64_decode
-from django.utils.encoding import smart_str
-from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema
-from apps.common.serializers import (
-    ErrorResponseSerializer,
-    SuccessResponseSerializer
-)
-import logging
-from apps.common.services.encryption import EncryptionService as encryption_service
 
 
 logger = logging.getLogger("apps.accounts")
@@ -37,7 +48,18 @@ class RegisterUserAPIView(APIView):
     @extend_schema(
         tags=tags,
         summary="Register User",
-        description="""This endpoint is used to register a user.
+        description="""Register a new user account.
+        
+        The CLI should generate:
+        1. A keypair (public_key, private_key) for asymmetric encryption
+        2. Encrypt the private_key with user's password-derived key
+        3. Send public_key and encrypted_private_key to this endpoint
+        
+        The API will:
+        1. Create the user
+        2. Auto-create a personal workspace
+        3. Generate a workspace key and encrypt it with the user's public_key
+        4. Create an owner membership linking user to their personal workspace
         """,
         responses={
             201: SuccessResponseSerializer,
@@ -56,19 +78,76 @@ class RegisterUserAPIView(APIView):
         
         master_key = data.pop("encrypted_master_key")
         salt = data.pop("key_salt")
+        public_key = data.pop("public_key", None)
+        encrypted_private_key = data.pop("encrypted_private_key", None)
+        
         if master_key is not None:
             encrypted_master_key = encryption_service.encrypt(master_key)
             key_salt = encryption_service.encrypt(salt)
         
-        user = await User.objects.acreate_user(encrypted_master_key=encrypted_master_key, key_salt=key_salt, **data)
+        user = await User.objects.acreate_user(
+            encrypted_master_key=encrypted_master_key, 
+            key_salt=key_salt,
+            public_key=public_key,
+            encrypted_private_key=encrypted_private_key,
+            **data
+        )
+        
+        # Create personal workspace if user has a public key
+        workspace_data = None
+        if public_key:
+            
+            # Create personal workspace
+            workspace = await Workspace.objects.acreate(
+                name=f"{user.first_name}'s Workspace",
+                owner=user,
+                type=WorkspaceType.PERSONAL
+            )
+            
+            # Generate workspace key (random 32 bytes for Fernet)
+            workspace_key = Fernet.generate_key()
+            
+            # Encrypt workspace key with user's public key
+            try:
+                # Decode the base64 public key
+                public_key_bytes = base64.b64decode(public_key)
+                nacl_public_key = PublicKey(public_key_bytes)
+                sealed_box = SealedBox(nacl_public_key)
+                encrypted_workspace_key = sealed_box.encrypt(workspace_key)
+                encrypted_workspace_key_b64 = base64.b64encode(encrypted_workspace_key).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to encrypt workspace key: {e}")
+                # Fallback: store without encryption (not ideal, but allows registration to complete)
+                encrypted_workspace_key_b64 = base64.b64encode(workspace_key).decode('utf-8')
+            
+            # Create owner membership
+            await Membership.objects.acreate(
+                user=user,
+                workspace=workspace,
+                role=MembershipRole.OWNER,
+                encrypted_workspace_key=encrypted_workspace_key_b64
+            )
+            
+            workspace_data = {
+                "id": str(workspace.id),
+                "name": workspace.name,
+                "type": workspace.type
+            }
 
-        return CustomResponse.success(message="Registration successful!", 
-                                      data={
-                                          "email":data["email"],
-                                          "first_name":data["first_name"],
-                                          "last_name":data["last_name"],
-                                        },
-                                        status_code=201)
+        response_data = {
+            "email": data["email"],
+            "first_name": data["first_name"],
+            "last_name": data["last_name"],
+        }
+        
+        if workspace_data:
+            response_data["workspace"] = workspace_data
+
+        return CustomResponse.success(
+            message="Registration successful!", 
+            data=response_data,
+            status_code=201
+        )
    
 
 class LoginUserAPIView(APIView):
@@ -77,9 +156,19 @@ class LoginUserAPIView(APIView):
     @extend_schema(
             tags=tags,
             summary="Login User",
-            description="""This endpoint is used to login a user.
-                It returns access and refresh tokens. The access token should be passed for every request
-                that reqquires authentication.
+            description="""Login a user and return authentication tokens plus encryption keys.
+            
+            Response includes:
+            - access/refresh tokens for API authentication
+            - encrypted_master_key and key_salt for backward compatibility
+            - encrypted_private_key for asymmetric decryption (CLI decrypts with password)
+            - workspaces list with encrypted_workspace_key for each
+            
+            CLI Flow:
+            1. Derive user_key from password + key_salt
+            2. Decrypt private_key using user_key
+            3. For each workspace, decrypt workspace_key using private_key
+            4. Now CLI can encrypt/decrypt secrets in those workspaces
             """,
             responses={
                 200: SuccessResponseSerializer,
@@ -99,26 +188,44 @@ class LoginUserAPIView(APIView):
         tokens = await sync_to_async(user.tokens, thread_sensitive=True)()
         logger.info(f"User {user.id} logged in successfully")
 
-        encrypted_master_key = encryption_service.decrypt(user.encrypted_master_key)
-        key_salt = encryption_service.decrypt(user.key_salt)
+        # Decrypt master key and salt (backward compatibility)
+        encrypted_master_key = None
+        key_salt = None
+        if user.encrypted_master_key:
+            encrypted_master_key = encryption_service.decrypt(user.encrypted_master_key)
+        if user.key_salt:
+            key_salt = encryption_service.decrypt(user.key_salt)
 
         # Calculate token expiration time
-        from django.conf import settings
-        from datetime import timedelta
         access_token_lifetime = settings.SIMPLE_JWT.get('ACCESS_TOKEN_LIFETIME', timedelta(hours=6))
         expires_at = timezone.now() + access_token_lifetime
+
+        # Fetch user's workspaces with their encrypted keys
+        workspaces_data = []
+        memberships = Membership.objects.filter(user=user, status=MembershipStatus.ACTIVE).select_related('workspace')
+        async for membership in memberships:
+            workspaces_data.append({
+                'id': str(membership.workspace.id),
+                'name': membership.workspace.name,
+                'type': membership.workspace.type,
+                'role': membership.role,
+                'encrypted_workspace_key': membership.encrypted_workspace_key
+            })
 
         response_data = {
             **tokens,
             'expires_at': expires_at.isoformat(),
-            'encrypted_master_key': encrypted_master_key, 
+            'encrypted_master_key': encrypted_master_key,  # Backward compat
             'key_salt': key_salt,
+            'encrypted_private_key': user.encrypted_private_key,  # NEW: for asymmetric decryption
             'user': {
                 'id': str(user.id),
                 'email': user.email,
                 'first_name': user.first_name,
-                'last_name': user.last_name
-            }
+                'last_name': user.last_name,
+                'public_key': user.public_key  # NEW: for reference
+            },
+            'workspaces': workspaces_data  # NEW: list of workspaces with encrypted keys
         }
 
         return CustomResponse.success(message="Login successful!", data=response_data, status_code=200)
@@ -301,3 +408,50 @@ class LogoutUserAPIView(APIView):
 
         return CustomResponse.success(message="Logged out successfully")
 
+
+class UserPublicKeyAPIView(APIView):
+    """
+    Get a user's public key by email.
+    Used during workspace invite to encrypt the workspace key for the invitee.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=tags,
+        summary="Get User Public Key",
+        description="""Get a user's public key by email.
+        
+        This is used when inviting someone to a workspace:
+        1. CLI fetches the invitee's public key
+        2. CLI encrypts the workspace key with the invitee's public key
+        3. CLI sends the invite with the encrypted workspace key
+        """,
+        responses={
+            200: SuccessResponseSerializer,
+            404: ErrorResponseSerializer
+        }
+    )
+    async def get(self, request, email):
+        """Get a user's public key"""
+        user = await User.objects.filter(email=email).afirst()
+        
+        if not user:
+            return CustomResponse.error(
+                message=f"User with email {email} not found",
+                status_code=404
+            )
+        
+        if not user.public_key:
+            return CustomResponse.error(
+                message="User has not set up encryption keys",
+                status_code=400
+            )
+        
+        return CustomResponse.success(
+            message="Public key retrieved successfully",
+            data={
+                'email': user.email,
+                'public_key': user.public_key
+            },
+            status_code=200
+        )

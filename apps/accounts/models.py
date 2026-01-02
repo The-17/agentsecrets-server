@@ -1,12 +1,18 @@
-from django.db import models
-from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
-from django.utils.translation import gettext_lazy as _
+# Standard library
 import uuid
 
-from rest_framework_simplejwt.tokens import RefreshToken
+# Django
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+# Third-party
 from autoslug import AutoSlugField
-from .managers import CustomUserManager
+from rest_framework_simplejwt.tokens import RefreshToken
+
+# Local
 from apps.common.models import BaseModel
+from .managers import CustomUserManager
 
 def slugify_two_fields(self):
     return f"{self.first_name}-{self.last_name}"
@@ -43,6 +49,18 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     encrypted_master_key = models.TextField(null=True, blank=True, help_text="User's master encryption key, encrypted by CLI")
     key_salt = models.TextField(max_length=64, null=True, blank=True, help_text="Salt for deriving password-based key to unwrap master key")
+    
+    # Asymmetric encryption keys for workspace sharing
+    public_key = models.TextField(
+        null=True, 
+        blank=True, 
+        help_text="User's public key for encrypting workspace keys (others can encrypt for this user)"
+    )
+    encrypted_private_key = models.TextField(
+        null=True, 
+        blank=True, 
+        help_text="User's private key encrypted with their derived user_key (only they can decrypt)"
+    )
 
     @property
     def full_name(self):

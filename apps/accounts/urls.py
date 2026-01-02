@@ -1,4 +1,7 @@
+# Django
 from django.urls import path
+
+# Local
 from .views import (
     RegisterUserAPIView, 
     LoginUserAPIView,
@@ -8,6 +11,7 @@ from .views import (
     ResetPasswordRequestAPIView,
     ResetPasswordConfirmAPIVIew,
     SetNewPasswordAPIView,
+    UserPublicKeyAPIView,
 )
 
 urlpatterns = [
@@ -19,5 +23,7 @@ urlpatterns = [
     path("auth/reset-password-request/", ResetPasswordRequestAPIView.as_view(), name="reset-password-request"),
     path("auth/reset-password-confirm/", ResetPasswordConfirmAPIVIew.as_view(), name="reset-password-confirm"),
     path("auth/set-new-password/", SetNewPasswordAPIView.as_view(), name="set-new-password"),
-
+    
+    # Public key lookup
+    path("users/<str:email>/public-key/", UserPublicKeyAPIView.as_view(), name="user-public-key"),
 ]

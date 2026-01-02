@@ -1,11 +1,19 @@
-from rest_framework import serializers
+# Standard library
 import re
+
+# Third-party
+from rest_framework import serializers
+
+# Local
 from .models import Project
 
 
 class ProjectCreateSerializer(serializers.Serializer):
-    name = serializers.CharField(max_length=255,)
+    name = serializers.CharField(max_length=255)
     description = serializers.CharField(max_length=1024, required=False, allow_blank=True)
+    workspace_id = serializers.UUIDField(
+        help_text="ID of the workspace to create the project in"
+    )
 
     def validate_name(self, value):
         """
@@ -27,9 +35,8 @@ class ProjectCreateSerializer(serializers.Serializer):
         return value
     
     async def acreate(self, validated_data):
-       
-        user = self.context['user']
-        project = await Project.objects.acreate(owner=user, **validated_data)
+        workspace_id = validated_data.pop('workspace_id')
+        project = await Project.objects.acreate(workspace_id=workspace_id, **validated_data)
         return project
     
     def to_representation(self, instance):
@@ -37,12 +44,14 @@ class ProjectCreateSerializer(serializers.Serializer):
             'id': str(instance.id),
             'name': instance.name,
             'description': instance.description,
+            'workspace_id': str(instance.workspace_id),
         }
 
 
 class ProjectListSerializer(serializers.Serializer):
     id = serializers.UUIDField(read_only=True)
-    owner = serializers.UUIDField(source="owner_id", read_only=True)
+    workspace_id = serializers.UUIDField(source="workspace.id", read_only=True)
+    workspace_name = serializers.CharField(source="workspace.name", read_only=True)
     name = serializers.CharField(max_length=255)
     description = serializers.CharField(max_length=1024, allow_blank=True)
     

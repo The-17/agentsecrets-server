@@ -1,32 +1,36 @@
+# Third-party
 from adrf.views import APIView
-from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from rest_framework.permissions import IsAuthenticated
 
+# Local
 from apps.common.response import CustomResponse
 from apps.common.services.encryption import EncryptionService as encryption_service
-
+from apps.workspaces.mixins import WorkspaceMixin
+from apps.workspaces.models import MembershipRole, Workspace
+from .mixins import ProjectsMixin, SecretsMixin
+from .models import Project, Secret
+from .permissions import (
+    IsProjectMember, 
+    IsProjectMemberAsync, 
+    IsProjectOwnerOrAdminAsync, 
+    IsProjectWriteMemberAsync,
+    CanAccessSecret
+)
 from .serializers import (
     ProjectCreateSerializer,
     ProjectListSerializer,
     ProjectDetailSerializer,
-    SecretItemSerializer,
     SecretsBulkCreateSerializer,
     SecretsListOutputSerializer,
     SecretDetailSerializer,
     SecretOutputSerializer,
 )
-from .models import Project, Secret
-from .mixins import ProjectsMixin, SecretsMixin
-from .permissions import (
-    IsProjectOwner, 
-    IsProjectOwnerAsync, 
-    CanAccessSecret
-)
 
 tags = [["Projects"], ["Secrets"]]
 
-class ProjectsListCreateAPIView(APIView, ProjectsMixin):
+class ProjectsListCreateAPIView(APIView, ProjectsMixin, WorkspaceMixin):
     serializer_class = ProjectListSerializer
     post_serializer = ProjectCreateSerializer
     permission_classes = [IsAuthenticated]
@@ -151,12 +155,26 @@ class ProjectsListCreateAPIView(APIView, ProjectsMixin):
     )
     async def post(self, request):
         user = request.user
-        serializer = self.post_serializer(data=request.data, context={"user": user})
+        serializer = self.post_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
-        exists = await self.check_project_exists(owner=user, name=serializer.validated_data["name"])
+        workspace_id = serializer.validated_data["workspace_id"]
+        
+        # Verify user is a member of the workspace
+        membership = await self.get_user_membership(user, workspace_id)
+        
+        if not membership:
+            return CustomResponse.error("You don't have access to this workspace", status_code=403)
+        
+        # Only owner/admin can create projects
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error("Only workspace owners and admins can create projects", status_code=403)
+        
+        # Check if project with same name exists in this workspace
+        workspace = await Workspace.objects.aget_or_none(id=workspace_id)
+        exists = await self.check_project_exists(workspace=workspace, name=serializer.validated_data["name"])
         if exists:
-            return CustomResponse.error(f"Project '{serializer.validated_data['name']}' already exists")
+            return CustomResponse.error(f"Project '{serializer.validated_data['name']}' already exists in this workspace")
 
         project = await serializer.acreate(serializer.validated_data)
         response_data = serializer.to_representation(project)
@@ -169,7 +187,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
     Manage a specific project - retrieve, update, or delete.
     """
     serializer_class = ProjectDetailSerializer
-    permission_classes = [IsAuthenticated, IsProjectOwner]
+    permission_classes = [IsAuthenticated, IsProjectMember, IsProjectOwnerOrAdminAsync]
 
     @extend_schema(
         tags=["Projects"],
@@ -247,7 +265,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             new_name = serializer.validated_data['name']
             if new_name != project.name:
                 exists = await self.check_project_exists(
-                    owner=request.user,
+                    workspace=project.workspace,
                     name=new_name
                 )
                 if exists:
@@ -309,8 +327,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
 
 class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
     serializer_class = SecretsBulkCreateSerializer
-    patch_del_serializer = SecretDetailSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsProjectWriteMemberAsync]
 
     @extend_schema(
         tags=tags[1],
@@ -319,9 +336,11 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         Create or update multiple secrets at once for a project.
         
         How it works:
-        1. CLI sends secrets with plaintext values
-        2. Secrets are stored in database
-        3. If a secret key already exists, it's updated
+        1. CLI encrypts secret values with project key
+        2. CLI sends secrets with encrypted values
+        3. API Layer encrypts the blob again (Double Encryption)
+        4. Secrets are stored in database
+        5. If a secret key already exists, it's updated
         
         
         Use Cases:
@@ -401,46 +420,58 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         project = await self.get_project_by_id(project_id)
         
         if not project:
-            return CustomResponse.error(message="Project not found",status_code=404)
-        
-        # Check ownership
-        if project.owner_id != request.user.id:
-            return CustomResponse.error(message="You don't have permission to add secrets to this project",status_code=403)
+            return CustomResponse.error(message="Project not found", status_code=404)
         
         secrets_data = serializer.validated_data["secrets"]
-        created_secrets = []
-        updated_secrets = []
-
-        # Process each secret
+        
+        # Get all incoming keys
+        incoming_keys = [item["key"] for item in secrets_data]
+        
+        # Fetch ALL existing secrets for these keys
+        existing_secrets = {}
+        async for secret in Secret.objects.filter(project=project, key__in=incoming_keys):
+            existing_secrets[secret.key] = secret
+        
+        # Prepare secrets for bulk operations
+        to_create = []
+        to_update = []
+        encrypted_values = {}  # Store encrypted values for response
+        
         for secret_item in secrets_data:
             key = secret_item["key"]
             value = secret_item["value"]
             
-            # Encrypt the value (API's encryption layer)
+            # Encrypt the value (API's encryption layer - Double Encryption)
             encrypted_value = encryption_service.encrypt(value)
+            encrypted_values[key] = encrypted_value
             
-            # Check if secret exists
-            existing_secret = await Secret.objects.filter(project=project,key=key).afirst()
-            
-            if existing_secret:
+            if key in existing_secrets:
                 # Update existing secret
-                existing_secret.value = encrypted_value
-                await existing_secret.asave()
-                updated_secrets.append(existing_secret)
+                existing_secrets[key].value = encrypted_value
+                to_update.append(existing_secrets[key])
             else:
-                # Create new secret
-                new_secret = await Secret.objects.acreate(
+                # Create new secret object
+                to_create.append(Secret(
                     project=project,
                     key=key,
                     value=encrypted_value
-                )
-                created_secrets.append(new_secret)
+                ))
+        
+        # Bulk create new secrets
+        created_secrets = []
+        if to_create:
+            created_secrets = await Secret.objects.abulk_create(to_create)
+        
+        # Bulk update existing secrets
+        if to_update:
+            await Secret.objects.abulk_update(to_update, ['value'])
         
         # Combine all secrets for response
-        all_secrets = created_secrets + updated_secrets
+        all_secrets = created_secrets + to_update
         decrypted_secrets = []
         
         for secret in all_secrets:
+            # Return the original value (decrypt API layer for response)
             decrypted_value = encryption_service.decrypt(secret.value)
             decrypted_secrets.append({
                 'id': str(secret.id),
@@ -449,17 +480,17 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
             })
         
         return CustomResponse.success(
-            message=f"Secrets processed successfully ({len(created_secrets)} created, {len(updated_secrets)} updated)",
+            message=f"Secrets processed successfully ({len(created_secrets)} created, {len(to_update)} updated)",
             data={
                 'project_id': str(project_id),
                 'secrets': decrypted_secrets
-            },status_code=201)
+            }, status_code=201)
 
 
 
 class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
     serializer_class = SecretsListOutputSerializer
-    permission_classes = [IsAuthenticated, IsProjectOwnerAsync]
+    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
 
     @extend_schema(
         tags=["Secrets"],
@@ -469,8 +500,8 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
         
         How it works:
         1. CLI requests secrets for a project
-        2. API returns secrets still encrypted with CLI's layer
-        3. CLI decrypts with user's master key
+        2. API returns encrypted secret blobs (API layer decrypted)
+        3. CLI decrypts with user's master key and project key
         4. CLI writes to .env file
 
         Common Use Cases:
@@ -480,8 +511,7 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
         
         Response Format:
         Returns an array of secrets with their keys and encrypted values.
-        The `value` field contains the secret encrypted by the CLI
-        (API's encryption layer has been removed).
+        The `value` field contains the secret blob encrypted by the CLI.
         """,
         parameters=[
             OpenApiParameter(
@@ -563,9 +593,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         - To verify a secret's current value
         
         Security:
-        - API removes its encryption layer
-        - Secret is still encrypted with CLI's layer
-        - CLI must decrypt with user's master key
+        - API stores values with its own encryption layer
+        - Secret is also encrypted with CLI's layer (project key)
+        - Server never sees plaintext values (only seeing CLI-encrypted blobs)
+        - CLI must decrypt with user's master key / project key
 
         """,
         parameters=[
@@ -667,10 +698,10 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
         # Encrypt new value
         new_value = serializer.validated_data.get('value')
         if new_value:
+            # Encrypt new value (API's encryption layer)
             encrypted_value = encryption_service.encrypt(new_value)
             secret.value = encrypted_value
             await secret.asave()
-            
             
             # Return decrypted value
             decrypted_value = encryption_service.decrypt(secret.value)

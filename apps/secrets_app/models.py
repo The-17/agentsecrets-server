@@ -1,11 +1,26 @@
-from apps.common.models import BaseModel
-from apps.accounts.models import User
+# Django
 from django.db import models
 
+# Local
+from apps.common.models import BaseModel
+from apps.workspaces.models import Workspace
 
 
 class Project(BaseModel):
-    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='projects')
+    """
+    Project contains secrets and belongs to a workspace.
+    
+    - Personal projects: belong to user's personal workspace
+    - Shared projects: belong to a shared workspace with multiple members
+    """
+    workspace = models.ForeignKey(
+        Workspace, 
+        on_delete=models.CASCADE, 
+        related_name='projects',
+        help_text="Workspace this project belongs to",
+        blank=True,
+        null=True
+    )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     
@@ -16,10 +31,10 @@ class Project(BaseModel):
     class Meta:
         db_table = 'projects'
         ordering = ['-created_at']
-        unique_together = ('owner', 'name')
+        unique_together = ('workspace', 'name')
         indexes = [
-            models.Index(fields=['owner', 'name']),
-            models.Index(fields=['owner', '-created_at']),
+            models.Index(fields=['workspace', 'name']),
+            models.Index(fields=['workspace', '-created_at']),
         ]
     
 

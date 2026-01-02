@@ -1,5 +1,8 @@
-from cryptography.fernet import Fernet
+# Django
 from django.conf import settings
+
+# Third-party
+from cryptography.fernet import Fernet
 
 
 ENCRYPTION_KEY = settings.ENCRYPTION_KEY

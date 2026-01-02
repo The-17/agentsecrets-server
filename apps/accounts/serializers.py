@@ -1,11 +1,11 @@
-#django imports
+# Django
 from django.utils.translation import gettext_lazy as _
 
-#Third party imports
+# Third-party
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 
-#Local imports
+# Local
 from .models import User
 
 
@@ -23,6 +23,10 @@ class RegisterSerializer(serializers.Serializer):
     encrypted_master_key = serializers.CharField()
     key_salt = serializers.CharField()
     terms_agreement = serializers.BooleanField()
+    
+    # Asymmetric keypair for workspace encryption
+    public_key = serializers.CharField(required=False, allow_blank=True)
+    encrypted_private_key = serializers.CharField(required=False, allow_blank=True)
         
     def validate(self, attrs):
         first_name = attrs["first_name"]

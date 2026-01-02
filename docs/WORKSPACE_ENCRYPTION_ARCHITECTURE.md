@@ -385,7 +385,16 @@ This allows CLI to auto-switch workspace when user runs `project use X`.
 
 ---
 
-### Create/Read Secrets Flow
+### Create/Read Secrets Flow (Double Encryption)
+
+The secrets flow uses **Double Encryption** for defense in depth:
+- **Layer 1 (CLI):** Encrypts with workspace key (user-controlled)
+- **Layer 2 (API):** Encrypts with server's `ENCRYPTION_KEY` (server-controlled)
+
+This protects against:
+- CLI bugs (server layer catches any issues)
+- Compromised `ENCRYPTION_KEY` alone (attacker still can't read secrets)
+- Database breaches (secrets are double-encrypted)
 
 ```
 +-------------------------------------------------------------------------+
@@ -396,20 +405,29 @@ This allows CLI to auto-switch workspace when user runs `project use X`.
 | 1. Read .env file                                                       |
 | 2. Get workspace_key from local config                                  |
 | 3. For each secret:                                                     |
-|    encrypted_value = encrypt(workspace_key, plaintext_value)            |
+|    cli_encrypted = encrypt(workspace_key, plaintext_value)              |
 |                                                                          |
 | 4. Send to API:                                                         |
 |    POST /api/secrets/                                                   |
 |    {                                                                     |
 |      "project_id": "uuid",                                              |
 |      "secrets": [                                                       |
-|        { "key": "DATABASE_URL", "value": "encrypted..." },              |
-|        { "key": "API_KEY", "value": "encrypted..." }                    |
+|        { "key": "DATABASE_URL", "value": "cli_encrypted..." },          |
+|        { "key": "API_KEY", "value": "cli_encrypted..." }                |
 |      ]                                                                   |
 |    }                                                                     |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+|                              API (Server)                                |
++-------------------------------------------------------------------------+
+| 1. Receive CLI-encrypted secrets                                        |
+| 2. Add server encryption layer:                                         |
+|    stored_value = server_encrypt(ENCRYPTION_KEY, cli_encrypted)         |
+| 3. Store double-encrypted value in database                             |
 |                                                                          |
-| Note: Values are ALREADY ENCRYPTED by CLI!                              |
-| API just stores the encrypted blobs.                                    |
+| Note: Server sees CLI-encrypted blobs, NEVER plaintext!                 |
 +-------------------------------------------------------------------------+
 
 +-------------------------------------------------------------------------+
@@ -418,14 +436,27 @@ This allows CLI to auto-switch workspace when user runs `project use X`.
 | User runs: secretscli pull                                              |
 |                                                                          |
 | 1. Request secrets from API:                                            |
-|    GET /api/secrets/{project_name}/                                     |
-|    Response: { "secrets": [{ "key": "...", "value": "encrypted..." }] } |
-|                                                                          |
+|    GET /api/secrets/{project_id}/                                       |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+|                              API (Server)                                |
++-------------------------------------------------------------------------+
+| 1. Fetch double-encrypted secrets from database                         |
+| 2. Remove server encryption layer:                                      |
+|    cli_encrypted = server_decrypt(ENCRYPTION_KEY, stored_value)         |
+| 3. Return CLI-encrypted secrets to client                               |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+|                              CLI (Client)                                |
++-------------------------------------------------------------------------+
+| 1. Receive CLI-encrypted secrets from API                               |
 | 2. Get workspace_key from local config                                  |
-|                                                                          |
 | 3. For each secret:                                                     |
-|    plaintext_value = decrypt(workspace_key, encrypted_value)            |
-|                                                                          |
+|    plaintext_value = decrypt(workspace_key, cli_encrypted)              |
 | 4. Write to .env file                                                   |
 +-------------------------------------------------------------------------+
 ```
@@ -611,6 +642,169 @@ Same libraries - PyNaCl for asymmetric, cryptography for symmetric.
 3. **Password changes**: Re-encrypt private_key with new user_key; workspace keys unchanged
 4. **Member removal**: Delete their membership; they lose encrypted_workspace_key
 5. **Key rotation**: Generate new workspace_key, re-encrypt all secrets, re-wrap for all members
+
+---
+
+## Password Change Flow
+
+When a user changes their password, only the `encrypted_private_key` needs to be updated.
+The workspace keys and secrets remain untouched.
+
+### Why Only the Private Key?
+
+```
+Password → (KDF) → user_key → unlocks → encrypted_private_key → private_key
+                                                                     │
+                                                                     ▼
+                           encrypted_workspace_key ← unlocks ← private_key
+                                                                     │
+                                                                     ▼
+                                              secrets ← unlocks ← workspace_key
+```
+
+The password only protects the **private_key**. Everything downstream (workspace keys, secrets) is unchanged.
+
+### CLI Password Command (Single Command, Two Options)
+
+```bash
+$ secretscli auth password
+
+? What would you like to do?
+  ❯ Change password (I know my current password)
+    Reset password (I forgot my password)
+```
+
+---
+
+### Option 1: Change Password Flow
+
+User selected "Change password":
+
+```
++-------------------------------------------------------------------------+
+|                              CLI (Client)                                |
++-------------------------------------------------------------------------+
+| 1. Prompt for current password and new password                         |
+|                                                                          |
+| 2. Derive OLD user_key from current password:                           |
+|    old_user_key = KDF(current_password, key_salt)                       |
+|                                                                          |
+| 3. Decrypt private_key using OLD user_key:                              |
+|    private_key = decrypt(old_user_key, encrypted_private_key)           |
+|                                                                          |
+| 4. Generate NEW salt:                                                   |
+|    new_salt = random_bytes(16)                                          |
+|                                                                          |
+| 5. Derive NEW user_key from new password:                               |
+|    new_user_key = KDF(new_password, new_salt)                           |
+|                                                                          |
+| 6. Re-encrypt private_key with NEW user_key:                            |
+|    new_encrypted_private_key = encrypt(new_user_key, private_key)       |
+|                                                                          |
+| 7. Send to API:                                                         |
+|    PATCH /api/auth/change-password/                                     |
+|    {                                                                     |
+|      "current_password": "...",                                         |
+|      "new_password": "...",                                             |
+|      "key_salt": "new_salt_b64",                                        |
+|      "encrypted_private_key": "new_encrypted_private_key_b64"           |
+|    }                                                                     |
+|                                                                          |
+| Result: ✅ All secrets remain accessible                                |
++-------------------------------------------------------------------------+
+```
+
+---
+
+### Option 2: Reset Password Flow (Forgot Password)
+
+User selected "Reset password":
+
+```
++-------------------------------------------------------------------------+
+|                              CLI (Client)                                |
++-------------------------------------------------------------------------+
+| ⚠️  WARNING: If you don't have a recovery code, you will lose access   |
+|     to all your encrypted secrets!                                       |
+|                                                                          |
+| 1. Prompt for email                                                     |
+| 2. API sends OTP/reset link to email                                    |
+| 3. User enters OTP/clicks link                                          |
+| 4. Prompt: "Do you have a recovery code? (y/n)"                         |
+|                                                                          |
+| IF YES (has recovery code):                                              |
+|   - Prompt for recovery code                                            |
+|   - Decrypt private_key backup using recovery code                      |
+|   - Re-encrypt with new password                                        |
+|   - ✅ Secrets preserved                                                 |
+|                                                                          |
+| IF NO (no recovery code):                                                |
+|   - Generate NEW keypair (old secrets unrecoverable)                    |
+|   - Delete old memberships                                              |
+|   - If owner of workspaces: those workspaces are lost                   |
+|   - ⚠️ Start fresh with empty workspace                                 |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## Recovery Codes
+
+Recovery codes are generated at registration and allow account recovery without losing secrets.
+
+### How Recovery Codes Work
+
+```
+At Registration:
+1. CLI generates 8 recovery codes (random strings)
+2. For each code, CLI encrypts a copy of the private_key
+3. CLI sends to API: { code_hash, encrypted_private_key_backup }
+4. User MUST save these codes offline (printed or password manager)
+
+At Recovery:
+1. User enters recovery code
+2. CLI sends to API to verify (by hash)
+3. API returns encrypted_private_key_backup for that code
+4. CLI decrypts backup using the recovery code
+5. CLI re-encrypts with new password
+6. Mark recovery code as used (one-time only)
+```
+
+### Recovery Code Model (Future)
+
+```python
+class RecoveryCode(BaseModel):
+    user = ForeignKey(User)
+    code_hash = CharField(max_length=128)  # Hash of the code (we don't store plaintext)
+    encrypted_private_key_backup = TextField()  # private_key encrypted with this code
+    is_used = BooleanField(default=False)
+    used_at = DateTimeField(null=True)
+```
+
+### Recovery Code UX
+
+```bash
+$ secretscli auth register
+
+✅ Registration successful!
+
+⚠️  IMPORTANT: Save these recovery codes in a safe place.
+    If you forget your password, these are your ONLY way to recover your secrets.
+
+    1. XXXX-XXXX-XXXX
+    2. XXXX-XXXX-XXXX
+    3. XXXX-XXXX-XXXX
+    4. XXXX-XXXX-XXXX
+    5. XXXX-XXXX-XXXX
+    6. XXXX-XXXX-XXXX
+    7. XXXX-XXXX-XXXX
+    8. XXXX-XXXX-XXXX
+
+    Each code can only be used once.
+    Store them securely and NEVER share them.
+
+? I have saved my recovery codes (y/n): y
+```
 
 ---
 

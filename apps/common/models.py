@@ -1,5 +1,10 @@
-from django.db import models
+# Standard library
 import uuid
+
+# Django
+from django.db import models
+
+# Local
 from .managers import GetOrNoneManager
 
 class BaseModel(models.Model):
