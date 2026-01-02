@@ -143,3 +143,33 @@ class SecretDetailSerializer(serializers.Serializer):
             raise serializers.ValidationError("Key must start with a letter and contain only uppercase letters, numbers, and underscores")
         
         return value
+
+
+class ProjectInviteSerializer(serializers.Serializer):
+    """
+    Serializer for inviting a user to a project.
+    
+    When inviting to a project in a personal workspace:
+    - CLI generates new workspace key
+    - CLI re-encrypts secrets with new key
+    - API creates shared workspace, moves project
+    """
+    email = serializers.EmailField(
+        help_text="Email of the user to invite"
+    )
+    role = serializers.ChoiceField(
+        choices=['admin', 'member', 'read_only'],
+        default='member',
+        help_text="Role for the invitee in the shared workspace"
+    )
+    encrypted_workspace_key_owner = serializers.CharField(
+        help_text="Workspace key encrypted for the project owner (current user)"
+    )
+    encrypted_workspace_key_invitee = serializers.CharField(
+        help_text="Workspace key encrypted for the invitee"
+    )
+    secrets = SecretItemSerializer(
+        many=True,
+        required=False,
+        help_text="Re-encrypted secrets (required when migrating from personal workspace)"
+    )

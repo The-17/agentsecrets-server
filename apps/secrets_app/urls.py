@@ -5,6 +5,7 @@ from django.urls import path
 from .views import (
     ProjectsListCreateAPIView,
     ProjectDetailAPIView,
+    ProjectInviteAPIView,
     SecretsCreateAPIView,
     SecretsListAPIView,
     SecretDetailAPIView,
@@ -14,6 +15,7 @@ urlpatterns = [
     # Project endpoints
     path('projects/', ProjectsListCreateAPIView.as_view(), name='project-list-create'),
     path('projects/<str:project_name>/', ProjectDetailAPIView.as_view(), name='project-detail'),
+    path('projects/<str:project_name>/invite/', ProjectInviteAPIView.as_view(), name='project-invite'),
     
     # Secret endpoints
     path('secrets/', SecretsCreateAPIView.as_view(), name='secrets-bulk-create'),

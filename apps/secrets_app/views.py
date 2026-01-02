@@ -5,9 +5,11 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExampl
 from rest_framework.permissions import IsAuthenticated
 
 # Local
+from apps.accounts.models import User
 from apps.common.response import CustomResponse
 from apps.common.services.encryption import EncryptionService as encryption_service
 from apps.workspaces.mixins import WorkspaceMixin
+from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
 from apps.workspaces.models import MembershipRole, Workspace
 from .mixins import ProjectsMixin, SecretsMixin
 from .models import Project, Secret
@@ -22,6 +24,7 @@ from .serializers import (
     ProjectCreateSerializer,
     ProjectListSerializer,
     ProjectDetailSerializer,
+    ProjectInviteSerializer,
     SecretsBulkCreateSerializer,
     SecretsListOutputSerializer,
     SecretDetailSerializer,
@@ -323,6 +326,149 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         
         return CustomResponse.success(message=f"Project '{project_name_str}' and {secrets_count} secrets deleted successfully")
 
+
+class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
+    """
+    Invite a user to a project.
+    
+    When the project is in a PERSONAL workspace:
+    - Creates a new shared workspace named after the project
+    - Moves the project to the new workspace
+    - Updates secrets with CLI-provided re-encrypted values
+    - Creates memberships for owner and invitee
+    
+    When the project is already in a SHARED workspace:
+    - Just adds the invitee as a new member
+    """
+    permission_classes = [IsAuthenticated, IsProjectMember, IsProjectOwnerOrAdminAsync]
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="Invite User to Project",
+        description="""
+        Invite a user to access a specific project.
+        
+        For projects in personal workspace:
+        1. CLI generates new workspace key
+        2. CLI re-encrypts all secrets with new key
+        3. CLI encrypts workspace key for owner + invitee
+        4. API creates shared workspace, moves project, updates secrets
+        
+        For projects already shared:
+        1. CLI encrypts existing workspace key for invitee
+        2. API adds new member
+        
+        Only project owners and admins can invite users.
+        """,
+        parameters=[
+            OpenApiParameter(
+                name="project_name",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.PATH,
+                description="Name of the project to invite to"
+            )
+        ],
+        responses={
+            201: {"description": "User invited successfully"},
+            400: {"description": "Bad request"},
+            403: {"description": "Permission denied"},
+            404: {"description": "Project or user not found"}
+        }
+    )
+    async def post(self, request, project_name):
+        
+        
+        project = request.project
+        
+        if not project:
+            return CustomResponse.error(message="Project not found", status_code=404)
+        
+        serializer = ProjectInviteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        
+        # Find invitee
+        invitee = await User.objects.filter(email=data['email']).afirst()
+        if not invitee:
+            return CustomResponse.error(message=f"User with email {data['email']} not found", status_code=404)
+        
+        current_workspace = project.workspace
+        is_personal = current_workspace.type == WorkspaceType.PERSONAL
+        
+        if is_personal:
+            # Create new shared workspace
+            new_workspace = await Workspace.objects.acreate(
+                name=project.name,
+                owner=request.user,
+                type=WorkspaceType.SHARED
+            )
+            
+            # Create owner membership
+            await Membership.objects.acreate(
+                user=request.user,
+                workspace=new_workspace,
+                role=MembershipRole.OWNER,
+                status=MembershipStatus.ACTIVE,
+                encrypted_workspace_key=data['encrypted_workspace_key_owner']
+            )
+            
+            # Move project to new workspace
+            project.workspace = new_workspace
+            await project.asave()
+            
+            # Update secrets if provided (CLI re-encrypted them)
+            if data.get('secrets'):
+                for secret_item in data['secrets']:
+                    key = secret_item['key']
+                    value = secret_item['value']
+                    
+                    # Apply API encryption layer
+                    encrypted_value = encryption_service.encrypt(value)
+                    
+                    # Update existing secret
+                    secret = await Secret.objects.filter(project=project, key=key).afirst()
+                    if secret:
+                        secret.value = encrypted_value
+                        await secret.asave()
+            
+            workspace_for_invite = new_workspace
+        else:
+            # Project is already in a shared workspace
+            workspace_for_invite = current_workspace
+            
+            # Check if invitee is already a member
+            existing_membership = await Membership.objects.filter(
+                user=invitee,
+                workspace=workspace_for_invite
+            ).afirst()
+            
+            if existing_membership:
+                return CustomResponse.error(
+                    message=f"User {data['email']} is already a member of this workspace",
+                    status_code=400
+                )
+        
+        # Create invitee membership
+        invitee_membership = await Membership.objects.acreate(
+            user=invitee,
+            workspace=workspace_for_invite,
+            role=data['role'],
+            status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key=data['encrypted_workspace_key_invitee']
+        )
+        
+        return CustomResponse.success(
+            message=f"Successfully invited {invitee.email} to project '{project.name}'",
+            data={
+                'workspace_id': str(workspace_for_invite.id),
+                'workspace_name': workspace_for_invite.name,
+                'workspace_type': workspace_for_invite.type,
+                'invitee_email': invitee.email,
+                'invitee_role': invitee_membership.role,
+                'migrated_from_personal': is_personal
+            },
+            status_code=201
+        )
 
 
 class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
