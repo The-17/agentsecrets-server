@@ -215,12 +215,12 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def get(self, request):
+    async def get(self, request, project_name):
         """Get project details"""
         project = request.project
         
         if not project:
-            return CustomResponse.error(message="Project not found",status_code=404)
+            return CustomResponse.error(message="Project not found", status_code=404)
         
         serializer = self.serializer_class(project)
         

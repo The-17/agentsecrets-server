@@ -106,14 +106,18 @@ class IsProjectMemberAsync(BasePermission):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        # Get project_id from URL kwargs
+        # Support both project_name (for project endpoints) and project_id (for secret endpoints)
+        project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
         
-        if not project_id:
+        if not project_name and not project_id:
             return True
 
-        # Get project
-        project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
+        # Get project by name or ID
+        if project_name:
+            project = await Project.objects.select_related('workspace').filter(name=project_name).afirst()
+        else:
+            project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")
@@ -192,12 +196,18 @@ class IsProjectOwnerOrAdminAsync(BasePermission):
         if request.method in ['GET', 'HEAD', 'OPTIONS']:
             return True
         
+        # Support both project_name and project_id
+        project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
         
-        if not project_id:
+        if not project_name and not project_id:
             return True
         
-        project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
+        # Get project by name or ID
+        if project_name:
+            project = await Project.objects.select_related('workspace').filter(name=project_name).afirst()
+        else:
+            project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")

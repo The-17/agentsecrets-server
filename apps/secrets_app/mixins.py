@@ -29,7 +29,12 @@ class ProjectsMixin:
     async def get_user_projects(self, user):
         """Get all projects in workspaces the user has access to"""
         workspace_ids = await self.get_user_workspaces_ids(user)
-        return await self.__filter__(filters={"workspace_id__in": workspace_ids})
+        # Use select_related to prefetch workspace 
+        return [
+            item async for item in Project.objects.filter(
+                workspace_id__in=workspace_ids
+            ).select_related('workspace')
+        ]
     
     async def check_project_exists(self, project_id=None, workspace=None, name=None):
         if name and workspace:
