@@ -373,23 +373,17 @@ class WorkspaceMembersAPIView(APIView, WorkspaceMixin):
             )
         
         # Check if user is already a member
-        existing = await Membership.objects.filter(
-            user=invitee,
-            workspace_id=workspace_id
-        ).afirst()
+        existing = await Membership.objects.filter(user=invitee, workspace_id=workspace_id).afirst()
         
         if existing:
-            return CustomResponse.error(
-                message="User is already a member of this workspace",
-                status_code=400
-            )
+            return CustomResponse.error(message="User is already a member of this workspace", status_code=400)
         
         # Create membership
         membership = await Membership.objects.acreate(
             user=invitee,
             workspace_id=workspace_id,
             role=data['role'],
-            status=MembershipStatus.ACTIVE,  # Could be INVITED for email confirmation
+            status=MembershipStatus.ACTIVE, 
             encrypted_workspace_key=data['encrypted_workspace_key']
         )
         
@@ -499,23 +493,14 @@ class WorkspaceMemberDetailAPIView(APIView, WorkspaceMixin):
         
         # Only owner and admin can remove (admin cannot remove other admins)
         if user_membership.role == MembershipRole.ADMIN and target_membership.role == MembershipRole.ADMIN:
-            return CustomResponse.error(
-                message="Admins cannot remove other admins",
-                status_code=403
-            )
+            return CustomResponse.error(message="Admins cannot remove other admins", status_code=403)
         
         if user_membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
-            return CustomResponse.error(
-                message="You don't have permission to remove members",
-                status_code=403
-            )
+            return CustomResponse.error(message="You don't have permission to remove members", status_code=403)
         
         removed_email = target_membership.user.email
         await target_membership.adelete()
         
         logger.info(f"User {request.user.id} removed {user_id} from workspace {workspace_id}")
         
-        return CustomResponse.success(
-            message=f"Member {removed_email} removed from workspace",
-            status_code=200
-        )
+        return CustomResponse.success(message=f"Member {removed_email} removed from workspace", status_code=200)

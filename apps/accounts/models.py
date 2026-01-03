@@ -47,8 +47,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
 
-    encrypted_master_key = models.TextField(null=True, blank=True, help_text="User's master encryption key, encrypted by CLI")
-    key_salt = models.TextField(max_length=64, null=True, blank=True, help_text="Salt for deriving password-based key to unwrap master key")
+    # Salt for deriving user_key from password (used to decrypt private_key)
+    key_salt = models.TextField(max_length=64, null=True, blank=True, help_text="Salt for deriving user_key from password")
     
     # Asymmetric encryption keys for workspace sharing
     public_key = models.TextField(

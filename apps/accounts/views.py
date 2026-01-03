@@ -76,17 +76,15 @@ class RegisterUserAPIView(APIView):
         if existing_user:
             return CustomResponse.error(message="Email already registered", status_code=422)
         
-        master_key = data.pop("encrypted_master_key")
+        # Extract encryption fields
         salt = data.pop("key_salt")
         public_key = data.pop("public_key", None)
         encrypted_private_key = data.pop("encrypted_private_key", None)
         
-        if master_key is not None:
-            encrypted_master_key = encryption_service.encrypt(master_key)
-            key_salt = encryption_service.encrypt(salt)
+        # Encrypt key_salt for storage
+        key_salt = encryption_service.encrypt(salt) if salt else None
         
         user = await User.objects.acreate_user(
-            encrypted_master_key=encrypted_master_key, 
             key_salt=key_salt,
             public_key=public_key,
             encrypted_private_key=encrypted_private_key,
@@ -188,11 +186,8 @@ class LoginUserAPIView(APIView):
         tokens = await sync_to_async(user.tokens, thread_sensitive=True)()
         logger.info(f"User {user.id} logged in successfully")
 
-        # Decrypt master key and salt (backward compatibility)
-        encrypted_master_key = None
+        # Decrypt key_salt for CLI to derive user_key
         key_salt = None
-        if user.encrypted_master_key:
-            encrypted_master_key = encryption_service.decrypt(user.encrypted_master_key)
         if user.key_salt:
             key_salt = encryption_service.decrypt(user.key_salt)
 
@@ -215,17 +210,16 @@ class LoginUserAPIView(APIView):
         response_data = {
             **tokens,
             'expires_at': expires_at.isoformat(),
-            'encrypted_master_key': encrypted_master_key,  # Backward compat
             'key_salt': key_salt,
-            'encrypted_private_key': user.encrypted_private_key,  # NEW: for asymmetric decryption
+            'encrypted_private_key': user.encrypted_private_key,
             'user': {
                 'id': str(user.id),
                 'email': user.email,
                 'first_name': user.first_name,
                 'last_name': user.last_name,
-                'public_key': user.public_key  # NEW: for reference
+                'public_key': user.public_key
             },
-            'workspaces': workspaces_data  # NEW: list of workspaces with encrypted keys
+            'workspaces': workspaces_data
         }
 
         return CustomResponse.success(message="Login successful!", data=response_data, status_code=200)

@@ -20,8 +20,7 @@ class RegisterSerializer(serializers.Serializer):
     password = serializers.CharField(
         min_length=8, error_messages={"min_length": _("{min_length} characters min.")}
     )
-    encrypted_master_key = serializers.CharField()
-    key_salt = serializers.CharField()
+    key_salt = serializers.CharField(help_text="Salt for deriving user_key from password")
     terms_agreement = serializers.BooleanField()
     
     # Asymmetric keypair for workspace encryption
