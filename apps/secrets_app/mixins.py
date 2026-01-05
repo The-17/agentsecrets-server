@@ -11,7 +11,9 @@ class ProjectsMixin:
     
     async def get_project(self, workspace, project_name):
         """Get a project by workspace and name"""
-        return await Project.objects.aget_or_none(workspace=workspace, name=project_name)
+        if workspace is None:
+            return None
+        return await Project.objects.aget_or_none(workspace_id=workspace.id, name=project_name)
     
     async def get_project_by_id(self, project_id):
         return await Project.objects.aget_or_none(id=project_id)

@@ -17,10 +17,8 @@ from .serializers import (
     WorkspaceCreateSerializer,
     WorkspaceListSerializer,
     WorkspaceUpdateSerializer,
-    MembershipSerializer,
     MemberInviteSerializer,
     MemberUpdateSerializer,
-    PublicKeySerializer,
 )
 
 

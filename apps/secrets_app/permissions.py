@@ -40,23 +40,26 @@ class IsProjectMember(BasePermission):
         if not project_name:
             return True
         
-        # Check if project exists
+        # Get user's workspace IDs first
+        user_workspace_ids = list(Membership.objects.filter(
+            user=request.user,
+            status=MembershipStatus.ACTIVE
+        ).values_list('workspace_id', flat=True))
+        
+        # Find project by name within user's workspaces
         try:
-            project = Project.objects.select_related('workspace').get(name=project_name)
+            project = Project.objects.select_related('workspace').get(
+                name=project_name,
+                workspace_id__in=user_workspace_ids
+            )
         except Project.DoesNotExist:
             raise PermissionDenied("Project not found.")
+        except Project.MultipleObjectsReturned:
+            # User has access to multiple projects with same name in different workspaces
+            # This shouldn't happen with good UX, but handle it gracefully
+            raise PermissionDenied("Ambiguous project name. Please specify workspace.")
         
-        # Check if user is a member of the project's workspace
-        is_member = Membership.objects.filter(
-            user=request.user,
-            workspace=project.workspace,
-            status=MembershipStatus.ACTIVE
-        ).exists()
-        
-        if not is_member:
-            raise PermissionDenied("You don't have access to this project.")
-        
-        # Store project and membership in request for later use
+        # Store project in request for later use
         request.project = project
         return True
     
@@ -113,16 +116,27 @@ class IsProjectMemberAsync(BasePermission):
         if not project_name and not project_id:
             return True
 
-        # Get project by name or ID
-        if project_name:
-            project = await Project.objects.select_related('workspace').filter(name=project_name).afirst()
-        else:
+        if project_id:
+            # Direct ID lookup
             project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
+        else:
+            # Name lookup - scope to user's workspaces
+            user_workspace_ids = []
+            async for membership in Membership.objects.filter(
+                user=request.user,
+                status=MembershipStatus.ACTIVE
+            ):
+                user_workspace_ids.append(membership.workspace_id)
+            
+            project = await Project.objects.select_related('workspace').filter(
+                name=project_name,
+                workspace_id__in=user_workspace_ids
+            ).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")
         
-        # Check workspace membership
+        # Get membership for the project's workspace
         membership = await Membership.objects.filter(
             user=request.user,
             workspace=project.workspace,

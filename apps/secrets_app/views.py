@@ -341,6 +341,7 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
     - Just adds the invitee as a new member
     """
     permission_classes = [IsAuthenticated, IsProjectMember, IsProjectOwnerOrAdminAsync]
+    serializer_class = ProjectInviteSerializer
 
     @extend_schema(
         tags=["Projects"],
@@ -376,14 +377,12 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
         }
     )
     async def post(self, request, project_name):
-        
-        
         project = request.project
         
         if not project:
             return CustomResponse.error(message="Project not found", status_code=404)
         
-        serializer = ProjectInviteSerializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         
