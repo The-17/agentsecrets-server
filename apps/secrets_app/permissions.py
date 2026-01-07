@@ -5,6 +5,7 @@ from rest_framework.permissions import BasePermission
 # Local
 from .models import Project
 from apps.workspaces.models import Membership, MembershipRole, MembershipStatus
+from uuid import UUID
 
 
 class IsProjectMember(BasePermission):
