@@ -43,8 +43,11 @@ class IsProjectMember(BasePermission):
         
         try:
             if workspace_id:
+                # Normalize workspace_id to UUID (it might already be a UUID object)
+                workspace_uuid = workspace_id if isinstance(workspace_id, UUID) else UUID(workspace_id)
+                
                 # Verify user actually has access to this workspace
-                if UUID(workspace_id) not in [UUID(str(wid)) for wid in user_workspace_ids]:
+                if workspace_uuid not in [wid if isinstance(wid, UUID) else UUID(str(wid)) for wid in user_workspace_ids]:
                     raise PermissionDenied("You don't have access to this workspace.")
                 
                 # Specific workspace provided in URL - use it directly
