@@ -25,74 +25,46 @@ class IsProjectMember(BasePermission):
     message = "You don't have permission to access this project."
     
     def has_permission(self, request, view):
-        """
-        Check if user has permission to access the project.
-        Called before the view is executed.
-        """
-        # User must be authenticated
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
         
-        # Get project_name from URL kwargs
         project_name = view.kwargs.get('project_name')
+        workspace_id = view.kwargs.get('workspace_id') 
         
-        # If no project_name in URL, allow (might be a list view)
         if not project_name:
             return True
         
-        # Get user's workspace IDs first
+        # Get user's workspace IDs
         user_workspace_ids = list(Membership.objects.filter(
             user=request.user,
             status=MembershipStatus.ACTIVE
         ).values_list('workspace_id', flat=True))
         
-        # Find project by name within user's workspaces
         try:
-            project = Project.objects.select_related('workspace').get(
-                name=project_name,
-                workspace_id__in=user_workspace_ids
-            )
+            if workspace_id:
+                # Verify user actually has access to this workspace
+                if UUID(workspace_id) not in [UUID(str(wid)) for wid in user_workspace_ids]:
+                    raise PermissionDenied("You don't have access to this workspace.")
+                
+                # Specific workspace provided in URL - use it directly
+                project = Project.objects.select_related('workspace').get(
+                    name=project_name,
+                    workspace_id=workspace_id
+                )
+                
+            else:
+                # No workspace in URL - find in user's workspaces (legacy behavior)
+                project = Project.objects.select_related('workspace').get(
+                    name=project_name,
+                    workspace_id__in=user_workspace_ids
+                )
         except Project.DoesNotExist:
             raise PermissionDenied("Project not found.")
         except Project.MultipleObjectsReturned:
-            # User has access to multiple projects with same name in different workspaces
-            # This shouldn't happen with good UX, but handle it gracefully
             raise PermissionDenied("Ambiguous project name. Please specify workspace.")
         
-        # Store project in request for later use
         request.project = project
         return True
-    
-    def has_object_permission(self, request, view, obj):
-        """
-        Check if user has permission to access a specific project object.
-        Called after the object is retrieved.
-        """
-        # If obj is a Project, check workspace membership
-        if isinstance(obj, Project):
-            is_member = Membership.objects.filter(
-                user=request.user,
-                workspace=obj.workspace,
-                status=MembershipStatus.ACTIVE
-            ).exists()
-            
-            if not is_member:
-                raise PermissionDenied("You don't have permission to access this project.")
-            return True
-        
-        # If obj has a project attribute (like Secret), check project's workspace membership
-        if hasattr(obj, 'project'):
-            is_member = Membership.objects.filter(
-                user=request.user,
-                workspace=obj.project.workspace,
-                status=MembershipStatus.ACTIVE
-            ).exists()
-            
-            if not is_member:
-                raise PermissionDenied("You don't have permission to access this secret.")
-            return True
-        
-        return False
 
 
 class IsProjectMemberAsync(BasePermission):

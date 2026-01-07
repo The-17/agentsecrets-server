@@ -376,7 +376,7 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
             404: {"description": "Project or user not found"}
         }
     )
-    async def post(self, request, project_name):
+    async def post(self, request, project_name, workspace_id):
         project = request.project
         
         if not project:
