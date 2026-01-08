@@ -215,7 +215,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def get(self, request, project_name):
+    async def get(self, request, project_name, workspace_id=None):
         """Get project details"""
         project = request.project
         
@@ -254,7 +254,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             404: ProjectDetailSerializer,
         }
     )
-    async def patch(self, request, project_name):
+    async def patch(self, request, project_name, workspace_id=None):
         project = request.project
         
         if not project:
@@ -309,7 +309,7 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
             )
         ],
     )
-    async def delete(self, request, project_name):
+    async def delete(self, request, project_name, workspace_id=None):
         """Delete project and all its secrets"""
         project = request.project
         

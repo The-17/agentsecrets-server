@@ -88,6 +88,7 @@ class IsProjectMemberAsync(BasePermission):
         # Support both project_name (for project endpoints) and project_id (for secret endpoints)
         project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
+        workspace_id = view.kwargs.get('workspace_id')
         
         if not project_name and not project_id:
             return True
@@ -95,8 +96,28 @@ class IsProjectMemberAsync(BasePermission):
         if project_id:
             # Direct ID lookup
             project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
+        elif workspace_id:
+            # Normalize workspace_id to UUID (it might already be a UUID object)
+            workspace_uuid = workspace_id if isinstance(workspace_id, UUID) else UUID(workspace_id)
+            
+            # Verify user has access to this workspace
+            user_workspace_ids = []
+            async for membership in Membership.objects.filter(
+                user=request.user,
+                status=MembershipStatus.ACTIVE
+            ):
+                user_workspace_ids.append(membership.workspace_id)
+            
+            if workspace_uuid not in user_workspace_ids:
+                raise PermissionDenied("You don't have access to this workspace.")
+            
+            # Lookup project in the specific workspace
+            project = await Project.objects.select_related('workspace').filter(
+                name=project_name,
+                workspace_id=workspace_uuid
+            ).afirst()
         else:
-            # Name lookup - scope to user's workspaces
+            # Name lookup - scope to user's workspaces (legacy behavior)
             user_workspace_ids = []
             async for membership in Membership.objects.filter(
                 user=request.user,
@@ -186,18 +207,26 @@ class IsProjectOwnerOrAdminAsync(BasePermission):
         if request.method in ['GET', 'HEAD', 'OPTIONS']:
             return True
         
-        # Support both project_name and project_id
+        # Support project_name, project_id, and workspace_id
         project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
+        workspace_id = view.kwargs.get('workspace_id')
         
         if not project_name and not project_id:
             return True
         
-        # Get project by name or ID
-        if project_name:
-            project = await Project.objects.select_related('workspace').filter(name=project_name).afirst()
-        else:
+        # Get project by ID, workspace+name, or just name
+        if project_id:
             project = await Project.objects.select_related('workspace').filter(id=project_id).afirst()
+        elif workspace_id:
+            # Normalize workspace_id to UUID
+            workspace_uuid = workspace_id if isinstance(workspace_id, UUID) else UUID(workspace_id)
+            project = await Project.objects.select_related('workspace').filter(
+                name=project_name,
+                workspace_id=workspace_uuid
+            ).afirst()
+        else:
+            project = await Project.objects.select_related('workspace').filter(name=project_name).afirst()
         
         if not project:
             raise PermissionDenied("Project not found.")
