@@ -395,6 +395,18 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
         is_personal = current_workspace.type == WorkspaceType.PERSONAL
         
         if is_personal:
+            # Validate required fields for migration
+            if not data.get('encrypted_workspace_key_owner'):
+                return CustomResponse.error(
+                    message="encrypted_workspace_key_owner is required when migrating from personal workspace",
+                    status_code=400
+                )
+            if not data.get('secrets'):
+                return CustomResponse.error(
+                    message="secrets are required when migrating from personal workspace",
+                    status_code=400
+                )
+            
             # Create new shared workspace
             new_workspace = await Workspace.objects.acreate(
                 name=project.name,
@@ -402,7 +414,7 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
                 type=WorkspaceType.SHARED
             )
             
-            # Create owner membership
+            # Create owner membership with new key
             await Membership.objects.acreate(
                 user=request.user,
                 workspace=new_workspace,
@@ -415,20 +427,20 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
             project.workspace = new_workspace
             await project.asave()
             
-            # Update secrets if provided (CLI re-encrypted them)
-            if data.get('secrets'):
-                for secret_item in data['secrets']:
-                    key = secret_item['key']
-                    value = secret_item['value']
-                    
-                    # Apply API encryption layer
-                    encrypted_value = encryption_service.encrypt(value)
-                    
-                    # Update existing secret
-                    secret = await Secret.objects.filter(project=project, key=key).afirst()
-                    if secret:
-                        secret.value = encrypted_value
-                        await secret.asave()
+            # Update secrets with CLI-provided re-encrypted values
+            for secret_item in data['secrets']:
+                key = secret_item['key']
+                value = secret_item['value']
+                
+                # Apply API encryption layer
+                encrypted_value = encryption_service.encrypt(value)
+                
+                # Update or create secret
+                secret, created = await Secret.objects.aupdate_or_create(
+                    project=project,
+                    key=key,
+                    defaults={'value': encrypted_value}
+                )
             
             workspace_for_invite = new_workspace
         else:

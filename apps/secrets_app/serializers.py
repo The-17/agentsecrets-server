@@ -162,14 +162,18 @@ class ProjectInviteSerializer(serializers.Serializer):
         default='member',
         help_text="Role for the invitee in the shared workspace"
     )
-    encrypted_workspace_key_owner = serializers.CharField(
-        help_text="Workspace key encrypted for the project owner (current user)"
-    )
+    # Required for invitee (always)
     encrypted_workspace_key_invitee = serializers.CharField(
         help_text="Workspace key encrypted for the invitee"
     )
+    # Optional - only sent when migrating from personal workspace
+    encrypted_workspace_key_owner = serializers.CharField(
+        required=False,  # ← Make optional
+        allow_blank=True,
+        help_text="Workspace key encrypted for the owner (only for migration)"
+    )
     secrets = SecretItemSerializer(
         many=True,
-        required=False,
-        help_text="Re-encrypted secrets (required when migrating from personal workspace)"
+        required=False,  # ← Already optional, good!
+        help_text="Re-encrypted secrets (only for migration from personal workspace)"
     )
