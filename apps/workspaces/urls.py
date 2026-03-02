@@ -25,6 +25,6 @@ urlpatterns = [
 
     # Allowlist endpoints
     path('workspaces/<uuid:workspace_id>/allowlist/', WorkspaceAllowlistAPIView.as_view(), name='workspace-allowlist'),
-    path('workspaces/<uuid:workspace_id>/allowlist/<str:domain>/', WorkspaceAllowlistDetailAPIView.as_view(), name='workspace-allowlist-detail'),
     path('workspaces/<uuid:workspace_id>/allowlist/log/', WorkspaceAllowlistLogAPIView.as_view(), name='workspace-allowlist-log'),
+    path('workspaces/<uuid:workspace_id>/allowlist/<str:domain>/', WorkspaceAllowlistDetailAPIView.as_view(), name='workspace-allowlist-detail'),
 ]
