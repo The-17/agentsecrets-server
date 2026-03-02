@@ -477,7 +477,7 @@ class UserPublicKeyAPIView(APIView):
     )
     async def get(self, request, email):
         """Get a user's public key"""
-        user = await User.objects.filter(email=email).afirst()
+        user = await User.objects.aget_or_none(email=email)
         
         if not user:
             return CustomResponse.error(

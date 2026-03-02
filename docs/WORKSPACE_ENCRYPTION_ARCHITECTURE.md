@@ -298,12 +298,13 @@ AFTER:
 |    encrypted_for_bob = encrypt_asymmetric(bob_public_key, new_workspace_key)|
 |                                                                          |
 | 4. Send to API:                                                         |
-|    POST /api/projects/{project_name}/invite/                            |
+|    POST /api/projects/{workspace_id}/{project_name}/invite/              |
 |    {                                                                     |
 |      "email": "bob@example.com",                                        |
 |      "role": "member",                                                  |
 |      "encrypted_workspace_key_owner": "base64...",  // For John         |
-|      "encrypted_workspace_key_invitee": "base64..." // For Bob          |
+|      "encrypted_workspace_key_invitee": "base64...", // For Bob         |
+|      "secrets": [...]  // Re-encrypted secrets for migration            |
 |    }                                                                     |
 +-------------------------------------------------------------------------+
                                     |
@@ -351,7 +352,9 @@ CLI Flow for Project Invite:
 **Project Get Endpoint (Returns Workspace Info):**
 
 ```
-GET /api/projects/{project_name}/
+GET /api/projects/{workspace_id}/{project_name}/
+
+Note: Project names are case-insensitive (normalized to lowercase).
 
 Response:
 {
@@ -471,9 +474,9 @@ This protects against:
 |----------|---------|------------|
 | `POST /api/auth/register/` | Creates user | + Creates personal workspace + membership |
 | `POST /api/auth/login/` | Returns tokens | + Returns workspaces with encrypted keys |
-| `POST /api/secrets/` | Encrypts on server | CLI encrypts, server just stores |
-| `GET /api/secrets/{project_id}/` | Decrypts on server | Server returns as-is, CLI decrypts |
-| `GET /api/projects/{project_name}/` | Returns project | + Returns workspace info for auto-switch |
+| `POST /api/secrets/` | Encrypts on server | CLI encrypts, API adds second layer (double encryption) |
+| `GET /api/secrets/{project_id}/` | Decrypts on server | Server removes API layer, returns CLI-encrypted blobs |
+| `GET /api/projects/{workspace_id}/{project_name}/` | Returns project | + Workspace-scoped URL, case-insensitive name |
 
 ### New Endpoints
 
@@ -488,7 +491,7 @@ This protects against:
 | `/api/workspaces/{id}/members/` | POST | Add member (workspace invite) |
 | `/api/workspaces/{id}/members/{user_id}/` | PATCH | Update member role |
 | `/api/workspaces/{id}/members/{user_id}/` | DELETE | Remove member |
-| `/api/projects/{project_name}/invite/` | POST | **Project invite** - auto-creates shared workspace |
+| `/api/projects/{workspace_id}/{project_name}/invite/` | POST | **Project invite** - auto-creates shared workspace |
 | `/api/users/{email}/public-key/` | GET | Get user's public key for invites |
 
 ---
@@ -519,7 +522,7 @@ class User(BaseModel):
 class Workspace(BaseModel):
     name = models.CharField(max_length=255)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_workspaces')
-    type = models.CharField(choices=[('personal', 'Personal'), ('team', 'Team')], default='team')
+    type = models.CharField(choices=[('personal', 'Personal'), ('shared', 'Shared')], default='shared')
     
     class Meta:
         db_table = 'workspaces'

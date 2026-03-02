@@ -185,3 +185,4 @@ class CanWriteToWorkspaceAsync(BasePermission):
             return False
             
         return membership.role != MembershipRole.READ_ONLY
+

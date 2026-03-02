@@ -11,7 +11,10 @@ from apps.accounts.models import User
 from apps.common.response import CustomResponse
 from apps.common.serializers import ErrorResponseSerializer, SuccessResponseSerializer
 from .mixins import WorkspaceMixin
-from .models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
+from .models import (
+    Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
+    WorkspaceAllowlist, WorkspaceAllowlistLog
+)
 from .serializers import (
     WorkspaceSerializer,
     WorkspaceCreateSerializer,
@@ -19,7 +22,10 @@ from .serializers import (
     WorkspaceUpdateSerializer,
     MemberInviteSerializer,
     MemberUpdateSerializer,
+    WorkspaceAllowlistSerializer,
+    WorkspaceAllowlistLogSerializer,
 )
+from .permissions import IsWorkspaceAdminOrOwnerAsync
 
 
 logger = logging.getLogger("apps.workspaces")
@@ -502,3 +508,157 @@ class WorkspaceMemberDetailAPIView(APIView, WorkspaceMixin):
         logger.info(f"User {request.user.id} removed {user_id} from workspace {workspace_id}")
         
         return CustomResponse.success(message=f"Member {removed_email} removed from workspace", status_code=200)
+
+
+class WorkspaceAllowlistAPIView(APIView, WorkspaceMixin):
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated(), IsWorkspaceAdminOrOwnerAsync()]
+        return [IsAuthenticated()]
+
+    @extend_schema(tags=["Workspaces"], summary="List Allowlist")
+    async def get(self, request, workspace_id):
+        """List all allowed domains for a workspace. Any member can view."""
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or no access", status_code=404)
+            
+        allowlist = []
+        async for entry in WorkspaceAllowlist.objects.filter(workspace_id=workspace_id).select_related('added_by'):
+            allowlist.append(entry)
+            
+        serializer = WorkspaceAllowlistSerializer(allowlist, many=True)
+        return CustomResponse.success("Allowlist retrieved", data=serializer.data, status_code=200)
+
+    @extend_schema(tags=["Workspaces"], summary="Add to Allowlist", request=WorkspaceAllowlistSerializer)
+    async def post(self, request, workspace_id):
+        """Add a domain. Admin only."""
+        serializer = WorkspaceAllowlistSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        domain = serializer.validated_data['domain']
+
+        if await WorkspaceAllowlist.objects.filter(workspace_id=workspace_id, domain=domain).aexists():
+            return CustomResponse.error(message=f"{domain} is already in the allowlist.", status_code=400)
+
+        entry = await WorkspaceAllowlist.objects.acreate(
+            workspace_id=workspace_id,
+            domain=domain,
+            added_by=request.user
+        )
+
+        await WorkspaceAllowlistLog.objects.acreate(
+            workspace_id=workspace_id,
+            domain=domain,
+            action='added',
+            performed_by=request.user
+        )
+
+        return CustomResponse.success(
+            "Domain added to allowlist",
+            data=WorkspaceAllowlistSerializer(entry).data,
+            status_code=201
+        )
+
+
+class WorkspaceAllowlistDetailAPIView(APIView, WorkspaceMixin):
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsAuthenticated(), IsWorkspaceAdminOrOwnerAsync()]
+        return [IsAuthenticated()]
+
+    @extend_schema(tags=["Workspaces"], summary="Remove from Allowlist")
+    async def delete(self, request, workspace_id, domain):
+        """Remove a domain. Admin only."""
+        entry = await WorkspaceAllowlist.objects.filter(
+            workspace_id=workspace_id,
+            domain=domain.lower()
+        ).afirst()
+        
+        if not entry:
+            return CustomResponse.error(message=f"{domain} is not in the allowlist.", status_code=404)
+
+        await entry.adelete()
+
+        await WorkspaceAllowlistLog.objects.acreate(
+            workspace_id=workspace_id,
+            domain=domain.lower(),
+            action='removed',
+            performed_by=request.user
+        )
+
+        return CustomResponse.success("Domain removed from allowlist", status_code=200)
+
+
+class WorkspaceAllowlistLogAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(tags=["Workspaces"], summary="View Allowlist Logs")
+    async def get(self, request, workspace_id):
+        """View allowlist change history. Any member can view."""
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or no access", status_code=404)
+
+        logs = []
+        async for log in WorkspaceAllowlistLog.objects.filter(workspace_id=workspace_id).select_related('performed_by'):
+            logs.append(log)
+            
+        serializer = WorkspaceAllowlistLogSerializer(logs, many=True)
+        return CustomResponse.success("Logs retrieved", data=serializer.data, status_code=200)
+
+
+class WorkspaceMemberRoleAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(tags=["Workspaces"], summary="Change Member Role")
+    async def post(self, request, workspace_id, user_id):
+        """
+        Promote or demote a workspace member.
+        Action: 'promote' or 'demote'
+        Admin only.
+        """
+        user_membership, target_membership = await self.get_memberships(
+            request.user, workspace_id, user_id
+        )
+
+        if not user_membership:
+            return CustomResponse.error(message="Workspace not found or no access", status_code=404)
+
+        if user_membership.role != MembershipRole.ADMIN and user_membership.role != MembershipRole.OWNER:
+            return CustomResponse.error(message="Only admins/owners can change member roles.", status_code=403)
+
+        action = request.data.get('action')
+        if action not in ['promote', 'demote']:
+            return CustomResponse.error(message="Action must be promote or demote.", status_code=400)
+
+        if not target_membership:
+            return CustomResponse.error(message="User is not a member of this workspace.", status_code=404)
+
+        if action == 'demote':
+            if target_membership.role == MembershipRole.ADMIN or target_membership.role == MembershipRole.OWNER:
+                admin_count = await Membership.objects.filter(
+                    workspace_id=workspace_id,
+                    role__in=[MembershipRole.ADMIN, MembershipRole.OWNER],
+                    status=MembershipStatus.ACTIVE
+                ).acount()
+                if admin_count <= 1:
+                    return CustomResponse.error(
+                        message="You are the only admin in this workspace. Promote another member before demoting yourself.",
+                        status_code=400
+                    )
+            target_membership.role = MembershipRole.MEMBER
+
+        if action == 'promote':
+            target_membership.role = MembershipRole.ADMIN
+
+        await target_membership.asave()
+
+        return CustomResponse.success(
+            f"User is now a {target_membership.role}",
+            data={
+                'user_id': str(target_membership.user.id),
+                'role': target_membership.role,
+            },
+            status_code=200
+        )
+

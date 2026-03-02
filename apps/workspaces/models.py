@@ -107,3 +107,53 @@ class Membership(BaseModel):
             models.Index(fields=['user', 'status']),
             models.Index(fields=['workspace', 'role']),
         ]
+
+
+class WorkspaceAllowlist(models.Model):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='allowlist'
+    )
+    domain = models.CharField(max_length=253)  # max domain length per RFC
+    added_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('workspace', 'domain')
+        ordering = ['added_at']
+
+    def __str__(self):
+        return f"{self.domain} in {self.workspace.name}"
+
+
+class WorkspaceAllowlistLog(models.Model):
+    ACTION_CHOICES = [
+        ('added', 'Added'),
+        ('removed', 'Removed'),
+    ]
+
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='allowlist_logs'
+    )
+    domain = models.CharField(max_length=253)
+    action = models.CharField(max_length=10, choices=ACTION_CHOICES)
+    performed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True
+    )
+    performed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-performed_at']
+
+    def __str__(self):
+        return f"{self.action} {self.domain} in {self.workspace.name}"
+

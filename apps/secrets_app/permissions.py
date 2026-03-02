@@ -32,7 +32,10 @@ class IsProjectMember(BasePermission):
         project_name = view.kwargs.get('project_name')
         workspace_id = view.kwargs.get('workspace_id') 
         
-        if not project_name:
+        # Normalize project name to lowercase for case-insensitive matching
+        if project_name:
+            project_name = project_name.lower()
+        else:
             return True
         
         # Get user's workspace IDs
@@ -89,6 +92,10 @@ class IsProjectMemberAsync(BasePermission):
         project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
         workspace_id = view.kwargs.get('workspace_id')
+        
+        # Normalize project name to lowercase for case-insensitive matching
+        if project_name:
+            project_name = project_name.lower()
         
         if not project_name and not project_id:
             return True
@@ -168,7 +175,10 @@ class IsProjectOwnerOrAdmin(BasePermission):
         
         project_name = view.kwargs.get('project_name')
         
-        if not project_name:
+        # Normalize project name to lowercase for case-insensitive matching
+        if project_name:
+            project_name = project_name.lower()
+        else:
             return True
         
         try:
@@ -211,6 +221,10 @@ class IsProjectOwnerOrAdminAsync(BasePermission):
         project_name = view.kwargs.get('project_name')
         project_id = view.kwargs.get('project_id')
         workspace_id = view.kwargs.get('workspace_id')
+        
+        # Normalize project name to lowercase for case-insensitive matching
+        if project_name:
+            project_name = project_name.lower()
         
         if not project_name and not project_id:
             return True

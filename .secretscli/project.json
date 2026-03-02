@@ -1,11 +1,10 @@
 {
-  "project_id": "54bef878-d9e8-4c20-a6b6-eab4440a24d0",
-  "project_name": "secretsAPI",
+  "project_id": "0a966b6b-a7ed-4903-bf35-5e9442705c5d",
+  "project_name": "SecretsAPI",
   "description": null,
   "environment": "development",
-  "workspace_id": "ba682479-b6d4-4029-a41d-65b08276d524",
-  "workspace_name": "big's Workspace",
-  "workspace_key": "UFNhcDZTYnA0QUhJNjlFVkFmSkQwc1V0UDd4RVRrTUVadXRSSHZhZHZBZz0=",
+  "workspace_id": "6b7d6b8a-0064-4b5d-ba84-50aec1427b51",
+  "workspace_name": "Big's Workspace",
   "last_pull": null,
   "last_push": null
 }

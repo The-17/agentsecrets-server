@@ -2,7 +2,10 @@
 from rest_framework import serializers
 
 # Local
-from .models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
+from .models import (
+    Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
+    WorkspaceAllowlist, WorkspaceAllowlistLog
+)
 
 
 class WorkspaceSerializer(serializers.Serializer):
@@ -80,3 +83,38 @@ class PublicKeySerializer(serializers.Serializer):
     """Serializer for returning a user's public key"""
     email = serializers.EmailField()
     public_key = serializers.CharField()
+
+
+class WorkspaceAllowlistSerializer(serializers.ModelSerializer):
+    added_by_email = serializers.EmailField(
+        source='added_by.email',
+        read_only=True
+    )
+
+    class Meta:
+        model = WorkspaceAllowlist
+        fields = ['id', 'domain', 'added_by_email', 'added_at']
+        read_only_fields = ['id', 'added_by_email', 'added_at']
+
+    def validate_domain(self, value):
+        # Strip protocol if user accidentally includes it
+        value = value.replace('https://', '').replace('http://', '')
+        # Strip trailing slashes and paths
+        value = value.split('/')[0]
+        # Basic domain format validation
+        import re
+        pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
+        if not re.match(pattern, value):
+            raise serializers.ValidationError("Invalid domain format.")
+        return value.lower()
+
+
+class WorkspaceAllowlistLogSerializer(serializers.ModelSerializer):
+    performed_by_email = serializers.EmailField(
+        source='performed_by.email',
+        read_only=True
+    )
+
+    class Meta:
+        model = WorkspaceAllowlistLog
+        fields = ['domain', 'action', 'performed_by_email', 'performed_at']

@@ -23,13 +23,14 @@ class ProjectCreateSerializer(serializers.Serializer):
         - Minimum 2 characters
         - Maximum 255 characters
         - Only letters, numbers, hyphens, and underscores
+        - Normalized to lowercase for case-insensitive uniqueness
         """
-        value = value.strip()
+        value = value.strip().lower()
         
         if len(value) < 2:
             raise serializers.ValidationError("Project name must be at least 2 characters")
 
-        if not re.match(r'^[a-zA-Z0-9_-]+$', value):
+        if not re.match(r'^[a-z0-9_-]+$', value):
             raise serializers.ValidationError("Project name can only contain letters, numbers, hyphens, and underscores")
         
         return value

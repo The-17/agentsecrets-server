@@ -204,10 +204,17 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
+                name="workspace_id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                description="UUID of the workspace (optional - for disambiguation)",
+                required=False
+            ),
+            OpenApiParameter(
                 name="project_name",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="Name of the project"
+                description="Name of the project (case-insensitive)"
             )
         ],
         responses={
@@ -241,10 +248,17 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
+                name="workspace_id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                description="UUID of the workspace (optional - for disambiguation)",
+                required=False
+            ),
+            OpenApiParameter(
                 name="project_name",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="Name of the project"
+                description="Name of the project (case-insensitive)"
             )
         ],
         request=ProjectCreateSerializer,
@@ -302,10 +316,17 @@ class ProjectDetailAPIView(APIView, ProjectsMixin):
         """,
         parameters=[
             OpenApiParameter(
+                name="workspace_id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                description="UUID of the workspace (optional - for disambiguation)",
+                required=False
+            ),
+            OpenApiParameter(
                 name="project_name",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="Name of the project to delete"
+                description="Name of the project to delete (case-insensitive)"
             )
         ],
     )
@@ -363,10 +384,16 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
         """,
         parameters=[
             OpenApiParameter(
+                name="workspace_id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.PATH,
+                description="UUID of the workspace containing the project"
+            ),
+            OpenApiParameter(
                 name="project_name",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="Name of the project to invite to"
+                description="Name of the project to invite to (case-insensitive)"
             )
         ],
         responses={
