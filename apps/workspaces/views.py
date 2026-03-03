@@ -23,6 +23,7 @@ from .serializers import (
     MemberInviteSerializer,
     MemberUpdateSerializer,
     WorkspaceAllowlistSerializer,
+    WorkspaceAllowlistBulkCreateSerializer,
     WorkspaceAllowlistLogSerializer,
 )
 from .permissions import IsWorkspaceAdminOrOwnerAsync
@@ -530,32 +531,47 @@ class WorkspaceAllowlistAPIView(APIView, WorkspaceMixin):
         serializer = WorkspaceAllowlistSerializer(allowlist, many=True)
         return CustomResponse.success("Allowlist retrieved", data=serializer.data, status_code=200)
 
-    @extend_schema(tags=["Workspaces"], summary="Add to Allowlist", request=WorkspaceAllowlistSerializer)
+    @extend_schema(tags=["Workspaces"], summary="Bulk Add to Allowlist", request=WorkspaceAllowlistBulkCreateSerializer)
     async def post(self, request, workspace_id):
-        """Add a domain. Admin only."""
-        serializer = WorkspaceAllowlistSerializer(data=request.data)
+        """Add one or more domains. Admin only."""
+        serializer = WorkspaceAllowlistBulkCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        domain = serializer.validated_data['domain']
+        domains = serializer.validated_data['domains']
 
-        if await WorkspaceAllowlist.objects.filter(workspace_id=workspace_id, domain=domain).aexists():
-            return CustomResponse.error(message=f"{domain} is already in the allowlist.", status_code=400)
+        # Find which domains already exist
+        existing_domains = set()
+        async for entry in WorkspaceAllowlist.objects.filter(workspace_id=workspace_id, domain__in=domains):
+            existing_domains.add(entry.domain)
 
-        entry = await WorkspaceAllowlist.objects.acreate(
-            workspace_id=workspace_id,
-            domain=domain,
-            added_by=request.user
-        )
+        new_domains = [d for d in domains if d not in existing_domains]
 
-        await WorkspaceAllowlistLog.objects.acreate(
-            workspace_id=workspace_id,
-            domain=domain,
-            action='added',
-            performed_by=request.user
-        )
+        if not new_domains:
+            return CustomResponse.error(message="All provided domains are already in the allowlist.", status_code=400)
+
+        # Batch create entries
+        allowlist_objects = [
+            WorkspaceAllowlist(workspace_id=workspace_id, domain=d, added_by=request.user)
+            for d in new_domains
+        ]
+        await WorkspaceAllowlist.objects.abulk_create(allowlist_objects)
+
+        # Batch create logs
+        log_objects = [
+            WorkspaceAllowlistLog(workspace_id=workspace_id, domain=d, action='added', performed_by=request.user)
+            for d in new_domains
+        ]
+        await WorkspaceAllowlistLog.objects.abulk_create(log_objects)
+
+        # Retrieve newly created entries to return
+        new_entries = []
+        async for entry in WorkspaceAllowlist.objects.filter(
+            workspace_id=workspace_id, domain__in=new_domains
+        ).select_related('added_by'):
+            new_entries.append(entry)
 
         return CustomResponse.success(
-            "Domain added to allowlist",
-            data=WorkspaceAllowlistSerializer(entry).data,
+            f"Added {len(new_domains)} domains to allowlist",
+            data=WorkspaceAllowlistSerializer(new_entries, many=True).data,
             status_code=201
         )
 

@@ -109,6 +109,31 @@ class WorkspaceAllowlistSerializer(serializers.ModelSerializer):
         return value.lower()
 
 
+class WorkspaceAllowlistBulkCreateSerializer(serializers.Serializer):
+    domains = serializers.ListField(
+        child=serializers.CharField(max_length=253),
+        allow_empty=False
+    )
+    
+    def validate_domains(self, value):
+        valid_domains = []
+        import re
+        pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
+        
+        for domain in value:
+            # Strip protocol if user accidentally includes it
+            d = domain.replace('https://', '').replace('http://', '')
+            # Strip trailing slashes and paths
+            d = d.split('/')[0]
+            
+            if not re.match(pattern, d):
+                raise serializers.ValidationError(f"Invalid domain format: {domain}")
+            
+            valid_domains.append(d.lower())
+            
+        return list(set(valid_domains))
+
+
 class WorkspaceAllowlistLogSerializer(serializers.ModelSerializer):
     performed_by_email = serializers.EmailField(
         source='performed_by.email',

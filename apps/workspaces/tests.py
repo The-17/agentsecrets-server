@@ -36,16 +36,16 @@ class WorkspaceAllowlistTests(TestCase):
     def test_add_domain_as_admin(self):
         self.client.force_authenticate(user=self.admin_user)
         url = reverse('workspace-allowlist', kwargs={'workspace_id': self.workspace.id})
-        data = {'domain': 'example.com'}
+        data = {'domains': ['example.com', 'example2.com']}
         
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(WorkspaceAllowlist.objects.count(), 1)
+        self.assertEqual(WorkspaceAllowlist.objects.count(), 2)
 
     def test_add_domain_as_member(self):
         self.client.force_authenticate(user=self.member_user)
         url = reverse('workspace-allowlist', kwargs={'workspace_id': self.workspace.id})
-        data = {'domain': 'example.com'}
+        data = {'domains': ['example.com']}
         
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, 403)
@@ -74,16 +74,16 @@ class WorkspaceAllowlistTests(TestCase):
     def test_invalid_domain(self):
         self.client.force_authenticate(user=self.admin_user)
         url = reverse('workspace-allowlist', kwargs={'workspace_id': self.workspace.id})
-        data = {'domain': 'invalid domain space'}
+        data = {'domains': ['invalid domain space']}
         
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, 400)
-        self.assertIn('Invalid domain format.', response.data['message'])
+        self.assertIn('Invalid domain format', str(response.content))
 
     def test_domain_stripping(self):
         self.client.force_authenticate(user=self.admin_user)
         url = reverse('workspace-allowlist', kwargs={'workspace_id': self.workspace.id})
-        data = {'domain': 'https://example.com/api/v1'}
+        data = {'domains': ['https://example.com/api/v1']}
         
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, 201)
