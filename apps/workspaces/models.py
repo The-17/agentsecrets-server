@@ -153,6 +153,9 @@ class WorkspaceAllowlistLog(models.Model):
 
     class Meta:
         ordering = ['-performed_at']
+        indexes = [
+            models.Index(fields=['workspace', '-performed_at']),
+        ]
 
     def __str__(self):
         return f"{self.action} {self.domain} in {self.workspace.name}"

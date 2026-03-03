@@ -534,44 +534,47 @@ class WorkspaceAllowlistAPIView(APIView, WorkspaceMixin):
     @extend_schema(tags=["Workspaces"], summary="Bulk Add to Allowlist", request=WorkspaceAllowlistBulkCreateSerializer)
     async def post(self, request, workspace_id):
         """Add one or more domains. Admin only."""
+        # Validate workspace exists and user has access
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or no access", status_code=404)
+
         serializer = WorkspaceAllowlistBulkCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         domains = serializer.validated_data['domains']
 
-        # Find which domains already exist
+        # Find which domains already exist (fetch only domain strings, not full objects)
         existing_domains = set()
-        async for entry in WorkspaceAllowlist.objects.filter(workspace_id=workspace_id, domain__in=domains):
-            existing_domains.add(entry.domain)
+        async for d in WorkspaceAllowlist.objects.filter(
+            workspace_id=workspace_id, domain__in=domains
+        ).values_list('domain', flat=True):
+            existing_domains.add(d)
 
         new_domains = [d for d in domains if d not in existing_domains]
 
         if not new_domains:
             return CustomResponse.error(message="All provided domains are already in the allowlist.", status_code=400)
 
-        # Batch create entries
+        # Batch create allowlist entries and audit logs
         allowlist_objects = [
             WorkspaceAllowlist(workspace_id=workspace_id, domain=d, added_by=request.user)
             for d in new_domains
         ]
-        await WorkspaceAllowlist.objects.abulk_create(allowlist_objects)
+        created_entries = await WorkspaceAllowlist.objects.abulk_create(allowlist_objects)
 
-        # Batch create logs
         log_objects = [
             WorkspaceAllowlistLog(workspace_id=workspace_id, domain=d, action='added', performed_by=request.user)
             for d in new_domains
         ]
         await WorkspaceAllowlistLog.objects.abulk_create(log_objects)
 
-        # Retrieve newly created entries to return
-        new_entries = []
-        async for entry in WorkspaceAllowlist.objects.filter(
-            workspace_id=workspace_id, domain__in=new_domains
-        ).select_related('added_by'):
-            new_entries.append(entry)
-
+        # Serialize directly from created objects (no re-query needed)
+        for entry in created_entries:
+            entry.added_by = request.user
+        
         return CustomResponse.success(
-            f"Added {len(new_domains)} domains to allowlist",
-            data=WorkspaceAllowlistSerializer(new_entries, many=True).data,
+            f"Added {len(new_domains)} domain(s) to allowlist",
+            data=WorkspaceAllowlistSerializer(created_entries, many=True).data,
             status_code=201
         )
 
@@ -585,6 +588,11 @@ class WorkspaceAllowlistDetailAPIView(APIView, WorkspaceMixin):
     @extend_schema(tags=["Workspaces"], summary="Remove from Allowlist")
     async def delete(self, request, workspace_id, domain):
         """Remove a domain. Admin only."""
+        # Validate workspace exists and user has access
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or no access", status_code=404)
+
         entry = await WorkspaceAllowlist.objects.filter(
             workspace_id=workspace_id,
             domain=domain.lower()

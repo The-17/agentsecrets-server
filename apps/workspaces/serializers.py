@@ -1,3 +1,6 @@
+# Standard library
+import re
+
 # Third-party
 from rest_framework import serializers
 
@@ -5,6 +8,12 @@ from rest_framework import serializers
 from .models import (
     Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
     WorkspaceAllowlist, WorkspaceAllowlistLog
+)
+
+# Pre-compiled domain validation pattern (RFC 1035 compliant)
+DOMAIN_PATTERN = re.compile(
+    r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?'
+    r'(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
 )
 
 
@@ -101,10 +110,8 @@ class WorkspaceAllowlistSerializer(serializers.ModelSerializer):
         value = value.replace('https://', '').replace('http://', '')
         # Strip trailing slashes and paths
         value = value.split('/')[0]
-        # Basic domain format validation
-        import re
-        pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
-        if not re.match(pattern, value):
+        # Domain format validation
+        if not DOMAIN_PATTERN.match(value):
             raise serializers.ValidationError("Invalid domain format.")
         return value.lower()
 
@@ -117,8 +124,6 @@ class WorkspaceAllowlistBulkCreateSerializer(serializers.Serializer):
     
     def validate_domains(self, value):
         valid_domains = []
-        import re
-        pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
         
         for domain in value:
             # Strip protocol if user accidentally includes it
@@ -126,7 +131,7 @@ class WorkspaceAllowlistBulkCreateSerializer(serializers.Serializer):
             # Strip trailing slashes and paths
             d = d.split('/')[0]
             
-            if not re.match(pattern, d):
+            if not DOMAIN_PATTERN.match(d):
                 raise serializers.ValidationError(f"Invalid domain format: {domain}")
             
             valid_domains.append(d.lower())
