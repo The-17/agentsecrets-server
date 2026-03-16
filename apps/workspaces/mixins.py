@@ -30,10 +30,8 @@ class WorkspaceMixin:
     
     async def get_user_workspaces(self, user):
         """Get all active workspaces for a user"""
-        memberships = []
-        async for membership in Membership.objects.filter(
-            user=user,
-            status=MembershipStatus.ACTIVE
-        ).select_related('workspace'):
-            memberships.append(membership)
-        return memberships
+        return [
+            m async for m in Membership.objects.filter(
+                user=user, status=MembershipStatus.ACTIVE
+            ).select_related('workspace')
+        ]

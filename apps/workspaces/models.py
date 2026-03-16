@@ -1,3 +1,9 @@
+# Standard library
+import os
+import urllib.parse
+import ulid
+import base62
+
 # Django
 from django.db import models
 
@@ -159,4 +165,153 @@ class WorkspaceAllowlistLog(models.Model):
 
     def __str__(self):
         return f"{self.action} {self.domain} in {self.workspace.name}"
+
+
+def generate_areg_id():
+    return f"areg_{ulid.new().str.upper()}"
+
+
+def generate_log_id():
+    return f"log_{ulid.new().str.upper()}"
+
+
+class AgentRegistration(models.Model):
+    id = models.CharField(primary_key=True, max_length=31, default=generate_areg_id, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name='agents',
+        help_text="Workspace this agent is registered to"
+    )
+    project = models.ForeignKey(
+        'secrets_app.Project', on_delete=models.CASCADE, related_name='agents',
+        null=True, blank=True,
+        help_text="Project this agent is registered to (if project-scoped)"
+    )
+    name = models.CharField(max_length=64, help_text="Human-readable agent name")
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='created_agents'
+    )
+
+    class Meta:
+        db_table = 'agent_registrations'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['workspace', 'name'],
+                condition=models.Q(project__isnull=True),
+                name='unique_workspace_agent_name'
+            ),
+            models.UniqueConstraint(
+                fields=['project', 'name'],
+                condition=models.Q(project__isnull=False),
+                name='unique_project_agent_name'
+            )
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class AgentToken(models.Model):
+    id = models.CharField(primary_key=True, max_length=100, editable=False)
+    registration = models.ForeignKey(
+        AgentRegistration, on_delete=models.CASCADE, related_name='tokens'
+    )
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name='agent_tokens'
+    )
+    token_hash = models.CharField(max_length=64, help_text="HMAC-SHA256 of the raw token value")
+    label = models.CharField(max_length=255, null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='created_agent_tokens'
+    )
+
+    class Meta:
+        db_table = 'agent_tokens'
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            ws_short = str(self.workspace_id)[:8].lower().replace('-', '')
+            random_bytes = os.urandom(32)
+            b62_str = base62.encodebytes(random_bytes)
+            self.id = f"agt_{ws_short}_{b62_str}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.registration.name} - {self.label or 'token'}"
+
+
+class IdentityLevel(models.TextChoices):
+    ANONYMOUS = 'anonymous', 'Anonymous'
+    DECLARED = 'declared', 'Declared'
+    ISSUED = 'issued', 'Issued'
+
+
+class AuditLogEntry(models.Model):
+    id = models.CharField(primary_key=True, max_length=32, default=generate_log_id, editable=False)
+    schema_version = models.IntegerField(default=1)
+    
+    timestamp = models.DateTimeField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+    
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name='audit_logs'
+    )
+    project = models.ForeignKey(
+        'secrets_app.Project', on_delete=models.CASCADE, related_name='audit_logs',
+        null=True, blank=True
+    )
+    
+    agent_id = models.CharField(max_length=64, null=True, blank=True)
+    agent_token = models.ForeignKey(
+        AgentToken, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='audit_logs'
+    )
+    identity_level = models.CharField(
+        max_length=20, choices=IdentityLevel.choices, default=IdentityLevel.ANONYMOUS
+    )
+    
+    credential_ref = models.CharField(max_length=255)
+    injection_style = models.CharField(max_length=50)
+    
+    target_domain = models.CharField(max_length=253)
+    target_url = models.TextField()
+    target_path = models.TextField()
+    method = models.CharField(max_length=10)
+    
+    status_code = models.IntegerField(null=True, blank=True)
+    duration_ms = models.IntegerField()
+    proxy_duration_ms = models.IntegerField(default=0)
+    
+    redacted = models.BooleanField(default=False)
+    redaction_reason = models.CharField(max_length=255, null=True, blank=True)
+    
+    resolution_path = models.CharField(max_length=50)
+    
+    allowlist_snapshot = models.JSONField(default=dict)
+    caller_role = models.CharField(max_length=50)
+    
+    session_id = models.CharField(max_length=255, null=True, blank=True)
+    policy_snapshot_id = models.CharField(max_length=255, null=True, blank=True)
+    error = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'audit_logs'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['workspace', '-timestamp']),
+            models.Index(fields=['agent_token', '-timestamp']),
+            models.Index(fields=['target_domain', '-timestamp']),
+        ]
+
+    def __str__(self):
+        s = f"{self.identity_level} -> {self.target_domain}"
+        if self.agent_id:
+            s = f"{self.agent_id} ({self.identity_level}) -> {self.target_domain}"
+        return s
 

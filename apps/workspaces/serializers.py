@@ -7,7 +7,8 @@ from rest_framework import serializers
 # Local
 from .models import (
     Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
-    WorkspaceAllowlist, WorkspaceAllowlistLog
+    WorkspaceAllowlist, WorkspaceAllowlistLog,
+    AgentRegistration, AgentToken, AuditLogEntry, IdentityLevel
 )
 
 # Pre-compiled domain validation pattern (RFC 1035 compliant)
@@ -148,3 +149,67 @@ class WorkspaceAllowlistLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkspaceAllowlistLog
         fields = ['domain', 'action', 'performed_by_email', 'performed_at']
+
+
+class AgentRegistrationSerializer(serializers.ModelSerializer):
+    """Serializer for agent registration with token counts"""
+    token_count = serializers.IntegerField(read_only=True)
+    active_token_count = serializers.IntegerField(read_only=True)
+    last_used_at = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = AgentRegistration
+        fields = [
+            'id', 'name', 'project_id',
+            'token_count', 'active_token_count', 'last_used_at',
+            'created_at'
+        ]
+
+
+class AgentRegistrationCreateSerializer(serializers.Serializer):
+    """Serializer for creating an agent registration"""
+    name = serializers.CharField(max_length=64)
+    label = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    expires_in_days = serializers.IntegerField(required=False, min_value=1)
+
+
+class AgentTokenSerializer(serializers.ModelSerializer):
+    """Serializer for returning token metadata"""
+    class Meta:
+        model = AgentToken
+        fields = ['id', 'label', 'expires_at', 'revoked_at', 'last_used_at', 'created_at']
+        read_only_fields = fields
+
+
+class AgentTokenCreateSerializer(serializers.Serializer):
+    """Serializer for issuing an additional token"""
+    label = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    expires_in_days = serializers.IntegerField(required=False, min_value=1)
+
+
+class AuditLogListEntrySerializer(serializers.ModelSerializer):
+    """Serializer for paginated list with fewer details"""
+    class Meta:
+        model = AuditLogEntry
+        fields = [
+            'id', 'timestamp', 'agent_id', 'identity_level', 'credential_ref',
+            'injection_style', 'target_domain', 'target_url', 'method',
+            'status_code', 'duration_ms', 'redacted', 'resolution_path', 'error'
+        ]
+
+
+class AuditLogDetailEntrySerializer(serializers.ModelSerializer):
+    """Serializer for the complete log record"""
+    class Meta:
+        model = AuditLogEntry
+        fields = '__all__'
+
+
+class AuditLogSummarySerializer(serializers.Serializer):
+    """Serializer for aggregated audit log statistics"""
+    period = serializers.DictField()
+    totals = serializers.DictField()
+    by_agent = serializers.ListField(child=serializers.DictField())
+    by_credential = serializers.ListField(child=serializers.DictField())
+    by_domain = serializers.ListField(child=serializers.DictField())
+    anonymous_call_count = serializers.IntegerField()

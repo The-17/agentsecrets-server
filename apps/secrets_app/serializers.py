@@ -88,8 +88,8 @@ class SecretItemSerializer(serializers.Serializer):
         return value
     
     def validate_value(self, value):
-        """Validate that value is not empty"""
-        if not value or not value.strip():
+        """Validate that value is not empty (encrypted blobs are opaque)"""
+        if not value:
             raise serializers.ValidationError("Value cannot be empty")
         
         return value

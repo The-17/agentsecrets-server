@@ -1,10 +1,23 @@
 # Standard library
 import logging
+import hmac
+import hashlib
+import secrets
+import base64
+
+# Django
+from django.shortcuts import get_object_or_404
+from django.db.models import Count, Q
+from django.utils import timezone
+from django.conf import settings
 
 # Third-party
 from adrf.views import APIView
 from drf_spectacular.utils import extend_schema
+from rest_framework import status
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from asgiref.sync import sync_to_async
 
 # Local
 from apps.accounts.models import User
@@ -13,7 +26,8 @@ from apps.common.serializers import ErrorResponseSerializer, SuccessResponseSeri
 from .mixins import WorkspaceMixin
 from .models import (
     Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
-    WorkspaceAllowlist, WorkspaceAllowlistLog
+    WorkspaceAllowlist, WorkspaceAllowlistLog,
+    AgentRegistration, AgentToken, AuditLogEntry, IdentityLevel
 )
 from .serializers import (
     WorkspaceSerializer,
@@ -25,6 +39,10 @@ from .serializers import (
     WorkspaceAllowlistSerializer,
     WorkspaceAllowlistBulkCreateSerializer,
     WorkspaceAllowlistLogSerializer,
+    AgentRegistrationSerializer, AgentRegistrationCreateSerializer,
+    AgentTokenSerializer, AgentTokenCreateSerializer,
+    AuditLogListEntrySerializer, AuditLogDetailEntrySerializer,
+    AuditLogSummarySerializer
 )
 from .permissions import IsWorkspaceAdminOrOwnerAsync
 
@@ -672,7 +690,7 @@ class WorkspaceMemberRoleAPIView(APIView, WorkspaceMixin):
                     )
             target_membership.role = MembershipRole.MEMBER
 
-        if action == 'promote':
+        elif action == 'promote':
             target_membership.role = MembershipRole.ADMIN
 
         await target_membership.asave()
@@ -686,3 +704,385 @@ class WorkspaceMemberRoleAPIView(APIView, WorkspaceMixin):
             status_code=200
         )
 
+
+class AgentListCreateAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request, workspace_id):
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        agents = []
+        async for agent in AgentRegistration.objects.filter(
+            workspace_id=workspace_id,
+            project__isnull=True
+        ).annotate(
+            token_count=Count('tokens'),
+            active_token_count=Count('tokens', filter=Q(tokens__revoked_at__isnull=True))
+        ):
+            agents.append(agent)
+            
+        serializer = AgentRegistrationSerializer(agents, many=True)
+        return CustomResponse.success(data=serializer.data, message="Agents retrieved")
+
+    async def post(self, request, workspace_id):
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error(message="You don't have permission to create agents", status_code=403)
+            
+        serializer = AgentRegistrationCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        agent = await AgentRegistration.objects.acreate(
+            workspace_id=workspace_id,
+            name=serializer.validated_data['name'],
+            created_by=request.user
+        )
+
+        expires_in = serializer.validated_data.get('expires_in_days')
+        expires_at = timezone.now() + timezone.timedelta(days=expires_in) if expires_in else None
+        
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        
+        token = await AgentToken.objects.acreate(
+            registration=agent,
+            workspace_id=workspace_id,
+            token_hash=token_hash,
+            label=serializer.validated_data.get('label'),
+            expires_at=expires_at,
+            created_by=request.user
+        )
+        
+        agent_data = AgentRegistrationSerializer(agent).data
+        agent_data['token_count'] = 1
+        agent_data['active_token_count'] = 1
+        
+        return CustomResponse.success(data={
+            'agent': agent_data,
+            'token': raw_token,
+            'token_id': token.id
+        }, status_code=201, message="Agent created")
+
+class ProjectAgentListCreateAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request, workspace_id, project_id):
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        agents = []
+        async for agent in AgentRegistration.objects.filter(
+            workspace_id=workspace_id,
+            project_id=project_id
+        ).annotate(
+            token_count=Count('tokens'),
+            active_token_count=Count('tokens', filter=Q(tokens__revoked_at__isnull=True))
+        ):
+            agents.append(agent)
+            
+        serializer = AgentRegistrationSerializer(agents, many=True)
+        return CustomResponse.success(data=serializer.data, message="Project agents retrieved")
+
+    async def post(self, request, workspace_id, project_id):
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error(message="You don't have permission to create agents", status_code=403)
+            
+        serializer = AgentRegistrationCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        agent = await AgentRegistration.objects.acreate(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            name=serializer.validated_data['name'],
+            created_by=request.user
+        )
+
+        expires_in = serializer.validated_data.get('expires_in_days')
+        expires_at = timezone.now() + timezone.timedelta(days=expires_in) if expires_in else None
+        
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        
+        token = await AgentToken.objects.acreate(
+            registration=agent,
+            workspace_id=workspace_id,
+            token_hash=token_hash,
+            label=serializer.validated_data.get('label'),
+            expires_at=expires_at,
+            created_by=request.user
+        )
+        
+        agent_data = AgentRegistrationSerializer(agent).data
+        agent_data['token_count'] = 1
+        agent_data['active_token_count'] = 1
+        
+        return CustomResponse.success(data={
+            'agent': agent_data,
+            'token': raw_token,
+            'token_id': token.id
+        }, status_code=201, message="Project agent created")
+
+class AgentTokenListCreateAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request, registration_id):
+        agent = await AgentRegistration.objects.filter(id=registration_id).afirst()
+        if not agent:
+            return CustomResponse.error(message="Agent not found", status_code=404)
+        
+        membership = await self.get_user_membership(request.user, agent.workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        tokens = []
+        async for token in AgentToken.objects.filter(registration_id=registration_id):
+            tokens.append(token)
+            
+        serializer = AgentTokenSerializer(tokens, many=True)
+        return CustomResponse.success(data=serializer.data, message="Agent tokens retrieved")
+
+    async def post(self, request, registration_id):
+        agent = await AgentRegistration.objects.filter(id=registration_id).afirst()
+        if not agent:
+            return CustomResponse.error(message="Agent not found", status_code=404)
+            
+        membership = await self.get_user_membership(request.user, agent.workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error(message="You don't have permission to create tokens", status_code=403)
+            
+        serializer = AgentTokenCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        expires_in = serializer.validated_data.get('expires_in_days')
+        expires_at = timezone.now() + timezone.timedelta(days=expires_in) if expires_in else None
+        
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        
+        token = await AgentToken.objects.acreate(
+            registration=agent,
+            workspace_id=agent.workspace_id,
+            token_hash=token_hash,
+            label=serializer.validated_data.get('label'),
+            expires_at=expires_at,
+            created_by=request.user
+        )
+        
+        return CustomResponse.success(data={
+            'token': raw_token,
+            'token_id': token.id,
+            'token_metadata': AgentTokenSerializer(token).data
+        }, status_code=201, message="Agent token created")
+
+    async def delete(self, request, registration_id):
+        """Bulk delete tokens for an agent registration"""
+        agent = await AgentRegistration.objects.filter(id=registration_id).afirst()
+        if not agent:
+            return CustomResponse.error(message="Agent not found", status_code=404)
+            
+        membership = await self.get_user_membership(request.user, agent.workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error(message="You don't have permission to revoke tokens", status_code=403)
+            
+        await AgentToken.objects.filter(registration_id=registration_id).adelete()
+        return CustomResponse.success(message="All tokens deleted")
+
+class AgentTokenDeleteView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def delete(self, request, registration_id, token_id):
+        agent = await AgentRegistration.objects.filter(id=registration_id).afirst()
+        if not agent:
+            return CustomResponse.error(message="Agent not found", status_code=404)
+            
+        membership = await self.get_user_membership(request.user, agent.workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            return CustomResponse.error(message="You don't have permission to revoke tokens", status_code=403)
+            
+        token = await AgentToken.objects.filter(id=token_id, registration_id=registration_id).afirst()
+        if not token:
+            return CustomResponse.error(message="Token not found", status_code=404)
+            
+        await token.adelete()
+        return CustomResponse.success(message="Token deleted")
+
+class AuditLogListAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request):
+        workspace_id = request.query_params.get('workspace_id')
+        if not workspace_id:
+            return CustomResponse.error(message="workspace_id is required", status_code=400)
+            
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+        
+        logs_qs = AuditLogEntry.objects.filter(workspace_id=workspace_id)
+        
+        project_id = request.query_params.get('project_id')
+        if project_id:
+            logs_qs = logs_qs.filter(project_id=project_id)
+            
+        logs = []
+        async for log in logs_qs.order_by('-timestamp')[:100]:
+            logs.append(log)
+            
+        serializer = AuditLogListEntrySerializer(logs, many=True)
+        return CustomResponse.success(data=serializer.data, message="Audit logs retrieved")
+
+class AuditLogDetailAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request, log_id):
+        log = await AuditLogEntry.objects.filter(id=log_id).select_related('workspace').afirst()
+        if not log:
+            return CustomResponse.error(message="Log not found", status_code=404)
+            
+        membership = await self.get_user_membership(request.user, log.workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+            
+        serializer = AuditLogDetailEntrySerializer(log)
+        return CustomResponse.success(data=serializer.data, message="Audit log detail retrieved")
+
+class AuditLogSummaryAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def get(self, request):
+        workspace_id = request.query_params.get('workspace_id')
+        if not workspace_id:
+            return CustomResponse.error(message="workspace_id is required", status_code=400)
+
+        membership = await self.get_user_membership(request.user, workspace_id)
+        if not membership:
+            return CustomResponse.error(message="Workspace not found or you don't have access", status_code=404)
+
+        # Build base queryset with optional date range
+        qs = AuditLogEntry.objects.filter(workspace_id=workspace_id)
+
+        start = request.query_params.get('start')
+        end = request.query_params.get('end')
+        if start:
+            qs = qs.filter(timestamp__gte=start)
+        if end:
+            qs = qs.filter(timestamp__lte=end)
+
+        # Totals
+        total_requests = await sync_to_async(qs.count)()
+        total_errors = await sync_to_async(qs.filter(status_code__gte=400).count)()
+
+        # By agent
+        by_agent_qs = qs.exclude(agent_id__isnull=True).exclude(agent_id='').values('agent_id').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        by_agent = []
+        async for row in by_agent_qs:
+            by_agent.append({'agent_id': row['agent_id'], 'count': row['count']})
+
+        # By domain
+        by_domain_qs = qs.values('target_domain').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        by_domain = []
+        async for row in by_domain_qs:
+            by_domain.append({'domain': row['target_domain'], 'count': row['count']})
+
+        # By credential
+        by_credential_qs = qs.values('credential_ref').annotate(
+            count=Count('id')
+        ).order_by('-count')
+        by_credential = []
+        async for row in by_credential_qs:
+            by_credential.append({'credential_ref': row['credential_ref'], 'count': row['count']})
+
+        # Anonymous call count
+        anonymous_count = await sync_to_async(
+            qs.filter(identity_level=IdentityLevel.ANONYMOUS).count
+        )()
+
+        return CustomResponse.success(data={
+            'period': {'start': start or 'all', 'end': end or 'all'},
+            'totals': {'requests': total_requests, 'errors': total_errors},
+            'by_agent': by_agent,
+            'by_credential': by_credential,
+            'by_domain': by_domain,
+            'anonymous_call_count': anonymous_count,
+        }, message="Audit log summary retrieved")
+
+class AuditLogExportAPIView(APIView, WorkspaceMixin):
+    permission_classes = [IsAuthenticated]
+
+    async def post(self, request):
+        return CustomResponse.success(data={"job_id": "export_123"}, status_code=202, message="Export started")
+        
+    async def get(self, request):
+        return CustomResponse.success(data={"status": "completed", "download_url": "https://example.com/export.csv"}, message="Export status")
+
+class InternalAgentVerifyAPIView(APIView):
+    async def post(self, request):
+        token_id = request.data.get('token_id')
+        raw_token = request.data.get('token')
+        
+        if not token_id or not raw_token:
+            return Response({"error": "token_id and token are required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        token = await AgentToken.objects.select_related('registration').filter(id=token_id).afirst()
+        if not token:
+            return Response({"valid": False, "reason": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        if not hmac.compare_digest(token_hash, token.token_hash):
+            return Response({"valid": False, "reason": "Invalid token"}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        if token.revoked_at:
+            return Response({"valid": False, "reason": "Revoked"}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        if token.expires_at and token.expires_at < timezone.now():
+            return Response({"valid": False, "reason": "Expired"}, status=status.HTTP_401_UNAUTHORIZED)
+            
+        token.last_used_at = timezone.now()
+        await token.asave(update_fields=['last_used_at'])
+        
+        agent = token.registration
+        return Response({
+            "valid": True,
+            "agent_id": agent.id,
+            "agent_name": agent.name,
+            "workspace_id": str(token.workspace_id)
+        })
+
+class InternalAuditLogCreateAPIView(APIView):
+    async def post(self, request):
+        entries = request.data if isinstance(request.data, list) else [request.data]
+        
+        created_logs = []
+        for entry in entries:
+            log_entry = AuditLogEntry(**entry)
+            created_logs.append(log_entry)
+            
+        await AuditLogEntry.objects.abulk_create(created_logs)
+            
+        return Response(
+            {"created_count": len(created_logs), "ids": [log.id for log in created_logs]}, 
+            status=status.HTTP_201_CREATED
+        )

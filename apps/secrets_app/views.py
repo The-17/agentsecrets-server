@@ -10,7 +10,6 @@ from apps.common.response import CustomResponse
 from apps.common.services.encryption import EncryptionService as encryption_service
 from apps.workspaces.mixins import WorkspaceMixin
 from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
-from apps.workspaces.models import MembershipRole, Workspace
 from .mixins import ProjectsMixin, SecretsMixin
 from .models import Project, Secret
 from .permissions import (
@@ -91,7 +90,7 @@ class ProjectsListCreateAPIView(APIView, ProjectsMixin, WorkspaceMixin):
         
         serializer = self.serializer_class(projects, many=True)
 
-        return CustomResponse.success(message="Projects retreived successfully!", data=serializer.data)
+        return CustomResponse.success(message="Projects retrieved successfully!", data=serializer.data)
     
     @extend_schema(
         tags=["Projects"],

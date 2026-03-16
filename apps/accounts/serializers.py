@@ -38,7 +38,7 @@ class RegisterSerializer(serializers.Serializer):
         if len(last_name.split(" ")) > 1:
             raise serializers.ValidationError({"last_name": "No spacing allowed"})
 
-        if terms_agreement != True:
+        if not terms_agreement:
             raise serializers.ValidationError(
                 {"terms_agreement": "You must agree to terms and conditions"}
             )
@@ -59,7 +59,7 @@ class LoginSerializer(ResendOtpSerializer):
     password = serializers.CharField()
 
 
-class ResetPasswordSerializer(ResendOtpSerializer):
+class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
 
@@ -68,14 +68,26 @@ class SetNewPasswordSerializer(serializers.Serializer):
     confirm_password = serializers.CharField(max_length=30, min_length=8, write_only=True)
     token = serializers.CharField(write_only=True)
     uidb64 = serializers.CharField(write_only=True)
-    
-    class Meta:
-        fields = [
-            'password',
-            'confirm_password',
-            'token',
-            'uidb64'
-        ]
+
+    # Optional crypto fields — CLI sends these if user has recovery codes
+    key_salt = serializers.CharField(required=False, allow_blank=True, help_text="New salt for deriving user_key from new password")
+    encrypted_private_key = serializers.CharField(required=False, allow_blank=True, help_text="Private key re-encrypted with new password-derived key")
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """
+    Serializer for authenticated password change.
+
+    CLI flow:
+    1. User enters current + new password
+    2. CLI derives new user_key from new password
+    3. CLI re-encrypts private_key with new user_key
+    4. CLI sends all fields here
+    """
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(max_length=128, min_length=8, write_only=True)
+    key_salt = serializers.CharField(help_text="New salt for deriving user_key from new password")
+    encrypted_private_key = serializers.CharField(help_text="Private key re-encrypted with new password-derived key")
 
 
 class LogoutSerializer(serializers.Serializer):
@@ -89,7 +101,7 @@ class LogoutSerializer(serializers.Serializer):
         self.token =  attrs.get("refresh_token")
         return attrs
 
-    def save(self, **Kwargs):
+    def save(self, **kwargs):
         try:
             RefreshToken(self.token).blacklist()
         except TokenError:

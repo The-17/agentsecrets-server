@@ -17,7 +17,7 @@ urlpatterns = [
     path('projects/<str:project_name>/', ProjectDetailAPIView.as_view(), name='project-detail'),
     path('projects/<uuid:workspace_id>/<str:project_name>/', ProjectDetailAPIView.as_view(), name='project-detail-workspace'),
     path('projects/<uuid:workspace_id>/<str:project_name>/invite/', ProjectInviteAPIView.as_view(), name='project-invite'),
-    
+    k
     # Secret endpoints
     path('secrets/', SecretsCreateAPIView.as_view(), name='secrets-bulk-create'),
     path('secrets/<uuid:project_id>/', SecretsListAPIView.as_view(), name='secrets-list'),

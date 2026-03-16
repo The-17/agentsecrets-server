@@ -10,7 +10,6 @@ from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils import timezone
 from django.utils.encoding import smart_str
 from django.utils.http import urlsafe_base64_decode
-from django.conf import settings
 
 # Third-party
 from adrf.views import APIView
@@ -33,6 +32,7 @@ from .serializers import (
     ResendOtpSerializer,
     ResetPasswordSerializer,
     SetNewPasswordSerializer,
+    ChangePasswordSerializer,
     LogoutSerializer,
 )
 
@@ -249,7 +249,7 @@ class VerifyEmailAPIView(APIView):
             return CustomResponse.error(message="Verification Failed", status_code=400)
         
         if user.is_email_verified:
-            logger.warning(f"User {user.id} tried to verfiy an already verified email address")
+            logger.warning(f"User {user.id} tried to verify an already verified email address")
             return CustomResponse.error(message="Email already verified", status_code=400)
         
         otp = await OneTimePassword.aget_or_none(code=data["otp"])
@@ -286,7 +286,7 @@ class ResendOtpAPIView(APIView):
             return CustomResponse.error(message="User does not exist", status_code=400)
         
         if user.is_email_verified:
-            logger.warning(f"User {user.id} tried to verfiy an already verified email address")
+            logger.warning(f"User {user.id} tried to verify an already verified email address")
             return CustomResponse.error(message="Email already verified", status_code=400)
 
         # send email
@@ -374,11 +374,75 @@ class SetNewPasswordAPIView(APIView):
             return CustomResponse.error(message="Token is invalid or expired", status_code=400)
 
         user.set_password(data["password"])
+
+        # Update crypto keys if provided (recovery-code flow)
+        if data.get("key_salt"):
+            user.key_salt = encryption_service.encrypt(data["key_salt"])
+        if data.get("encrypted_private_key"):
+            user.encrypted_private_key = data["encrypted_private_key"]
+
         await user.asave()
 
         logger.info(f"user {user.id} password reset successfully")
 
         return CustomResponse.success(message="Password reset successfully")
+
+
+class ChangePasswordAPIView(APIView):
+    """
+    Authenticated password change with crypto key rotation.
+
+    CLI flow:
+    1. User enters current + new password
+    2. CLI derives new user_key from new password + new salt
+    3. CLI re-encrypts private_key with new user_key
+    4. CLI sends current_password, new_password, key_salt, encrypted_private_key
+    """
+    serializer_class = ChangePasswordSerializer
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        tags=tags,
+        summary="Change Password",
+        description="""Change the authenticated user's password and update encryption keys.
+
+        The CLI must:
+        1. Derive a new salt and user_key from the new password
+        2. Re-encrypt the private key with the new user_key
+        3. Send all fields to this endpoint
+
+        This ensures the encryption chain is preserved after a password change.
+        """,
+        request=ChangePasswordSerializer,
+        responses={
+            200: SuccessResponseSerializer,
+            400: ErrorResponseSerializer
+        }
+    )
+    async def patch(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        user = request.user
+
+        # Verify current password
+        is_correct = await sync_to_async(user.check_password, thread_sensitive=True)(data["current_password"])
+        if not is_correct:
+            return CustomResponse.error(message="Current password is incorrect", status_code=400)
+
+        # Set new password
+        await sync_to_async(user.set_password, thread_sensitive=True)(data["new_password"])
+
+        # Update crypto keys
+        user.key_salt = encryption_service.encrypt(data["key_salt"])
+        user.encrypted_private_key = data["encrypted_private_key"]
+
+        await user.asave()
+
+        logger.info(f"User {user.id} changed password successfully")
+
+        return CustomResponse.success(message="Password changed successfully")
 
 
 class LogoutUserAPIView(APIView):
