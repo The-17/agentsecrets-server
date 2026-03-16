@@ -168,11 +168,11 @@ class WorkspaceAllowlistLog(models.Model):
 
 
 def generate_areg_id():
-    return f"areg_{ulid.new().str.upper()}"
+    return f"areg_{str(ulid.ULID())}"
 
 
 def generate_log_id():
-    return f"log_{ulid.new().str.upper()}"
+    return f"log_{str(ulid.ULID())}"
 
 
 class AgentRegistration(models.Model):
