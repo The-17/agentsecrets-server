@@ -175,3 +175,4 @@ cython_debug/
 
 # Audits and Reviews
 SPEC_COMPLIANCE_REVIEW.md
+specs/

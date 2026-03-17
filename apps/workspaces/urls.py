@@ -12,6 +12,7 @@ from .views import (
     WorkspaceAllowlistLogAPIView,
     WorkspaceMemberRoleAPIView,
     AgentListCreateAPIView,
+    AgentDetailAPIView,
     ProjectAgentListCreateAPIView,
     AgentTokenListCreateAPIView,
     AgentTokenDeleteView,
@@ -41,8 +42,9 @@ urlpatterns = [
     # Agent Identity endpoints
     path('workspaces/<uuid:workspace_id>/agents/', AgentListCreateAPIView.as_view(), name='agent-list-create'),
     path('workspaces/<uuid:workspace_id>/projects/<uuid:project_id>/agents/', ProjectAgentListCreateAPIView.as_view(), name='project-agent-list-create'),
-    path('agents/<str:registration_id>/tokens/', AgentTokenListCreateAPIView.as_view(), name='agent-token-list-create'),
-    path('agents/<str:registration_id>/tokens/<str:token_id>/', AgentTokenDeleteView.as_view(), name='agent-token-delete'),
+    path('workspaces/<uuid:workspace_id>/agents/<str:registration_id>/', AgentDetailAPIView.as_view(), name='agent-detail'),
+    path('workspaces/<uuid:workspace_id>/agents/<str:registration_id>/tokens/', AgentTokenListCreateAPIView.as_view(), name='agent-token-list-create'),
+    path('workspaces/<uuid:workspace_id>/agents/<str:registration_id>/tokens/<str:token_id>/', AgentTokenDeleteView.as_view(), name='agent-token-delete'),
 
     # Audit Log endpoints
     path('audit/logs/', AuditLogListAPIView.as_view(), name='audit-log-list'),
