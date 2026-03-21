@@ -63,6 +63,7 @@ class ProjectDetailSerializer(ProjectListSerializer):
 
 
 class SecretItemSerializer(serializers.Serializer):
+    environment = serializers.ChoiceField(choices=['development', 'staging', 'production'], default='development')
     key = serializers.CharField(max_length=255)
     value = serializers.CharField()
     
@@ -111,6 +112,9 @@ class SecretsBulkCreateSerializer(serializers.Serializer):
         """Validate secrets list is not empty"""
         if not value:
             raise serializers.ValidationError("Secrets list cannot be empty")
+            
+        if len(value) > 100:
+            raise serializers.ValidationError("Cannot process more than 100 secrets in a single bulk request")
         
         # Check for duplicate keys
         keys = [s['key'] for s in value]
@@ -130,6 +134,7 @@ class SecretDetailSerializer(serializers.Serializer):
     Serializer for single secret detail operations (get/update/delete).
     """
     id = serializers.UUIDField(read_only=True)
+    environment = serializers.ChoiceField(choices=['development', 'staging', 'production'], required=False, default='development')
     key = serializers.CharField(max_length=255)
     value = serializers.CharField(required=False)
     

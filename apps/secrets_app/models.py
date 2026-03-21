@@ -39,18 +39,20 @@ class Project(BaseModel):
     
 
 class Secret(BaseModel):
+    environment = models.CharField(max_length=20, default='development')
     key = models.CharField(max_length=255)
     value = models.TextField()
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='secrets')
 
     def __str__(self):
-        return f"{self.key} - {self.project.name}"
+        return f"{self.key} - {self.project.name} ({self.environment})"
 
     class Meta:
         db_table = 'secrets'
         ordering = ['key']
-        unique_together = [['project', 'key']]
+        unique_together = [['project', 'environment', 'key']]
         indexes = [
+            models.Index(fields=['project', 'environment']),
             models.Index(fields=['project', 'key']),
             models.Index(fields=['project', '-updated_at']),
         ]

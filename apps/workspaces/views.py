@@ -997,6 +997,10 @@ class AuditLogListAPIView(APIView, WorkspaceMixin):
         if domain:
             logs_qs = logs_qs.filter(target_domain__icontains=domain)
             
+        environment = request.query_params.get('environment')
+        if environment:
+            logs_qs = logs_qs.filter(environment=environment)
+            
         method = request.query_params.get('method')
         if method:
             logs_qs = logs_qs.filter(method=method.upper())
@@ -1168,6 +1172,10 @@ class AuditLogExportAPIView(APIView, WorkspaceMixin):
         if domain:
             logs_qs = logs_qs.filter(target_domain__icontains=domain)
             
+        environment = request.query_params.get('environment')
+        if environment:
+            logs_qs = logs_qs.filter(environment=environment)
+            
         status_code = request.query_params.get('status_code')
         if status_code:
             logs_qs = logs_qs.filter(status_code=status_code)
@@ -1235,7 +1243,8 @@ class InternalAgentVerifyAPIView(APIView):
             "valid": True,
             "agent_id": agent.id,
             "agent_name": agent.name,
-            "workspace_id": str(token.workspace_id)
+            "workspace_id": str(token.workspace_id),
+            "environment": token.environment
         }, status=status.HTTP_200_OK)
 
 class InternalAuditLogCreateAPIView(APIView):

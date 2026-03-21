@@ -48,11 +48,11 @@ class SecretsMixin:
         ]
         return await Secret.objects.abulk_create(secret_objects, batch_size=10, ignore_conflicts=False)
 
-    async def get_project_secrets(self, project):
-        return [s async for s in Secret.objects.filter(project=project)]
+    async def get_project_secrets(self, project, environment='development'):
+        return [s async for s in Secret.objects.filter(project=project, environment=environment)]
 
-    async def get_secret(self, project, key):
-        return await Secret.objects.aget_or_none(project=project, key=key)
+    async def get_secret(self, project, key, environment='development'):
+        return await Secret.objects.aget_or_none(project=project, key=key, environment=environment)
 
-    async def secret_exists(self, project, key):
-        return await Secret.objects.filter(project=project, key=key).aexists()
+    async def secret_exists(self, project, key, environment='development'):
+        return await Secret.objects.filter(project=project, key=key, environment=environment).aexists()

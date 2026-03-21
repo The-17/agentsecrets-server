@@ -610,10 +610,10 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         # Get all incoming keys
         incoming_keys = [item["key"] for item in secrets_data]
         
-        # Fetch ALL existing secrets for these keys
+        # Fetch ALL existing secrets for the project to handle environment matching
         existing_secrets = {}
-        async for secret in Secret.objects.filter(project=project, key__in=incoming_keys):
-            existing_secrets[secret.key] = secret
+        async for secret in Secret.objects.filter(project=project):
+            existing_secrets[(secret.environment, secret.key)] = secret
         
         # Prepare secrets for bulk operations
         to_create = []
@@ -621,6 +621,7 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         encrypted_values = {}  # Store encrypted values for response
         
         for secret_item in secrets_data:
+            environment = secret_item.get("environment", "development")
             key = secret_item["key"]
             value = secret_item["value"]
             
@@ -628,14 +629,15 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
             encrypted_value = encryption_service.encrypt(value)
             encrypted_values[key] = encrypted_value
             
-            if key in existing_secrets:
+            if (environment, key) in existing_secrets:
                 # Update existing secret
-                existing_secrets[key].value = encrypted_value
-                to_update.append(existing_secrets[key])
+                existing_secrets[(environment, key)].value = encrypted_value
+                to_update.append(existing_secrets[(environment, key)])
             else:
                 # Create new secret object
                 to_create.append(Secret(
                     project=project,
+                    environment=environment,
                     key=key,
                     value=encrypted_value
                 ))
@@ -649,24 +651,48 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         if to_update:
             await Secret.objects.abulk_update(to_update, ['value'])
         
-        # Combine all secrets for response
-        all_secrets = created_secrets + to_update
-        decrypted_secrets = []
+        return CustomResponse.success(
+            message=f"Secrets bulk processed",
+            data={
+                "created": len(created_secrets),
+                "updated": len(to_update),
+                "total": len(created_secrets) + len(to_update)
+            }, status_code=201)
+
+class SecretSingleCreateAPIView(APIView, ProjectsMixin):
+    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+    
+    async def post(self, request):
+        project_id = request.data.get("project_id")
+        environment = request.data.get("environment", "development")
+        key = request.data.get("key")
+        value = request.data.get("encrypted_blob")
         
-        for secret in all_secrets:
-            # Return the original value (decrypt API layer for response)
-            decrypted_value = encryption_service.decrypt(secret.value)
-            decrypted_secrets.append({
-                'id': str(secret.id),
-                'key': secret.key,
-                'value': decrypted_value,
-            })
+        if not all([project_id, key, value]):
+            return CustomResponse.error(message="project_id, key, and encrypted_blob are required", status_code=400)
+            
+        if environment not in ['development', 'staging', 'production']:
+            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
+            
+        project = await self.get_project_by_id(project_id)
+        if not project:
+            return CustomResponse.error(message="Project not found", status_code=404)
+            
+        encrypted_value = encryption_service.encrypt(value)
+        
+        secret, created = await Secret.objects.aupdate_or_create(
+            project=project,
+            environment=environment,
+            key=key.upper(),
+            defaults={'value': encrypted_value}
+        )
         
         return CustomResponse.success(
-            message=f"Secrets processed successfully ({len(created_secrets)} created, {len(to_update)} updated)",
+            message="Secret processed successfully",
             data={
-                'project_id': str(project_id),
-                'secrets': decrypted_secrets
+                "id": str(secret.id),
+                "key": secret.key,
+                "environment": secret.environment
             }, status_code=201)
 
 
@@ -738,7 +764,11 @@ class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
         """List all secrets in a project"""
         project = request.project
         
-        secrets = await self.get_project_secrets(project)
+        environment = request.query_params.get('environment', 'development')
+        if environment not in ['development', 'staging', 'production']:
+            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
+            
+        secrets = await self.get_project_secrets(project, environment=environment)
         decrypted_secrets = []
 
         # Decrypt each secret (remove API's encryption layer)
@@ -801,17 +831,22 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def get(self, request, project_id, key):
+    async def get(self, request, project_id, key, environment=None):
         """Get a specific secret"""
         project = request.project
         
         if not project:
             return CustomResponse.error(message="Project not found",status_code=404)
+            
+        if not environment:
+            environment = request.query_params.get('environment', 'development')
+        if environment not in ['development', 'staging', 'production']:
+            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
         
         # Normalize key to uppercase
         key = key.upper()
         
-        secret = await self.get_secret(project=project, key=key)
+        secret = await self.get_secret(project=project, key=key, environment=environment)
         if not secret:
             return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
         
@@ -861,17 +896,22 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
             404: SecretOutputSerializer,
         }
     )
-    async def patch(self, request, project_id, key):
+    async def patch(self, request, project_id, key, environment=None):
         """Update a secret"""
         project = request.project
         
         if not project:
             return CustomResponse.error(message="Project not found",status_code=404)
+            
+        if not environment:
+            environment = request.query_params.get('environment', 'development')
+        if environment not in ['development', 'staging', 'production']:
+            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
        
         # Normalize key
         key = key.upper()
         
-        secret = await self.get_secret(project=project, key=key)
+        secret = await self.get_secret(project=project, key=key, environment=environment)
         if not secret:
             return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
         
@@ -926,23 +966,108 @@ class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
                 )
             ],
     )
-    async def delete(self, request, project_id, key):
+    async def delete(self, request, project_id, key, environment=None):
         """Delete a secret"""
         project = request.project
         
         if not project:
             return CustomResponse.error(message="Project not found",status_code=404)
+            
+        if not environment:
+            environment = request.query_params.get('environment', 'development')
+        if environment not in ['development', 'staging', 'production']:
+            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
         
        
         # Normalize key
         key = key.upper()
         
-        secret = await self.get_secret(project=project, key=key)
+        secret = await self.get_secret(project=project, key=key, environment=environment)
         if not secret:
             return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
         
         await secret.adelete()
 
         return CustomResponse.success(message=f"Secret '{key}' deleted successfully")
+
+class ProjectEnvironmentsAPIView(APIView, ProjectsMixin):
+    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+
+    @extend_schema(tags=["Environments"], summary="Get Environments Info")
+    async def get(self, request, project_id):
+        project = request.project
+        if not project:
+            return CustomResponse.error(message="Project not found", status_code=404)
+            
+        from django.db.models import Count
+        counts = {"development": 0, "staging": 0, "production": 0}
+        
+        async for row in Secret.objects.filter(project=project).values('environment').annotate(count=Count('id')):
+            env = row['environment']
+            if env in counts:
+                counts[env] = row['count']
+                
+        return CustomResponse.success(
+            message="Environment counts retrieved",
+            data={
+                "project_id": str(project_id),
+                "environments": {
+                    "development": {"secret_count": counts["development"]},
+                    "staging": {"secret_count": counts["staging"]},
+                    "production": {"secret_count": counts["production"]}
+                }
+            }
+        )
+
+class ProjectSecretsCoverageAPIView(APIView, ProjectsMixin):
+    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+
+    @extend_schema(tags=["Environments"], summary="Get Secrets Coverage")
+    async def get(self, request, project_id):
+        project = request.project
+        if not project:
+            return CustomResponse.error(message="Project not found", status_code=404)
+            
+        keys_coverage = {}
+        async for secret in Secret.objects.filter(project=project).only('key', 'environment'):
+            if secret.key not in keys_coverage:
+                keys_coverage[secret.key] = {"key_name": secret.key, "development": False, "staging": False, "production": False}
+            if secret.environment in keys_coverage[secret.key]:
+                keys_coverage[secret.key][secret.environment] = True
+                
+        sorted_keys = sorted(keys_coverage.values(), key=lambda x: x["key_name"])
+        return CustomResponse.success(
+            message="Secrets coverage retrieved",
+            data={"project_id": str(project_id), "keys": sorted_keys}
+        )
+
+class ProjectSecretsDiffAPIView(APIView, ProjectsMixin):
+    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+
+    @extend_schema(tags=["Environments"], summary="Compare Environments")
+    async def get(self, request, project_id):
+        project = request.project
+        if not project:
+            return CustomResponse.error(message="Project not found", status_code=404)
+            
+        from_env = request.query_params.get('from', 'development')
+        to_env = request.query_params.get('to', 'production')
+        
+        valid_envs = ['development', 'staging', 'production']
+        if from_env not in valid_envs or to_env not in valid_envs:
+            return CustomResponse.error(message="Invalid from/to environment", status_code=400)
+            
+        from_keys = {s.key async for s in Secret.objects.filter(project=project, environment=from_env).only('key')}
+        to_keys = {s.key async for s in Secret.objects.filter(project=project, environment=to_env).only('key')}
+        
+        return CustomResponse.success(
+            message="Cross-environment diff retrieved",
+            data={
+                "in_from_only": sorted(list(from_keys - to_keys)),
+                "in_to_only": sorted(list(to_keys - from_keys)),
+                "in_both": sorted(list(from_keys.intersection(to_keys)))
+            }
+        )
+
 
 

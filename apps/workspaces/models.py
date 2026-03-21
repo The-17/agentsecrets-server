@@ -220,6 +220,7 @@ class AgentToken(models.Model):
     workspace = models.ForeignKey(
         Workspace, on_delete=models.CASCADE, related_name='agent_tokens'
     )
+    environment = models.CharField(max_length=20, default='development')
     token_hash = models.CharField(max_length=64, help_text="HMAC-SHA256 of the raw token value")
     label = models.CharField(max_length=255, null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
@@ -259,6 +260,7 @@ class AuditLogEntry(models.Model):
     timestamp = models.DateTimeField()
     recorded_at = models.DateTimeField(auto_now_add=True)
     
+    environment = models.CharField(max_length=20, default='development', null=True, blank=True)
     workspace = models.ForeignKey(
         Workspace, on_delete=models.CASCADE, related_name='audit_logs'
     )
