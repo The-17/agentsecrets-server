@@ -7,7 +7,6 @@ from .views import (
     ProjectDetailAPIView,
     ProjectInviteAPIView,
     SecretsCreateAPIView,
-    SecretSingleCreateAPIView,
     SecretsListAPIView,
     SecretDetailAPIView,
     ProjectEnvironmentsAPIView,
@@ -28,8 +27,8 @@ urlpatterns = [
     path('projects/<uuid:project_id>/secrets/diff/', ProjectSecretsDiffAPIView.as_view(), name='project-secrets-diff'),
 
     # Secret endpoints
-    path('secrets/', SecretSingleCreateAPIView.as_view(), name='secrets-single-create'),
-    path('secrets/bulk/', SecretsCreateAPIView.as_view(), name='secrets-bulk-create'),
+    path('secrets/', SecretsCreateAPIView.as_view(), name='secrets-create'),
+    path('secrets/bulk/', SecretsCreateAPIView.as_view(), name='secrets-bulk'), # Optional, kept for compatibility if needed
     path('secrets/<uuid:project_id>/', SecretsListAPIView.as_view(), name='secrets-list'),
     path('secrets/<uuid:project_id>/<str:key>/', SecretDetailAPIView.as_view(), name='secret-detail'),
     path('secrets/<uuid:project_id>/<str:environment>/<str:key>/', SecretDetailAPIView.as_view(), name='secret-detail-env'),

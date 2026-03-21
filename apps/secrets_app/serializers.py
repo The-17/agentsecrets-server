@@ -106,20 +106,26 @@ class SecretOutputSerializer(serializers.Serializer):
 
 class SecretsBulkCreateSerializer(serializers.Serializer):
     project_id = serializers.UUIDField()
-    secrets = SecretItemSerializer(many=True)
+    environment = serializers.ChoiceField(choices=['development', 'staging', 'production'], default='development')
+    secrets = serializers.DictField(child=serializers.CharField())
     
     def validate_secrets(self, value):
-        """Validate secrets list is not empty"""
+        """Validate secrets dictionary is not empty and within limits"""
         if not value:
-            raise serializers.ValidationError("Secrets list cannot be empty")
+            raise serializers.ValidationError("Secrets dictionary cannot be empty")
             
         if len(value) > 100:
-            raise serializers.ValidationError("Cannot process more than 100 secrets in a single bulk request")
+            raise serializers.ValidationError("Cannot process more than 100 secrets in a single request")
         
-        # Check for duplicate keys
-        keys = [s['key'] for s in value]
-        if len(keys) != len(set(keys)):
-            raise serializers.ValidationError("Duplicate secret keys are not allowed")
+        # Check for invalid keys
+        for key in value.keys():
+            key = key.strip().upper()
+            if not key:
+                raise serializers.ValidationError("Key cannot be empty")
+            if not re.match(r'^[A-Z][A-Z0-9_]*$', key):
+                raise serializers.ValidationError(
+                    f"Invalid key '{key}': Must start with a letter and contain only uppercase letters, numbers, and underscores"
+                )
         
         return value
 

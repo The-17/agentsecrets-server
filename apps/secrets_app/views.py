@@ -600,39 +600,34 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
         serializer.is_valid(raise_exception=True)
 
         project_id = serializer.validated_data["project_id"]
+        environment = serializer.validated_data["environment"]
         project = await self.get_project_by_id(project_id)
         
         if not project:
             return CustomResponse.error(message="Project not found", status_code=404)
         
-        secrets_data = serializer.validated_data["secrets"]
+        secrets_dict = serializer.validated_data["secrets"]
+        incoming_keys = [k.upper() for k in secrets_dict.keys()]
         
-        # Get all incoming keys
-        incoming_keys = [item["key"] for item in secrets_data]
-        
-        # Fetch ALL existing secrets for the project to handle environment matching
+        # Fetch existing secrets for this project and environment to update
         existing_secrets = {}
-        async for secret in Secret.objects.filter(project=project):
-            existing_secrets[(secret.environment, secret.key)] = secret
+        async for secret in Secret.objects.filter(project=project, environment=environment, key__in=incoming_keys):
+            existing_secrets[secret.key] = secret
         
         # Prepare secrets for bulk operations
         to_create = []
         to_update = []
-        encrypted_values = {}  # Store encrypted values for response
         
-        for secret_item in secrets_data:
-            environment = secret_item.get("environment", "development")
-            key = secret_item["key"]
-            value = secret_item["value"]
+        for key, value in secrets_dict.items():
+            key = key.upper()
             
             # Encrypt the value (API's encryption layer - Double Encryption)
             encrypted_value = encryption_service.encrypt(value)
-            encrypted_values[key] = encrypted_value
             
-            if (environment, key) in existing_secrets:
+            if key in existing_secrets:
                 # Update existing secret
-                existing_secrets[(environment, key)].value = encrypted_value
-                to_update.append(existing_secrets[(environment, key)])
+                existing_secrets[key].value = encrypted_value
+                to_update.append(existing_secrets[key])
             else:
                 # Create new secret object
                 to_create.append(Secret(
@@ -643,56 +638,24 @@ class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
                 ))
         
         # Bulk create new secrets
-        created_secrets = []
+        created_count = 0
         if to_create:
             created_secrets = await Secret.objects.abulk_create(to_create)
+            created_count = len(created_secrets)
         
         # Bulk update existing secrets
+        updated_count = 0
         if to_update:
             await Secret.objects.abulk_update(to_update, ['value'])
+            updated_count = len(to_update)
         
         return CustomResponse.success(
-            message=f"Secrets bulk processed",
+            message=f"Secrets processed",
             data={
-                "created": len(created_secrets),
-                "updated": len(to_update),
-                "total": len(created_secrets) + len(to_update)
-            }, status_code=201)
-
-class SecretSingleCreateAPIView(APIView, ProjectsMixin):
-    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
-    
-    async def post(self, request):
-        project_id = request.data.get("project_id")
-        environment = request.data.get("environment", "development")
-        key = request.data.get("key")
-        value = request.data.get("value")
-        
-        if not all([project_id, key, value]):
-            return CustomResponse.error(message="project_id, key, and value are required", status_code=400)
-            
-        if environment not in ['development', 'staging', 'production']:
-            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
-            
-        project = await self.get_project_by_id(project_id)
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-            
-        encrypted_value = encryption_service.encrypt(value)
-        
-        secret, created = await Secret.objects.aupdate_or_create(
-            project=project,
-            environment=environment,
-            key=key.upper(),
-            defaults={'value': encrypted_value}
-        )
-        
-        return CustomResponse.success(
-            message="Secret processed successfully",
-            data={
-                "id": str(secret.id),
-                "key": secret.key,
-                "environment": secret.environment
+                "created": created_count,
+                "updated": updated_count,
+                "total": created_count + updated_count,
+                "environment": environment
             }, status_code=201)
 
 
