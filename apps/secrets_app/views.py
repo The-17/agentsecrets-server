@@ -666,10 +666,10 @@ class SecretSingleCreateAPIView(APIView, ProjectsMixin):
         project_id = request.data.get("project_id")
         environment = request.data.get("environment", "development")
         key = request.data.get("key")
-        value = request.data.get("encrypted_blob")
+        value = request.data.get("value")
         
         if not all([project_id, key, value]):
-            return CustomResponse.error(message="project_id, key, and encrypted_blob are required", status_code=400)
+            return CustomResponse.error(message="project_id, key, and value are required", status_code=400)
             
         if environment not in ['development', 'staging', 'production']:
             return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
