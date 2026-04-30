@@ -176,3 +176,8 @@ cython_debug/
 # Audits and Reviews
 SPEC_COMPLIANCE_REVIEW.md
 specs/
+
+# AgentSecrets environment files
+.env.development
+.env.staging
+.env.production

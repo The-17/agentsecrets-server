@@ -18,7 +18,8 @@ class TelemetrySnapshot(BaseModel):
         User,
         on_delete=models.CASCADE,
         related_name='telemetry_snapshots',
-        help_text="The user who sent this telemetry"
+        null=True, blank=True,
+        help_text="The user who sent this telemetry (null if anonymous)"
     )
 
     # CLI environment

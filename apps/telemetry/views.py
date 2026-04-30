@@ -8,6 +8,7 @@ from django.utils import timezone
 # Third-party
 from adrf.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from drf_spectacular.utils import extend_schema
 
 # Local
@@ -29,7 +30,8 @@ class TelemetrySyncAPIView(APIView):
     The CLI collects telemetry locally and syncs every 24 hours.
     This endpoint stores the payload for aggregation and analysis.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle, UserRateThrottle]
     serializer_class = TelemetrySyncSerializer
 
     @extend_schema(exclude=True)
@@ -37,9 +39,11 @@ class TelemetrySyncAPIView(APIView):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        
+        user = request.user if request.user.is_authenticated else None
 
         await TelemetrySnapshot.objects.acreate(
-            user=request.user,
+            user=user,
             cli_version=data.get('cli_version'),
             os=data.get('os'),
             arch=data.get('arch'),
@@ -56,7 +60,8 @@ class TelemetrySyncAPIView(APIView):
             client_timestamp=data.get('timestamp'),
         )
 
-        logger.info(f"Telemetry sync received from user {request.user.id}")
+        user_id = request.user.id if request.user.is_authenticated else "anonymous"
+        logger.info(f"Telemetry sync received from user {user_id}")
 
         return CustomResponse.success(
             message="Telemetry synced successfully",

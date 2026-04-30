@@ -705,6 +705,7 @@ class WorkspaceMemberRoleAPIView(APIView, WorkspaceMixin):
         )
 
 
+@extend_schema(tags=["Agents"])
 class AgentListCreateAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -768,6 +769,7 @@ class AgentListCreateAPIView(APIView, WorkspaceMixin):
             'token_id': token.id
         }, status_code=201, message="Agent created")
 
+@extend_schema(tags=["Agents"])
 class ProjectAgentListCreateAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -832,6 +834,7 @@ class ProjectAgentListCreateAPIView(APIView, WorkspaceMixin):
             'token_id': token.id
         }, status_code=201, message="Project agent created")
 
+@extend_schema(tags=["Agents"])
 class AgentDetailAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -866,6 +869,7 @@ class AgentDetailAPIView(APIView, WorkspaceMixin):
         await agent.adelete()
         return CustomResponse.success(message="Agent deleted")
 
+@extend_schema(tags=["Agents"])
 class AgentTokenListCreateAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -937,6 +941,7 @@ class AgentTokenListCreateAPIView(APIView, WorkspaceMixin):
         await AgentToken.objects.filter(registration_id=registration_id).adelete()
         return CustomResponse.success(message="All tokens deleted")
 
+@extend_schema(tags=["Agents"])
 class AgentTokenDeleteView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -959,6 +964,7 @@ class AgentTokenDeleteView(APIView, WorkspaceMixin):
         await token.adelete()
         return CustomResponse.success(message="Token deleted")
 
+@extend_schema(tags=["Audit Logs"])
 class AuditLogListAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -1055,6 +1061,7 @@ class AuditLogListAPIView(APIView, WorkspaceMixin):
         serializer = AuditLogListEntrySerializer(logs, many=True)
         return CustomResponse.success(data=serializer.data, message="Audit logs retrieved")
 
+@extend_schema(tags=["Audit Logs"])
 class AuditLogDetailAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -1070,6 +1077,7 @@ class AuditLogDetailAPIView(APIView, WorkspaceMixin):
         serializer = AuditLogDetailEntrySerializer(log)
         return CustomResponse.success(data=serializer.data, message="Audit log detail retrieved")
 
+@extend_schema(tags=["Audit Logs"])
 class AuditLogSummaryAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -1137,6 +1145,7 @@ class AuditLogSummaryAPIView(APIView, WorkspaceMixin):
             'anonymous_call_count': anonymous_count,
         }, message="Audit log summary retrieved")
 
+@extend_schema(tags=["Audit Logs"])
 class AuditLogExportAPIView(APIView, WorkspaceMixin):
     permission_classes = [IsAuthenticated]
 
@@ -1213,6 +1222,7 @@ class AuditLogExportAPIView(APIView, WorkspaceMixin):
         response['Content-Disposition'] = f'attachment; filename="audit_log_export_{workspace_id}.jsonl"'
         return response
 
+@extend_schema(tags=["Internal"])
 class InternalAgentVerifyAPIView(APIView):
     async def post(self, request):
         token_id = request.data.get('token_id')
@@ -1247,6 +1257,7 @@ class InternalAgentVerifyAPIView(APIView):
             "environment": token.environment
         }, status=status.HTTP_200_OK)
 
+@extend_schema(tags=["Internal"])
 class InternalAuditLogCreateAPIView(APIView):
     async def post(self, request):
         entries = request.data if isinstance(request.data, list) else [request.data]

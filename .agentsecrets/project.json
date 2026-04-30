@@ -1,0 +1,11 @@
+{
+  "project_id": "dd16b19e-c674-4b9b-9979-c0cd817bad44",
+  "project_name": "secretsapi",
+  "description": "backen api for agentsecrets",
+  "environment": "development",
+  "workspace_id": "e6ff8934-8fb7-46b9-8899-02682b666d2a",
+  "workspace_name": "go's Workspace",
+  "last_pull": "",
+  "last_push": "",
+  "storage_mode": 1
+}
