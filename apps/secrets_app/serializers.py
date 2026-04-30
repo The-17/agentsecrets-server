@@ -186,6 +186,8 @@ class ProjectInviteSerializer(serializers.Serializer):
     )
     secrets = SecretItemSerializer(
         many=True,
-        required=False,  # ← Already optional, good!
-        help_text="Re-encrypted secrets (only for migration from personal workspace)"
+        required=False,
+        default=[],
+        allow_empty=True,
+        help_text="Re-encrypted secrets (only for migration from personal workspace). Empty for new projects with no secrets."
     )

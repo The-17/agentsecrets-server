@@ -427,11 +427,6 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
                     message="encrypted_workspace_key_owner is required when migrating from personal workspace",
                     status_code=400
                 )
-            if not data.get('secrets'):
-                return CustomResponse.error(
-                    message="secrets are required when migrating from personal workspace",
-                    status_code=400
-                )
             
             # Create new shared workspace
             new_workspace = await Workspace.objects.acreate(
@@ -454,17 +449,21 @@ class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
             await project.asave()
             
             # Update secrets with CLI-provided re-encrypted values
-            for secret_item in data['secrets']:
+            # Projects may have no secrets (e.g. newly created) — loop is safely skipped
+            for secret_item in data.get('secrets', []):
                 key = secret_item['key']
                 value = secret_item['value']
+                environment = secret_item.get('environment', 'development')
                 
                 # Apply API encryption layer
                 encrypted_value = encryption_service.encrypt(value)
                 
-                # Update or create secret
+                # Update or create secret — keyed on (project, key, environment)
+                # to handle same-named secrets across different environments
                 secret, created = await Secret.objects.aupdate_or_create(
                     project=project,
                     key=key,
+                    environment=environment,
                     defaults={'value': encrypted_value}
                 )
             
