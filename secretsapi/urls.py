@@ -17,4 +17,8 @@ urlpatterns = [
     path('api/', include('apps.accounts.urls')),
     path('api/', include('apps.secrets_app.urls')),
     path('api/', include('apps.workspaces.urls')),
+
+    # Telemetry (separate from main API — not in Swagger docs)
+    path('telemetry/', include('apps.telemetry.urls')),
 ]
+
