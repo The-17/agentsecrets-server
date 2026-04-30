@@ -1,12 +1,15 @@
 # Django
 from django.contrib import admin
 
+# Third-party
+from unfold.admin import ModelAdmin
+
 # Local
 from .models import Project, Secret
 
 
 @admin.register(Project)
-class ProjectAdmin(admin.ModelAdmin):
+class ProjectAdmin(ModelAdmin):
     list_display = ('name', 'workspace', 'description', 'created_at')
     list_filter = ('created_at',)
     search_fields = ('name', 'workspace__name')
@@ -14,7 +17,7 @@ class ProjectAdmin(admin.ModelAdmin):
 
 
 @admin.register(Secret)
-class SecretAdmin(admin.ModelAdmin):
+class SecretAdmin(ModelAdmin):
     list_display = ('key', 'project', 'environment', 'created_at', 'updated_at')
     list_filter = ('environment', 'created_at')
     search_fields = ('key', 'project__name')

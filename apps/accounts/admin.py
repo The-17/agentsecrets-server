@@ -1,13 +1,16 @@
 # Django
 from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+
+# Third-party
+from unfold.admin import ModelAdmin
+from unfold.admin import UserAdmin as UnfoldUserAdmin
 
 # Local
 from .models import User, OneTimePassword
 
 
 @admin.register(User)
-class UserAdmin(BaseUserAdmin):
+class UserAdmin(UnfoldUserAdmin):
     list_display = ('email', 'first_name', 'last_name', 'auth_provider', 'is_active', 'is_email_verified', 'created_at')
     list_filter = ('auth_provider', 'is_active', 'is_email_verified', 'is_staff', 'created_at')
     search_fields = ('email', 'first_name', 'last_name')
@@ -32,6 +35,6 @@ class UserAdmin(BaseUserAdmin):
 
 
 @admin.register(OneTimePassword)
-class OneTimePasswordAdmin(admin.ModelAdmin):
+class OneTimePasswordAdmin(ModelAdmin):
     list_display = ('user', 'code')
     search_fields = ('user__email',)

@@ -10,7 +10,7 @@ ALLOWED_HOSTS = config("ALLOWED_HOSTS").split(" ")
 
 
 DJANGO_APPS = [
-    'jazzmin',
+    'unfold',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -173,6 +173,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -186,73 +188,29 @@ SIMPLE_JWT = {
 }
 
 # ==========================================
-# JAZZMIN ADMIN CONFIGURATION
+# UNFOLD ADMIN CONFIGURATION
 # ==========================================
 
-JAZZMIN_SETTINGS = {
-    "site_title": "AgentSecrets Admin",
-    "site_header": "AgentSecrets",
-    "site_brand": "AgentSecrets",
-    "welcome_sign": "Welcome to the AgentSecrets Secure Admin",
-    "copyright": "The Seventeen",
-    "search_model": ["accounts.User", "secrets_app.Project"],
-    "user_avatar": "avatar",
-    "topmenu_links": [
-        {"name": "Home", "url": "admin:index", "permissions": ["auth.view_user"]},
-        {"name": "Docs", "url": "https://agentsecrets.theseventeen.co/docs", "new_window": True},
-    ],
-    "show_sidebar": True,
-    "navigation_expanded": False,
-    "hide_apps": [],
-    "hide_models": [],
-    "icons": {
-        "auth": "fas fa-users-cog",
-        "auth.Group": "fas fa-users",
-        "accounts.User": "fas fa-user-shield",
-        "accounts.OneTimePassword": "fas fa-key",
-        
-        "secrets_app.Project": "fas fa-project-diagram",
-        "secrets_app.Secret": "fas fa-user-secret",
-        
-        "workspaces.Workspace": "fas fa-building",
-        "workspaces.Membership": "fas fa-id-badge",
-        "workspaces.WorkspaceAllowlist": "fas fa-shield-alt",
-        "workspaces.WorkspaceAllowlistLog": "fas fa-clipboard-list",
-        "workspaces.AgentRegistration": "fas fa-robot",
-        "workspaces.AgentToken": "fas fa-ticket-alt",
-        "workspaces.AuditLogEntry": "fas fa-history",
-        
-        "telemetry.TelemetrySnapshot": "fas fa-satellite-dish",
-        "telemetry.DailyMetricsAggregate": "fas fa-chart-line",
+UNFOLD = {
+    "SITE_TITLE": "AgentSecrets Admin",
+    "SITE_HEADER": "AgentSecrets",
+    "SITE_BRAND": "AgentSecrets",
+    "SITE_SYMBOL": "shield-check",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": True,
+    "COLORS": {
+        "primary": {
+            "50": "250 250 250",
+            "100": "244 244 245",
+            "200": "228 228 231",
+            "300": "212 212 216",
+            "400": "161 161 170",
+            "500": "113 113 122",
+            "600": "82 82 91",
+            "700": "63 63 70",
+            "800": "39 39 42",
+            "900": "24 24 27",
+            "950": "9 9 11",
+        },
     },
-    "default_icon_parents": "fas fa-chevron-circle-right",
-    "default_icon_children": "fas fa-circle",
-    "related_modal_active": True,
-    "custom_css": None,
-    "custom_js": None,
-    "show_ui_builder": True,
-}
-
-JAZZMIN_UI_TWEAKS = {
-    "theme": "simplex", # The absolute flattest, most minimal Bootswatch theme
-    "dark_mode_theme": None,
-    "navbar": "navbar-white navbar-light",
-    "sidebar": "sidebar-light-primary",
-    "no_navbar_border": True,
-    "sidebar_nav_flat_style": True,
-    "sidebar_nav_compact_style": True,
-    "brand_colour": False,
-    "navbar_small_text": False,
-    "footer_small_text": True,
-    "body_small_text": False,
-    "brand_small_text": False,
-    "sidebar_nav_small_text": False,
-    "sidebar_disable_expand": False,
-    "sidebar_nav_child_indent": False,
-    "sidebar_nav_legacy_style": False,
-    "layout_boxed": False,
-    "footer_fixed": False,
-    "sidebar_fixed": False,
-    "navbar_fixed": False,
-    "accent": "accent-primary",
 }

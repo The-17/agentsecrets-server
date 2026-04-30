@@ -1,12 +1,15 @@
 # Django
 from django.contrib import admin
 
+# Third-party
+from unfold.admin import ModelAdmin
+
 # Local
 from .models import TelemetrySnapshot, DailyMetricsAggregate
 
 
 @admin.register(TelemetrySnapshot)
-class TelemetrySnapshotAdmin(admin.ModelAdmin):
+class TelemetrySnapshotAdmin(ModelAdmin):
     list_display = ('user', 'cli_version', 'os', 'proxy_calls', 'created_at')
     list_filter = ('os', 'cli_version', 'active_environment', 'workspace_type', 'created_at')
     search_fields = ('user__email',)
@@ -15,7 +18,7 @@ class TelemetrySnapshotAdmin(admin.ModelAdmin):
 
 
 @admin.register(DailyMetricsAggregate)
-class DailyMetricsAggregateAdmin(admin.ModelAdmin):
+class DailyMetricsAggregateAdmin(ModelAdmin):
     list_display = (
         'date', 'total_users', 'active_users_daily', 'total_projects',
         'total_secrets', 'total_proxy_calls', 'shared_workspaces'
