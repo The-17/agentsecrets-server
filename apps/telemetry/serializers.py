@@ -20,21 +20,25 @@ class TelemetrySyncSerializer(serializers.Serializer):
     )
 
     # CLI environment (optional — older CLIs won't send these)
-    cli_version = serializers.CharField(max_length=20, required=False)
-    os = serializers.CharField(max_length=50, required=False)
-    arch = serializers.CharField(max_length=20, required=False)
+    cli_version = serializers.CharField(max_length=20, required=False, allow_blank=True, allow_null=True)
+    os = serializers.CharField(max_length=50, required=False, allow_blank=True, allow_null=True)
+    arch = serializers.CharField(max_length=20, required=False, allow_blank=True, allow_null=True)
 
     # Workspace context
     active_environment = serializers.ChoiceField(
         choices=['development', 'staging', 'production'],
-        required=False
+        required=False,
+        allow_blank=True,
+        allow_null=True
     )
     workspace_type = serializers.ChoiceField(
         choices=['personal', 'shared'],
-        required=False
+        required=False,
+        allow_blank=True,
+        allow_null=True
     )
-    workspace_member_count = serializers.IntegerField(min_value=0, required=False)
-    project_secret_count = serializers.IntegerField(min_value=0, required=False)
+    workspace_member_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+    project_secret_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
 
     # Proxy metrics
     proxy_calls = serializers.IntegerField(min_value=0, required=False, default=0)
