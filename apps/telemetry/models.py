@@ -93,7 +93,8 @@ class TelemetrySnapshot(BaseModel):
     )
 
     def __str__(self):
-        return f"{self.user.email} - {self.created_at:%Y-%m-%d %H:%M}"
+        user_display = self.user.email if self.user else "Anonymous"
+        return f"{user_display} - {self.created_at:%Y-%m-%d %H:%M}"
 
     class Meta:
         db_table = 'telemetry_snapshots'
