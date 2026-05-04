@@ -2,15 +2,15 @@
 from django.contrib import admin
 
 # Third-party
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from unfold.admin import ModelAdmin
-from unfold.admin import UserAdmin as UnfoldUserAdmin
 
 # Local
 from .models import User, OneTimePassword
 
 
 @admin.register(User)
-class UserAdmin(UnfoldUserAdmin):
+class UserAdmin(BaseUserAdmin, ModelAdmin):
     list_display = ('email', 'first_name', 'last_name', 'auth_provider', 'is_active', 'is_email_verified', 'created_at')
     list_filter = ('auth_provider', 'is_active', 'is_email_verified', 'is_staff', 'created_at')
     search_fields = ('email', 'first_name', 'last_name')

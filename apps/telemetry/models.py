@@ -132,6 +132,8 @@ class DailyMetricsAggregate(models.Model):
     shared_workspaces = models.IntegerField(default=0)
     total_invites = models.IntegerField(default=0)
     avg_members_per_workspace = models.FloatField(default=0.0)
+    avg_secrets_per_project = models.FloatField(default=0.0)
+    avg_projects_per_workspace = models.FloatField(default=0.0)
 
     # Proxy & security metrics (aggregated from telemetry snapshots)
     total_proxy_calls = models.IntegerField(default=0)

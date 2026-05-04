@@ -58,16 +58,16 @@ class TelemetrySyncSerializer(serializers.Serializer):
     )
 
 
-class PublicMetricsSerializer(serializers.Serializer):
+from .models import DailyMetricsAggregate
+
+
+class PublicMetricsSerializer(serializers.ModelSerializer):
     """
-    Serializer for the public-facing metrics endpoint.
+    Serializer for the platform metrics.
     
-    Powers the website stats display (secrets stored, active projects, etc.).
-    No sensitive data — only aggregate counts.
+    Provides both public vanity stats for the landing page and detailed
+    aggregates for internal monitoring (averages, usage trends, etc.).
     """
-    total_secrets_stored = serializers.IntegerField(read_only=True)
-    active_projects = serializers.IntegerField(read_only=True)
-    total_users = serializers.IntegerField(read_only=True)
-    total_proxy_calls = serializers.IntegerField(read_only=True)
-    shared_workspaces = serializers.IntegerField(read_only=True)
-    total_environments_configured = serializers.IntegerField(read_only=True)
+    class Meta:
+        model = DailyMetricsAggregate
+        fields = '__all__'

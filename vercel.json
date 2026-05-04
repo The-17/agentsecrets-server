@@ -22,5 +22,11 @@
             "src": "/(.*)",
             "dest": "secretsapi/wsgi.py"
         }
+    ],
+    "crons": [
+        {
+            "path": "/telemetry/internal/compute-metrics/",
+            "schedule": "59 23 * * *"
+        }
     ]
 }

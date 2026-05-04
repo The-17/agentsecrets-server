@@ -12,6 +12,9 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from drf_spectacular.utils import extend_schema
 
 # Local
+from asgiref.sync import sync_to_async
+from django.core.management import call_command
+from django.conf import settings
 from apps.common.response import CustomResponse
 from apps.accounts.models import User
 from apps.secrets_app.models import Project, Secret
@@ -84,50 +87,98 @@ class PublicMetricsAPIView(APIView):
 
     @extend_schema(exclude=True)
     async def get(self, request):
-        # Try cached daily aggregate first
+        """
+        Get the cumulative platform metrics report.
+        
+        This returns the lifetime state of the product (totals, averages, and rolling retention)
+        rather than a single day's snapshot.
+        """
+        # Try to get the latest aggregate for the current totals and engagement metrics
         latest = await DailyMetricsAggregate.objects.order_by('-date').afirst()
+        
+        # Calculate cumulative proxy calls across all time
+        proxy_agg = await TelemetrySnapshot.objects.aaggregate(
+            total_calls=Sum('proxy_calls'),
+            total_blocked=Sum('proxy_blocked'),
+            total_redacted=Sum('proxy_redacted')
+        )
 
-        if latest and latest.date == timezone.now().date():
-            # Use pre-computed metrics from today
-            metrics = {
-                'total_secrets_stored': latest.total_secrets,
-                'active_projects': latest.total_projects,
+        if latest:
+            # Use pre-computed totals from the latest aggregate
+            data = {
                 'total_users': latest.total_users,
-                'total_proxy_calls': latest.total_proxy_calls,
+                'total_projects': latest.total_projects,
+                'total_secrets': latest.total_secrets,
+                'total_workspaces': latest.total_workspaces,
                 'shared_workspaces': latest.shared_workspaces,
-                'total_environments_configured': latest.environment_distribution.get('total', 0) if latest.environment_distribution else 0,
+                'total_proxy_calls': proxy_agg.get('total_calls') or 0,
+                'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
+                'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
+                'active_users_weekly': latest.active_users_weekly,
+                'active_users_monthly': latest.active_users_monthly,
+                'avg_secrets_per_project': latest.avg_secrets_per_project,
+                'avg_projects_per_workspace': latest.avg_projects_per_workspace,
+                'avg_members_per_workspace': latest.avg_members_per_workspace,
+                'command_usage_all_time': latest.command_usage,  # Today's command usage as a proxy for trend
+                'environment_distribution': latest.environment_distribution,
+                'integration_usage': latest.integration_usage,
+                'report_generated_at': latest.computed_at
             }
         else:
-            # Fall back to live queries
-            total_secrets = await Secret.objects.acount()
-            total_projects = await Project.objects.acount()
+            # Fall back to live queries if no aggregates exist yet
             total_users = await User.objects.acount()
+            total_projects = await Project.objects.acount()
+            total_secrets = await Secret.objects.acount()
+            total_workspaces = await Workspace.objects.acount()
             shared_workspaces = await Workspace.objects.filter(type=WorkspaceType.SHARED).acount()
 
-            # Total proxy calls from all telemetry snapshots
-            proxy_agg = await TelemetrySnapshot.objects.aaggregate(
-                total=Sum('proxy_calls')
-            )
-            total_proxy_calls = proxy_agg.get('total') or 0
-
-            # Count distinct (project, environment) pairs that have secrets
-            env_count = await Secret.objects.values(
-                'project', 'environment'
-            ).distinct().acount()
-
-            metrics = {
-                'total_secrets_stored': total_secrets,
-                'active_projects': total_projects,
+            data = {
                 'total_users': total_users,
-                'total_proxy_calls': total_proxy_calls,
+                'total_projects': total_projects,
+                'total_secrets': total_secrets,
+                'total_workspaces': total_workspaces,
                 'shared_workspaces': shared_workspaces,
-                'total_environments_configured': env_count,
+                'total_proxy_calls': proxy_agg.get('total_calls') or 0,
+                'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
+                'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
+                'avg_secrets_per_project': round(total_secrets / total_projects) if total_projects > 0 else 0,
+                'avg_projects_per_workspace': round(total_projects / total_workspaces) if total_workspaces > 0 else 0,
+                'report_generated_at': timezone.now()
             }
 
-        serializer = self.serializer_class(metrics)
-
         return CustomResponse.success(
-            message="Platform metrics retrieved",
-            data=serializer.data,
+            message="Cumulative platform report retrieved",
+            data=data,
             status_code=200
         )
+
+
+class InternalComputeMetricsAPIView(APIView):
+    """
+    Internal trigger for Vercel Cron to calculate daily metrics.
+    
+    Expects a CRON_SECRET header for security.
+    """
+    authentication_classes = []  # Disable JWT auth so we can use manual secret check
+    permission_classes = [AllowAny]
+
+    @extend_schema(exclude=True)
+    async def post(self, request):
+        cron_secret = request.headers.get('Authorization')
+        expected_secret = f"Bearer {getattr(settings, 'CRON_SECRET', 'dev-secret')}"
+        
+        if cron_secret != expected_secret:
+            return CustomResponse.error(
+                message="Unauthorized cron trigger",
+                status_code=401
+            )
+
+        # Run the management command in a separate thread to avoid blocking the async loop
+        # and to satisfy Django's sync-only database safety checks.
+        try:
+            await sync_to_async(call_command)('calculate_metrics')
+            return CustomResponse.success(message="Metrics calculated successfully")
+        except Exception as e:
+            logger.error(f"Cron metrics calculation failed: {str(e)}")
+            return CustomResponse.error(message="Metrics calculation failed", status_code=500)
+
