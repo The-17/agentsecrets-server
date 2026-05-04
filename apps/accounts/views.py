@@ -91,7 +91,7 @@ class AuthController:
         if not user:
             raise AuthenticationError("Invalid Credentials")
 
-        tokens = user.tokens()
+        tokens = await sync_to_async(user.tokens)()
         key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
         expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
 
@@ -187,7 +187,7 @@ class AuthController:
     @route.post("/refresh/", response={200: dict, 401: ErrorResponse})
     async def refresh(self, request, data: RefreshTokenSchema):
         try:
-            refresh = RefreshToken(data.refresh)
+            refresh = await sync_to_async(RefreshToken)(data.refresh)
             expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
             return CustomResponse.success(message="Token refreshed successfully", data={
                 "access": str(refresh.access_token), "expires_at": expires_at.isoformat(),
