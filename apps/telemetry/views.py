@@ -68,7 +68,8 @@ class TelemetrySyncAPIView(APIView):
 
         return CustomResponse.success(
             message="Telemetry synced successfully",
-            status_code=200
+            status_code=200,
+            is_drf=True
         )
 
 
@@ -149,7 +150,8 @@ class PublicMetricsAPIView(APIView):
         return CustomResponse.success(
             message="Cumulative platform report retrieved",
             data=data,
-            status_code=200
+            status_code=200,
+            is_drf=True
         )
 
 
@@ -170,15 +172,16 @@ class InternalComputeMetricsAPIView(APIView):
         if cron_secret != expected_secret:
             return CustomResponse.error(
                 message="Unauthorized cron trigger",
-                status_code=401
+                status_code=401,
+                is_drf=True
             )
 
         # Run the management command in a separate thread to avoid blocking the async loop
         # and to satisfy Django's sync-only database safety checks.
         try:
             await sync_to_async(call_command)('calculate_metrics')
-            return CustomResponse.success(message="Metrics calculated successfully")
+            return CustomResponse.success(message="Metrics calculated successfully", is_drf=True)
         except Exception as e:
             logger.error(f"Cron metrics calculation failed: {str(e)}")
-            return CustomResponse.error(message="Metrics calculation failed", status_code=500)
+            return CustomResponse.error(message="Metrics calculation failed", status_code=500, is_drf=True)
 
