@@ -37,7 +37,7 @@ from .schemas import (
 logger = logging.getLogger("apps.accounts")
 
 
-@api_controller("/auth", tags=["Auth"])
+@api_controller("/auth", tags=["Auth"], auth=None)
 class AuthController:
 
     @route.post("/register/", response={201: dict, 422: ErrorResponse})
@@ -195,7 +195,7 @@ class AuthController:
             raise AuthenticationError("Invalid or expired refresh token")
 
 
-@api_controller("/users", tags=["Users"], auth=JWTAuth())
+@api_controller("/users", tags=["Users"], auth=None)
 class UserController:
 
     @route.get("/{email}/public-key/", response={200: dict, 404: ErrorResponse})
