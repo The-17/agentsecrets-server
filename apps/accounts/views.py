@@ -5,11 +5,12 @@ from datetime import timedelta
 
 # Django
 from django.conf import settings
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, aauthenticate
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils import timezone
 from django.utils.encoding import smart_str
 from django.utils.http import urlsafe_base64_decode
+from asgiref.sync import sync_to_async
 
 # Third-party
 from cryptography.fernet import Fernet
@@ -86,7 +87,7 @@ class AuthController:
 
     @route.post("/login/", response={200: dict, 401: ErrorResponse})
     async def login(self, request, data: LoginSchema):
-        user = authenticate(email=data.email, password=data.password)
+        user = await aauthenticate(request, email=data.email, password=data.password)
         if not user:
             raise AuthenticationError("Invalid Credentials")
 
@@ -178,7 +179,7 @@ class AuthController:
     @route.post("/logout/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
     async def logout(self, request, data: LogoutSchema):
         try:
-            RefreshToken(data.refresh_token).blacklist()
+            await sync_to_async(RefreshToken(data.refresh_token).blacklist)()
         except TokenError:
             raise AuthenticationError("Token is invalid or expired")
         return CustomResponse.success(message="Logged out successfully")
