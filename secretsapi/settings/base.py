@@ -24,6 +24,7 @@ THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "drf_spectacular",
+    "ninja_extra",
     # "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
 ]
@@ -176,6 +177,7 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ENCRYPTION_KEY = config("ENCRYPTION_KEY")
+RESOLVER_SERVICE_KEY = config("RESOLVER_SERVICE_KEY", default="")
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),

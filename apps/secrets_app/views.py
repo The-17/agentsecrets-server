@@ -1,1035 +1,334 @@
+# Standard library
+import uuid
+
+# Django
+from django.db.models import Count
+from asgiref.sync import sync_to_async
+
 # Third-party
-from adrf.views import APIView
-from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
-from rest_framework.permissions import IsAuthenticated
+from ninja_extra import api_controller, route
 
 # Local
-from apps.accounts.models import User
+from apps.common.auth import JWTAuth
 from apps.common.response import CustomResponse
+from apps.common.schemas import SuccessResponse, ErrorResponse
+from apps.common.exceptions import NotFoundError, AuthorizationError, BodyValidationError
 from apps.common.services.encryption import EncryptionService as encryption_service
-from apps.workspaces.mixins import WorkspaceMixin
-from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus
+from apps.accounts.models import User
+from apps.workspaces.models import (
+    Workspace, Membership, WorkspaceType, MembershipRole, MembershipStatus,
+)
 from .mixins import ProjectsMixin, SecretsMixin
 from .models import Project, Secret
-from .permissions import (
-    IsProjectMember, 
-    IsProjectMemberAsync, 
-    IsProjectOwnerOrAdminAsync, 
-    IsProjectWriteMemberAsync,
-    CanAccessSecret
-)
-from .serializers import (
-    ProjectCreateSerializer,
-    ProjectListSerializer,
-    ProjectDetailSerializer,
-    ProjectInviteSerializer,
-    SecretsBulkCreateSerializer,
-    SecretsListOutputSerializer,
-    SecretDetailSerializer,
-    SecretOutputSerializer,
+from .schemas import (
+    ProjectCreateSchema, ProjectUpdateSchema, ProjectInviteSchema,
+    SecretBulkUpsertSchema, SecretUpdateSchema,
 )
 
-tags = [["Projects"], ["Secrets"]]
 
-class ProjectsListCreateAPIView(APIView, ProjectsMixin, WorkspaceMixin):
-    serializer_class = ProjectListSerializer
-    post_serializer = ProjectCreateSerializer
-    permission_classes = [IsAuthenticated]
+@api_controller("/projects", tags=["Projects"], auth=JWTAuth())
+class ProjectController(ProjectsMixin):
 
-    @extend_schema(
-        tags=tags[0],
-        summary="List All Projects",
-        description="""
-        Retrieve all projects belonging to the authenticated user.
-        
-        What are Projects?
-        Projects are containers that group related secrets together.
-        For example, you might have separate projects for:
-        - `my-web-app` (production secrets)
-        - `my-web-app-staging` (staging secrets)
-        - `mobile-app` (mobile app secrets)
-        
-        Response includes:
-        - Project ID (UUID)
-        - Project name
-        - Description
-        """,
-        responses={
-            200: ProjectListSerializer(many=True),
-            401: ProjectListSerializer,
-        },
-        examples=[
-            OpenApiExample(
-                "Success Response",
-                value={
-                    "status": "success",
-                    "message": "Projects retrieved successfully!",
-                    "data": [
-                        {
-                            "id": "550e8400-e29b-41d4-a716-446655440000",
-                            "owner": "123e4567-e89b-12d3-a456-426614174000",
-                            "name": "my-web-app",
-                            "description": "Production web application",
-                        },
-                        {
-                            "id": "660e8400-e29b-41d4-a716-446655440000",
-                            "owner": "123e4567-e89b-12d3-a456-426614174000",
-                            "name": "mobile-app",
-                            "description": "Mobile application secrets",
-                        }
-                    ]
-                },
-                response_only=True
-            )
-        ]
-    )
-    async def get(self, request):
-        user = request.user
-        projects = await self.get_user_projects(user)
-        
-        serializer = self.serializer_class(projects, many=True)
-
-        return CustomResponse.success(message="Projects retrieved successfully!", data=serializer.data)
-    
-    @extend_schema(
-        tags=["Projects"],
-        summary="Create New Project",
-        description="""
-        Create a new project for organizing your secrets.
-        
-        What happens when you create a project?
-        1. A new container is created for your secrets
-        2. You can start adding secrets to this project
-        3. Each project name must be unique for your account
-        
-        Project Name Rules:
-        - Minimum 2 characters
-        - Maximum 255 characters
-        - Only letters, numbers, hyphens (-), and underscores (_)
-        - Examples: `my-app`, `production_api`, `staging-web`
-        
-        Common Project Naming Patterns:
-        - By environment: `myapp-prod`, `myapp-staging`, `myapp-dev`
-        - By service: `web-backend`, `mobile-api`, `worker-service`
-        - By client: `client-acme`, `client-techcorp`
-        
-        
-        """,
-        request=ProjectCreateSerializer,
-        responses={
-            201: ProjectDetailSerializer,
-            400: ProjectDetailSerializer,
-            401: ProjectDetailSerializer,
-        },
-        examples=[
-            OpenApiExample(
-                "Create Project Request",
-                value={
-                    "name": "my-web-app",
-                    "description": "Production web application secrets"
-                },
-                request_only=True
-            ),
-            OpenApiExample(
-                "Success Response",
-                value={
-                    "status": "success",
-                    "message": "Project created successfully!",
-                    "data": {
-                        "id": "550e8400-e29b-41d4-a716-446655440000",
-                        "name": "my-web-app",
-                        "description": "Production web application secrets",
-                    }
-                },
-                response_only=True
-            ),
-            OpenApiExample(
-                "Duplicate Project Error",
-                value={
-                    "status": "error",
-                    "message": "Project 'my-web-app' already exists"
-                },
-                response_only=True,
-                status_codes=["400"]
-            )
-        ]
-    )
-    async def post(self, request):
-        user = request.user
-        serializer = self.post_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        workspace_id = serializer.validated_data["workspace_id"]
-        
-        # Verify user is a member of the workspace
-        membership = await self.get_user_membership(user, workspace_id)
-        
-        if not membership:
-            return CustomResponse.error("You don't have access to this workspace", status_code=403)
-        
-        # Only owner/admin can create projects
-        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
-            return CustomResponse.error("Only workspace owners and admins can create projects", status_code=403)
-        
-        # Check if project with same name exists in this workspace
-        workspace = await Workspace.objects.aget_or_none(id=workspace_id)
-        exists = await self.check_project_exists(workspace=workspace, name=serializer.validated_data["name"])
-        if exists:
-            return CustomResponse.error(f"Project '{serializer.validated_data['name']}' already exists in this workspace")
-
-        project = await serializer.acreate(serializer.validated_data)
-        response_data = serializer.to_representation(project)
-
-        return CustomResponse.success(message="Project Created Successfully!", data=response_data, status_code=201)
-    
-
-class ProjectDetailAPIView(APIView, ProjectsMixin):
-    """
-    Manage a specific project - retrieve, update, or delete.
-    """
-    serializer_class = ProjectDetailSerializer
-    permission_classes = [IsAuthenticated, IsProjectMember, IsProjectOwnerOrAdminAsync]
-
-    @extend_schema(
-        tags=["Projects"],
-        summary="Get Project Details",
-        description="""
-        Retrieve details of a specific project including secrets count.
-        
-        Use this endpoint to:
-        - Check if a project exists
-        - Get project metadata
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="workspace_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the workspace (optional - for disambiguation)",
-                required=False
-            ),
-            OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Name of the project (case-insensitive)"
-            )
-        ],
-        responses={
-            200: ProjectDetailSerializer,
-            404: ProjectDetailSerializer,
-        }
-    )
-    async def get(self, request, project_name, workspace_id=None):
-        """Get project details"""
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-        
-        serializer = self.serializer_class(project)
-        
-        return CustomResponse.success(message="Project retrieved successfully", data=serializer.data)
-    
-    @extend_schema(
-        tags=["Projects"],
-        summary="Update Project",
-        description="""
-        Update project name or description.
-        
-        What can be updated:
-        - Project name (must still be unique)
-        - Project description
-        
-        Note: Updating a project does NOT affect its secrets.
-        
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="workspace_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the workspace (optional - for disambiguation)",
-                required=False
-            ),
-            OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Name of the project (case-insensitive)"
-            )
-        ],
-        request=ProjectCreateSerializer,
-        responses={
-            200: ProjectDetailSerializer,
-            400: ProjectDetailSerializer,
-            404: ProjectDetailSerializer,
-        }
-    )
-    async def patch(self, request, project_name, workspace_id=None):
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-        
-        serializer = ProjectCreateSerializer(data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        
-        # Check for name conflict if name is being changed
-        if 'name' in serializer.validated_data:
-            new_name = serializer.validated_data['name']
-            if new_name != project.name:
-                exists = await self.check_project_exists(
-                    workspace=project.workspace,
-                    name=new_name
-                )
-                if exists:
-                    return CustomResponse.error(message=f"Project '{new_name}' already exists", status_code=400)
-                project.name = new_name
-        
-        if 'description' in serializer.validated_data:
-            project.description = serializer.validated_data['description']
-        
-        await project.asave()
-        
-        response_serializer = ProjectDetailSerializer(project)
-        
-        return CustomResponse.success(message="Project updated successfully", data=response_serializer.data)
-    
-    @extend_schema(
-        tags=["Projects"],
-        summary="Delete Project",
-        description="""
-        Delete a project and ALL its secrets permanently.
-        
-        WARNING: This action is irreversible!
-        
-        When you delete a project:
-        1. The project is permanently deleted
-        2. ALL secrets in the project are permanently deleted
-        3. This cannot be undone
-        
-        Best Practice:
-        Always back up important secrets before deleting a project.
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="workspace_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the workspace (optional - for disambiguation)",
-                required=False
-            ),
-            OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Name of the project to delete (case-insensitive)"
-            )
-        ],
-    )
-    async def delete(self, request, project_name, workspace_id=None):
-        """Delete project and all its secrets"""
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(
-                message="Project not found",
-                status_code=404
-            )
-        
-        project_name_str = project.name
-        secrets_count = await project.secrets.acount()
-        
-        await project.adelete()
-        
-        return CustomResponse.success(message=f"Project '{project_name_str}' and {secrets_count} secrets deleted successfully")
-
-
-class ProjectInviteAPIView(APIView, ProjectsMixin, WorkspaceMixin):
-    """
-    Invite a user to a project.
-    
-    When the project is in a PERSONAL workspace:
-    - Creates a new shared workspace named after the project
-    - Moves the project to the new workspace
-    - Updates secrets with CLI-provided re-encrypted values
-    - Creates memberships for owner and invitee
-    
-    When the project is already in a SHARED workspace:
-    - Just adds the invitee as a new member
-    """
-    permission_classes = [IsAuthenticated, IsProjectMember, IsProjectOwnerOrAdminAsync]
-    serializer_class = ProjectInviteSerializer
-
-    @extend_schema(
-        tags=["Projects"],
-        summary="Invite User to Project",
-        description="""
-        Invite a user to access a specific project.
-        
-        For projects in personal workspace:
-        1. CLI generates new workspace key
-        2. CLI re-encrypts all secrets with new key
-        3. CLI encrypts workspace key for owner + invitee
-        4. API creates shared workspace, moves project, updates secrets
-        
-        For projects already shared:
-        1. CLI encrypts existing workspace key for invitee
-        2. API adds new member
-        
-        Only project owners and admins can invite users.
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="workspace_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the workspace containing the project"
-            ),
-            OpenApiParameter(
-                name="project_name",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Name of the project to invite to (case-insensitive)"
-            )
-        ],
-        responses={
-            201: {"description": "User invited successfully"},
-            400: {"description": "Bad request"},
-            403: {"description": "Permission denied"},
-            404: {"description": "Project or user not found"}
-        }
-    )
-    async def post(self, request, project_name, workspace_id):
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-        
-        serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        
-        # Find invitee
-        invitee = await User.objects.filter(email=data['email']).afirst()
-        if not invitee:
-            return CustomResponse.error(message=f"User with email {data['email']} not found", status_code=404)
-        
-        current_workspace = project.workspace
-        is_personal = current_workspace.type == WorkspaceType.PERSONAL
-        
-        if is_personal:
-            # Validate required fields for migration
-            if not data.get('encrypted_workspace_key_owner'):
-                return CustomResponse.error(
-                    message="encrypted_workspace_key_owner is required when migrating from personal workspace",
-                    status_code=400
-                )
-            
-            # Create new shared workspace
-            new_workspace = await Workspace.objects.acreate(
-                name=project.name,
-                owner=request.user,
-                type=WorkspaceType.SHARED
-            )
-            
-            # Create owner membership with new key
-            await Membership.objects.acreate(
-                user=request.user,
-                workspace=new_workspace,
-                role=MembershipRole.OWNER,
-                status=MembershipStatus.ACTIVE,
-                encrypted_workspace_key=data['encrypted_workspace_key_owner']
-            )
-            
-            # Move project to new workspace
-            project.workspace = new_workspace
-            await project.asave()
-            
-            # Update secrets with CLI-provided re-encrypted values
-            # Projects may have no secrets (e.g. newly created) — loop is safely skipped
-            for secret_item in data.get('secrets', []):
-                key = secret_item['key']
-                value = secret_item['value']
-                environment = secret_item.get('environment', 'development')
-                
-                # Apply API encryption layer
-                encrypted_value = encryption_service.encrypt(value)
-                
-                # Update or create secret — keyed on (project, key, environment)
-                # to handle same-named secrets across different environments
-                secret, created = await Secret.objects.aupdate_or_create(
-                    project=project,
-                    key=key,
-                    environment=environment,
-                    defaults={'value': encrypted_value}
-                )
-            
-            workspace_for_invite = new_workspace
+    async def _resolve_project(self, user, project_name, workspace_id=None):
+        workspace_ids = await sync_to_async(self.get_user_workspaces_ids)(user)
+        name = project_name.lower()
+        if workspace_id:
+            if workspace_id not in workspace_ids:
+                raise AuthorizationError("You don't have access to this workspace")
+            project = await Project.objects.select_related("workspace").filter(name=name, workspace_id=workspace_id).afirst()
         else:
-            # Project is already in a shared workspace
-            workspace_for_invite = current_workspace
-            
-            # Check if invitee is already a member
-            existing_membership = await Membership.objects.filter(
-                user=invitee,
-                workspace=workspace_for_invite
-            ).afirst()
-            
-            if existing_membership:
-                return CustomResponse.error(
-                    message=f"User {data['email']} is already a member of this workspace",
-                    status_code=400
-                )
-        
-        # Create invitee membership
-        invitee_membership = await Membership.objects.acreate(
-            user=invitee,
-            workspace=workspace_for_invite,
-            role=data['role'],
+            project = await Project.objects.select_related("workspace").filter(name=name, workspace_id__in=workspace_ids).afirst()
+        if not project:
+            raise NotFoundError("Project not found")
+        return project
+
+    async def _resolve_project_by_id(self, user, project_id):
+        project = await Project.objects.select_related("workspace").filter(id=project_id).afirst()
+        if not project:
+            raise NotFoundError("Project not found")
+        exists = await Membership.objects.filter(user=user, workspace=project.workspace, status=MembershipStatus.ACTIVE).aexists()
+        if not exists:
+            raise AuthorizationError("You don't have access to this project")
+        return project
+
+    async def _require_admin(self, user, workspace):
+        exists = await Membership.objects.filter(
+            user=user, workspace=workspace,
+            role__in=[MembershipRole.OWNER, MembershipRole.ADMIN],
             status=MembershipStatus.ACTIVE,
-            encrypted_workspace_key=data['encrypted_workspace_key_invitee']
-        )
-        
-        return CustomResponse.success(
-            message=f"Successfully invited {invitee.email} to project '{project.name}'",
-            data={
-                'workspace_id': str(workspace_for_invite.id),
-                'workspace_name': workspace_for_invite.name,
-                'workspace_type': workspace_for_invite.type,
-                'invitee_email': invitee.email,
-                'invitee_role': invitee_membership.role,
-                'migrated_from_personal': is_personal
-            },
-            status_code=201
-        )
+        ).aexists()
+        if not exists:
+            raise AuthorizationError("Only workspace owners and admins can perform this action")
 
-
-class SecretsCreateAPIView(APIView, SecretsMixin, ProjectsMixin):
-    serializer_class = SecretsBulkCreateSerializer
-    permission_classes = [IsAuthenticated, IsProjectWriteMemberAsync]
-
-    @extend_schema(
-        tags=tags[1],
-        summary="Create or Update Secrets (Bulk)",
-        description="""
-        Create or update multiple secrets at once for a project.
-        
-        How it works:
-        1. CLI encrypts secret values with project key
-        2. CLI sends secrets with encrypted values
-        3. API Layer encrypts the blob again (Double Encryption)
-        4. Secrets are stored in database
-        5. If a secret key already exists, it's updated
-        
-        
-        Use Cases:
-        - Push entire .env file to cloud: `secretscli push`
-        - Sync local secrets to API: `secretscli sync`
-        - Update multiple secrets at once
-        
-        Key Format Rules:
-        - Must start with a letter
-        - Only uppercase letters, numbers, and underscores
-        - Examples: `DATABASE_URL`, `API_KEY`, `STRIPE_SECRET`
-        """,
-        request=SecretsBulkCreateSerializer,
-        responses={
-            201: SecretsListOutputSerializer,
-            400: SecretsListOutputSerializer,
-            404: SecretsListOutputSerializer,
-            500: SecretsListOutputSerializer,
-        },
-        examples=[
-            OpenApiExample(
-                "Create Request",
-                value={
-                    "project_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "secrets": [
-                        {
-                            "key": "DATABASE_URL",
-                            "value": "postgresql://user:pass@localhost/db"
-                        },
-                        {
-                            "key": "API_KEY",
-                            "value": "sk_live_abc123xyz"
-                        },
-                        {
-                            "key": "STRIPE_SECRET",
-                            "value": "sk_test_xyz789"
-                        }
-                    ]
-                },
-                request_only=True
-            ),
-            OpenApiExample(
-                "Success Response",
-                value={
-                    "status": "success",
-                    "message": "Secrets created successfully",
-                    "data": {
-                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
-                        "secrets": [
-                            {
-                                "id": "660e8400-e29b-41d4-a716-446655440000",
-                                "key": "DATABASE_URL",
-                                "value": "postgresql://user:pass@localhost/db",
-                                "created_at": "2024-01-15T10:30:00Z",
-                                "updated_at": "2024-01-15T10:30:00Z"
-                            },
-                            {
-                                "id": "770e8400-e29b-41d4-a716-446655440000",
-                                "key": "API_KEY",
-                                "value": "sk_live_abc123xyz",
-                                "created_at": "2024-01-15T10:30:00Z",
-                                "updated_at": "2024-01-15T10:30:00Z"
-                            }
-                        ]
-                    }
-                },
-                response_only=True
-            )
-        ]
-    )
-    async def post(self, request):
-        """Create or update multiple secrets"""
-        serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        project_id = serializer.validated_data["project_id"]
-        environment = serializer.validated_data["environment"]
-        project = await self.get_project_by_id(project_id)
-        
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-        
-        secrets_dict = serializer.validated_data["secrets"]
-        incoming_keys = [k.upper() for k in secrets_dict.keys()]
-        
-        # Fetch existing secrets for this project and environment to update
-        existing_secrets = {}
-        async for secret in Secret.objects.filter(project=project, environment=environment, key__in=incoming_keys):
-            existing_secrets[secret.key] = secret
-        
-        # Prepare secrets for bulk operations
-        to_create = []
-        to_update = []
-        
-        for key, value in secrets_dict.items():
-            key = key.upper()
-            
-            # Encrypt the value (API's encryption layer - Double Encryption)
-            encrypted_value = encryption_service.encrypt(value)
-            
-            if key in existing_secrets:
-                # Update existing secret
-                existing_secrets[key].value = encrypted_value
-                to_update.append(existing_secrets[key])
-            else:
-                # Create new secret object
-                to_create.append(Secret(
-                    project=project,
-                    environment=environment,
-                    key=key,
-                    value=encrypted_value
-                ))
-        
-        # Bulk create new secrets
-        created_count = 0
-        if to_create:
-            created_secrets = await Secret.objects.abulk_create(to_create)
-            created_count = len(created_secrets)
-        
-        # Bulk update existing secrets
-        updated_count = 0
-        if to_update:
-            await Secret.objects.abulk_update(to_update, ['value'])
-            updated_count = len(to_update)
-        
-        return CustomResponse.success(
-            message=f"Secrets processed",
-            data={
-                "created": created_count,
-                "updated": updated_count,
-                "total": created_count + updated_count,
-                "environment": environment
-            }, status_code=201)
-
-
-
-class SecretsListAPIView(APIView, SecretsMixin, ProjectsMixin):
-    serializer_class = SecretsListOutputSerializer
-    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
-
-    @extend_schema(
-        tags=["Secrets"],
-        summary="List All Secrets in Project",
-        description="""
-        Retrieve all secrets for a specific project.
-        
-        How it works:
-        1. CLI requests secrets for a project
-        2. API returns encrypted secret blobs (API layer decrypted)
-        3. CLI decrypts with user's master key and project key
-        4. CLI writes to .env file
-
-        Common Use Cases:
-        - Pull secrets to local .env: `secretscli pull`
-        - Sync secrets across machines
-        - Backup secrets locally
-        
-        Response Format:
-        Returns an array of secrets with their keys and encrypted values.
-        The `value` field contains the secret blob encrypted by the CLI.
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the project to list secrets from"
-            )
-        ],
-        responses={
-            200: SecretsListOutputSerializer,
-            404: SecretsListOutputSerializer,
-        },
-        examples=[
-            OpenApiExample(
-                "Success Response",
-                value={
-                    "status": "success",
-                    "message": "Secrets retrieved successfully",
-                    "data": {
-                        "project_id": "550e8400-e29b-41d4-a716-446655440000",
-                        "secrets": [
-                            {
-                                "id": "660e8400-e29b-41d4-a716-446655440000",
-                                "key": "DATABASE_URL",
-                                "value": "postgresql://user:pass@localhost/db"
-                            },
-                            {
-                                "id": "770e8400-e29b-41d4-a716-446655440000",
-                                "key": "API_KEY",
-                                "value": "sk_live_abc123xyz"
-                            }
-                        ]
-                    }
-                },
-                response_only=True
-            )
-        ]
-    )
-    async def get(self, request, project_id):
-        """List all secrets in a project"""
-        project = request.project
-        
-        environment = request.query_params.get('environment', 'development')
-        if environment not in ['development', 'staging', 'production']:
-            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
-            
-        secrets = await self.get_project_secrets(project, environment=environment)
-        decrypted_secrets = []
-
-        # Decrypt each secret (remove API's encryption layer)
-        for secret in secrets:
-            try:
-                decrypted_value = encryption_service.decrypt(secret.value)
-                decrypted_secrets.append({
-                    'id': str(secret.id),
-                    'key': secret.key,
-                    'value': decrypted_value
-                })
-            except Exception as e:
-                # Skip corrupted secrets
-                continue
-
-        serializer = self.serializer_class({"project_id": project_id, "secrets": decrypted_secrets})
-
-        return CustomResponse.success(message="Secrets retrieved successfully", data=serializer.data)
-
-
-        
-class SecretDetailAPIView(APIView, SecretsMixin, ProjectsMixin):
-    serializer_class = SecretDetailSerializer
-    permission_classes = [IsAuthenticated, CanAccessSecret]
-
-    @extend_schema(
-        tags=["Secrets"],
-        summary="Get Single Secret",
-        description="""
-        Retrieve a specific secret by its key.
-        
-        Use this when you need:
-        - A single secret value
-        - To check if a specific secret exists
-        - To verify a secret's current value
-        
-        Security:
-        - API stores values with its own encryption layer
-        - Secret is also encrypted with CLI's layer (project key)
-        - Server never sees plaintext values (only seeing CLI-encrypted blobs)
-        - CLI must decrypt with user's master key / project key
-
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the project"
-            ),
-            OpenApiParameter(
-                name="key",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Secret key name (e.g., DATABASE_URL)"
-            )
-        ],
-        responses={
-            200: SecretOutputSerializer,
-            404: SecretOutputSerializer,
+    def _project_data(self, project):
+        return {
+            "id": str(project.id), "workspace_id": str(project.workspace_id),
+            "workspace_name": project.workspace.name, "name": project.name,
+            "description": project.description or "",
         }
-    )
-    async def get(self, request, project_id, key, environment=None):
-        """Get a specific secret"""
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found",status_code=404)
-            
-        if not environment:
-            environment = request.query_params.get('environment', 'development')
-        if environment not in ['development', 'staging', 'production']:
-            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
-        
-        # Normalize key to uppercase
-        key = key.upper()
-        
-        secret = await self.get_secret(project=project, key=key, environment=environment)
-        if not secret:
-            return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
-        
-        # Decrypt secret (remove API's encryption layer)
-        try:
-            decrypted_value = encryption_service.decrypt(secret.value)
-        except Exception as e:
-            return CustomResponse.error(message="Failed to decrypt secret", status_code=500)
 
-        serializer = self.serializer_class({'id': secret.id, 'key': secret.key, 'value': decrypted_value})
-        
-        return CustomResponse.success(
-            message="Secret retrieved successfully", data=serializer.data)
+    @route.get("/", response={200: dict})
+    async def list_projects(self, request):
+        workspace_ids = await sync_to_async(self.get_user_workspaces_ids)(request.auth)
+        projects = []
+        async for p in Project.objects.filter(workspace_id__in=workspace_ids).select_related("workspace"):
+            projects.append(self._project_data(p))
+        return CustomResponse.success(message="Projects retrieved successfully!", data=projects)
 
-    @extend_schema(
-        tags=["Secrets"],
-        summary="Update Single Secret",
-        description="""
-        Update the value of a specific secret.
-        
-        What happens:**
-        1. CLI sends new encrypted value
-        2. Old value is overwritten with new value
-        
-        **Use Cases:**
-        - Rotate API keys
-        - Update database credentials
-        - Change secret values
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="project_id",
-                type=OpenApiTypes.UUID,
-                location=OpenApiParameter.PATH,
-                description="UUID of the project"
-            ),
-            OpenApiParameter(
-                name="key",
-                type=OpenApiTypes.STR,
-                location=OpenApiParameter.PATH,
-                description="Secret key to update"
-            )
-        ],
-        request=SecretDetailSerializer,
-        responses={
-            200: SecretOutputSerializer,
-            404: SecretOutputSerializer,
-        }
-    )
-    async def patch(self, request, project_id, key, environment=None):
-        """Update a secret"""
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found",status_code=404)
-            
-        if not environment:
-            environment = request.query_params.get('environment', 'development')
-        if environment not in ['development', 'staging', 'production']:
-            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
-       
-        # Normalize key
-        key = key.upper()
-        
-        secret = await self.get_secret(project=project, key=key, environment=environment)
-        if not secret:
-            return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
-        
-        serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        
-        # Encrypt new value
-        new_value = serializer.validated_data.get('value')
-        if new_value:
-            # Encrypt new value (API's encryption layer)
-            encrypted_value = encryption_service.encrypt(new_value)
-            secret.value = encrypted_value
-            await secret.asave()
-            
-            # Return decrypted value
-            decrypted_value = encryption_service.decrypt(secret.value)
-            serializer = self.serializer_class({'id': secret.id, 'key': secret.key, 'value': decrypted_value})
-        
-            return CustomResponse.success(message="Secret updated successfully", data=serializer.data)
-        
-        return CustomResponse.error(message="No value provided for update", status_code=400)
-    
-    @extend_schema(
-        tags=["Secrets"],
-        summary="Delete Single Secret",
-        description="""
-        Permanently delete a secret.
-        
-        ⚠️ WARNING: This action cannot be undone!
-        
-        The secret is permanently removed from the database.
-        Make sure you have a backup if needed.
-        
-        Use Cases:
-        - Remove unused secrets
-        - Clean up after service decommissioning
-        - Delete compromised secrets (after rotation)
+    @route.post("/", response={201: dict, 400: ErrorResponse, 403: ErrorResponse})
+    async def create_project(self, request, data: ProjectCreateSchema):
+        membership = await Membership.objects.filter(
+            user=request.auth, workspace_id=data.workspace_id, status=MembershipStatus.ACTIVE,
+        ).select_related("workspace").afirst()
+        if not membership:
+            raise AuthorizationError("You don't have access to this workspace")
+        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            raise AuthorizationError("Only workspace owners and admins can create projects")
+        if await Project.objects.filter(workspace=membership.workspace, name=data.name).aexists():
+            raise BodyValidationError("name", f"Project '{data.name}' already exists in this workspace")
 
-            """,
-            parameters=[
-                OpenApiParameter(
-                    name="project_id",
-                    type=OpenApiTypes.UUID,
-                    location=OpenApiParameter.PATH,
-                    description="UUID of the project"
-                ),
-                OpenApiParameter(
-                    name="key",
-                    type=OpenApiTypes.STR,
-                    location=OpenApiParameter.PATH,
-                    description="Secret key to delete"
-                )
-            ],
-    )
-    async def delete(self, request, project_id, key, environment=None):
-        """Delete a secret"""
-        project = request.project
-        
-        if not project:
-            return CustomResponse.error(message="Project not found",status_code=404)
-            
-        if not environment:
-            environment = request.query_params.get('environment', 'development')
-        if environment not in ['development', 'staging', 'production']:
-            return CustomResponse.error(message=f"Invalid environment '{environment}'. Valid environments: development, staging, production.", status_code=400)
-        
-       
-        # Normalize key
-        key = key.upper()
-        
-        secret = await self.get_secret(project=project, key=key, environment=environment)
-        if not secret:
-            return CustomResponse.error(message=f"Secret '{key}' does not exist in this project", status_code=404)
-        
-        await secret.adelete()
+        project = await Project.objects.acreate(workspace=membership.workspace, name=data.name, description=data.description)
+        project.workspace = membership.workspace
+        return CustomResponse.success(message="Project Created Successfully!", data=self._project_data(project), status_code=201)
 
-        return CustomResponse.success(message=f"Secret '{key}' deleted successfully")
+    @route.get("/{project_name}/", response={200: dict, 404: ErrorResponse})
+    async def get_project(self, request, project_name: str):
+        project = await self._resolve_project(request.auth, project_name)
+        return CustomResponse.success(message="Project retrieved successfully", data=self._project_data(project))
 
-class ProjectEnvironmentsAPIView(APIView, ProjectsMixin):
-    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+    @route.patch("/{project_name}/", response={200: dict, 403: ErrorResponse})
+    async def update_project(self, request, project_name: str, data: ProjectUpdateSchema):
+        project = await self._resolve_project(request.auth, project_name)
+        await self._require_admin(request.auth, project.workspace)
+        if data.name is not None and data.name != project.name:
+            if await Project.objects.filter(workspace=project.workspace, name=data.name).aexists():
+                raise BodyValidationError("name", f"Project '{data.name}' already exists")
+            project.name = data.name
+        if data.description is not None:
+            project.description = data.description
+        await project.asave()
+        return CustomResponse.success(message="Project updated successfully", data=self._project_data(project))
 
-    @extend_schema(tags=["Environments"], summary="Get Environments Info")
-    async def get(self, request, project_id):
-        project = request.project
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-            
-        from django.db.models import Count
+    @route.delete("/{project_name}/", response={200: SuccessResponse})
+    async def delete_project(self, request, project_name: str):
+        project = await self._resolve_project(request.auth, project_name)
+        await self._require_admin(request.auth, project.workspace)
+        name = project.name
+        count = await project.secrets.acount()
+        await project.adelete()
+        return CustomResponse.success(message=f"Project '{name}' and {count} secrets deleted successfully")
+
+    # --- Workspace-scoped project endpoints ---
+
+    @route.get("/{workspace_id}/{project_name}/", response={200: dict, 404: ErrorResponse})
+    async def get_project_ws(self, request, workspace_id: uuid.UUID, project_name: str):
+        project = await self._resolve_project(request.auth, project_name, workspace_id)
+        return CustomResponse.success(message="Project retrieved successfully", data=self._project_data(project))
+
+    @route.patch("/{workspace_id}/{project_name}/", response={200: dict, 403: ErrorResponse})
+    async def update_project_ws(self, request, workspace_id: uuid.UUID, project_name: str, data: ProjectUpdateSchema):
+        project = await self._resolve_project(request.auth, project_name, workspace_id)
+        await self._require_admin(request.auth, project.workspace)
+        if data.name is not None and data.name != project.name:
+            if await Project.objects.filter(workspace=project.workspace, name=data.name).aexists():
+                raise BodyValidationError("name", f"Project '{data.name}' already exists")
+            project.name = data.name
+        if data.description is not None:
+            project.description = data.description
+        await project.asave()
+        return CustomResponse.success(message="Project updated successfully", data=self._project_data(project))
+
+    @route.delete("/{workspace_id}/{project_name}/", response={200: SuccessResponse})
+    async def delete_project_ws(self, request, workspace_id: uuid.UUID, project_name: str):
+        project = await self._resolve_project(request.auth, project_name, workspace_id)
+        await self._require_admin(request.auth, project.workspace)
+        name = project.name
+        count = await project.secrets.acount()
+        await project.adelete()
+        return CustomResponse.success(message=f"Project '{name}' and {count} secrets deleted successfully")
+
+    # --- Invite ---
+
+    @route.post("/{workspace_id}/{project_name}/invite/", response={201: dict, 400: ErrorResponse, 404: ErrorResponse})
+    async def invite(self, request, workspace_id: uuid.UUID, project_name: str, data: ProjectInviteSchema):
+        project = await self._resolve_project(request.auth, project_name, workspace_id)
+        await self._require_admin(request.auth, project.workspace)
+        invitee = await User.objects.filter(email=data.email).afirst()
+        if not invitee:
+            raise NotFoundError(f"User with email {data.email} not found")
+
+        current_ws = project.workspace
+        is_personal = current_ws.type == WorkspaceType.PERSONAL
+
+        if is_personal:
+            if not data.encrypted_workspace_key_owner:
+                raise BodyValidationError("encrypted_workspace_key_owner", "Required when migrating from personal workspace")
+            new_ws = await Workspace.objects.acreate(name=project.name, owner=request.auth, type=WorkspaceType.SHARED)
+            await Membership.objects.acreate(user=request.auth, workspace=new_ws, role=MembershipRole.OWNER, status=MembershipStatus.ACTIVE, encrypted_workspace_key=data.encrypted_workspace_key_owner)
+            project.workspace = new_ws
+            await project.asave()
+            for si in data.secrets:
+                await Secret.objects.aupdate_or_create(project=project, key=si.key, environment=si.environment, defaults={"value": encryption_service.encrypt(si.value)})
+            ws_for_invite = new_ws
+        else:
+            if await Membership.objects.filter(user=invitee, workspace=current_ws).aexists():
+                raise BodyValidationError("email", f"User {data.email} is already a member of this workspace")
+            ws_for_invite = current_ws
+
+        inv_m = await Membership.objects.acreate(user=invitee, workspace=ws_for_invite, role=data.role, status=MembershipStatus.ACTIVE, encrypted_workspace_key=data.encrypted_workspace_key_invitee)
+        return CustomResponse.success(message=f"Successfully invited {invitee.email} to project '{project.name}'", data={
+            "workspace_id": str(ws_for_invite.id), "workspace_name": ws_for_invite.name, "workspace_type": ws_for_invite.type,
+            "invitee_email": invitee.email, "invitee_role": inv_m.role, "migrated_from_personal": is_personal,
+        }, status_code=201)
+
+    # --- Environment info ---
+
+    @route.get("/{project_id}/environments/", response={200: dict, 404: ErrorResponse})
+    async def environments(self, request, project_id: uuid.UUID):
+        project = await self._resolve_project_by_id(request.auth, project_id)
         counts = {"development": 0, "staging": 0, "production": 0}
-        
-        async for row in Secret.objects.filter(project=project).values('environment').annotate(count=Count('id')):
-            env = row['environment']
-            if env in counts:
-                counts[env] = row['count']
-                
-        return CustomResponse.success(
-            message="Environment counts retrieved",
-            data={
-                "project_id": str(project_id),
-                "environments": {
-                    "development": {"secret_count": counts["development"]},
-                    "staging": {"secret_count": counts["staging"]},
-                    "production": {"secret_count": counts["production"]}
-                }
-            }
-        )
+        async for row in Secret.objects.filter(project=project).values("environment").annotate(count=Count("id")):
+            if row["environment"] in counts:
+                counts[row["environment"]] = row["count"]
+        return CustomResponse.success(message="Environment counts retrieved", data={
+            "project_id": str(project_id),
+            "environments": {env: {"secret_count": c} for env, c in counts.items()},
+        })
 
-class ProjectSecretsCoverageAPIView(APIView, ProjectsMixin):
-    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+    @route.get("/{project_id}/secrets/coverage/", response={200: dict, 404: ErrorResponse})
+    async def secrets_coverage(self, request, project_id: uuid.UUID):
+        project = await self._resolve_project_by_id(request.auth, project_id)
+        cov = {}
+        async for s in Secret.objects.filter(project=project).only("key", "environment"):
+            if s.key not in cov:
+                cov[s.key] = {"key_name": s.key, "development": False, "staging": False, "production": False}
+            if s.environment in cov[s.key]:
+                cov[s.key][s.environment] = True
+        return CustomResponse.success(message="Secrets coverage retrieved", data={"project_id": str(project_id), "keys": sorted(cov.values(), key=lambda x: x["key_name"])})
 
-    @extend_schema(tags=["Environments"], summary="Get Secrets Coverage")
-    async def get(self, request, project_id):
-        project = request.project
+    @route.get("/{project_id}/secrets/diff/", response={200: dict, 400: ErrorResponse})
+    async def secrets_diff(self, request, project_id: uuid.UUID):
+        project = await self._resolve_project_by_id(request.auth, project_id)
+        from_env = request.GET.get("from", "development")
+        to_env = request.GET.get("to", "production")
+        valid = ["development", "staging", "production"]
+        if from_env not in valid or to_env not in valid:
+            raise BodyValidationError("environment", "Invalid from/to environment")
+        from_keys = set([k async for k in Secret.objects.filter(project=project, environment=from_env).values_list("key", flat=True)])
+        to_keys = set([k async for k in Secret.objects.filter(project=project, environment=to_env).values_list("key", flat=True)])
+        return CustomResponse.success(message="Cross-environment diff retrieved", data={
+            "in_from_only": sorted(from_keys - to_keys), "in_to_only": sorted(to_keys - from_keys), "in_both": sorted(from_keys & to_keys),
+        })
+
+
+@api_controller("/secrets", tags=["Secrets"], auth=JWTAuth())
+class SecretsController(SecretsMixin):
+
+    async def _resolve(self, user, project_id):
+        project = await Project.objects.select_related("workspace").filter(id=project_id).afirst()
         if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-            
-        keys_coverage = {}
-        async for secret in Secret.objects.filter(project=project).only('key', 'environment'):
-            if secret.key not in keys_coverage:
-                keys_coverage[secret.key] = {"key_name": secret.key, "development": False, "staging": False, "production": False}
-            if secret.environment in keys_coverage[secret.key]:
-                keys_coverage[secret.key][secret.environment] = True
-                
-        sorted_keys = sorted(keys_coverage.values(), key=lambda x: x["key_name"])
-        return CustomResponse.success(
-            message="Secrets coverage retrieved",
-            data={"project_id": str(project_id), "keys": sorted_keys}
-        )
+            raise NotFoundError("Project not found")
+        membership = await Membership.objects.filter(user=user, workspace=project.workspace, status=MembershipStatus.ACTIVE).afirst()
+        if not membership:
+            raise AuthorizationError("You don't have access to this project")
+        return project, membership
 
-class ProjectSecretsDiffAPIView(APIView, ProjectsMixin):
-    permission_classes = [IsAuthenticated, IsProjectMemberAsync]
+    def _validate_env(self, environment):
+        if environment not in ["development", "staging", "production"]:
+            raise BodyValidationError("environment", f"Invalid environment '{environment}'.")
 
-    @extend_schema(tags=["Environments"], summary="Compare Environments")
-    async def get(self, request, project_id):
-        project = request.project
-        if not project:
-            return CustomResponse.error(message="Project not found", status_code=404)
-            
-        from_env = request.query_params.get('from', 'development')
-        to_env = request.query_params.get('to', 'production')
-        
-        valid_envs = ['development', 'staging', 'production']
-        if from_env not in valid_envs or to_env not in valid_envs:
-            return CustomResponse.error(message="Invalid from/to environment", status_code=400)
-            
-        from_keys = {s.key async for s in Secret.objects.filter(project=project, environment=from_env).only('key')}
-        to_keys = {s.key async for s in Secret.objects.filter(project=project, environment=to_env).only('key')}
-        
-        return CustomResponse.success(
-            message="Cross-environment diff retrieved",
-            data={
-                "in_from_only": sorted(list(from_keys - to_keys)),
-                "in_to_only": sorted(list(to_keys - from_keys)),
-                "in_both": sorted(list(from_keys.intersection(to_keys)))
-            }
-        )
+    @route.post("/", response={201: dict, 403: ErrorResponse, 404: ErrorResponse})
+    async def bulk_upsert(self, request, data: SecretBulkUpsertSchema):
+        project, membership = await self._resolve(request.auth, data.project_id)
+        if membership.role == MembershipRole.READ_ONLY:
+            raise AuthorizationError("You don't have permission to modify secrets")
 
+        env = data.environment
+        incoming = [k.upper() for k in data.secrets.keys()]
+        existing = {}
+        async for s in Secret.objects.filter(project=project, environment=env, key__in=incoming):
+            existing[s.key] = s
 
+        to_create, to_update = [], []
+        for key, value in data.secrets.items():
+            k = key.upper()
+            enc = encryption_service.encrypt(value)
+            if k in existing:
+                existing[k].value = enc
+                to_update.append(existing[k])
+            else:
+                to_create.append(Secret(project=project, environment=env, key=k, value=enc))
 
+        if to_create:
+            await Secret.objects.abulk_create(to_create)
+        if to_update:
+            await Secret.objects.abulk_update(to_update, ["value"])
+
+        return CustomResponse.success(message="Secrets processed", data={
+            "created": len(to_create), "updated": len(to_update),
+            "total": len(to_create) + len(to_update), "environment": env,
+        }, status_code=201)
+
+    @route.post("/bulk/", response={201: dict, 403: ErrorResponse})
+    async def bulk_upsert_alias(self, request, data: SecretBulkUpsertSchema):
+        return await self.bulk_upsert(request, data)
+
+    @route.get("/{project_id}/", response={200: dict, 404: ErrorResponse})
+    async def list_secrets(self, request, project_id: uuid.UUID, environment: str = "development"):
+        project, _ = await self._resolve(request.auth, project_id)
+        self._validate_env(environment)
+        secrets = []
+        async for s in Secret.objects.filter(project=project, environment=environment):
+            try:
+                secrets.append({"id": str(s.id), "key": s.key, "value": encryption_service.decrypt(s.value)})
+            except Exception:
+                continue
+        return CustomResponse.success(message="Secrets retrieved successfully", data={"project_id": str(project_id), "secrets": secrets})
+
+    @route.get("/{project_id}/{key}/", response={200: dict, 404: ErrorResponse})
+    async def get_secret(self, request, project_id: uuid.UUID, key: str, environment: str = "development"):
+        project, _ = await self._resolve(request.auth, project_id)
+        self._validate_env(environment)
+        secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
+        if not secret:
+            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
+        return CustomResponse.success(message="Secret retrieved successfully", data={"id": str(secret.id), "key": secret.key, "value": encryption_service.decrypt(secret.value)})
+
+    @route.patch("/{project_id}/{key}/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
+    async def update_secret(self, request, project_id: uuid.UUID, key: str, data: SecretUpdateSchema, environment: str = "development"):
+        project, membership = await self._resolve(request.auth, project_id)
+        if membership.role == MembershipRole.READ_ONLY:
+            raise AuthorizationError("You don't have permission to modify secrets")
+        self._validate_env(environment)
+        secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
+        if not secret:
+            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
+        secret.value = encryption_service.encrypt(data.value)
+        await secret.asave()
+        return CustomResponse.success(message="Secret updated successfully", data={"id": str(secret.id), "key": secret.key, "value": encryption_service.decrypt(secret.value)})
+
+    @route.delete("/{project_id}/{key}/", response={200: SuccessResponse, 404: ErrorResponse})
+    async def delete_secret(self, request, project_id: uuid.UUID, key: str, environment: str = "development"):
+        project, membership = await self._resolve(request.auth, project_id)
+        if membership.role == MembershipRole.READ_ONLY:
+            raise AuthorizationError("You don't have permission to modify secrets")
+        self._validate_env(environment)
+        secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
+        if not secret:
+            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
+        await secret.adelete()
+        return CustomResponse.success(message=f"Secret '{key.upper()}' deleted successfully")
+
+    # --- Environment-scoped (env in URL path) ---
+
+    @route.get("/{project_id}/{environment}/{key}/", response={200: dict, 404: ErrorResponse})
+    async def get_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str):
+        return await self.get_secret(request, project_id, key, environment)
+
+    @route.patch("/{project_id}/{environment}/{key}/", response={200: dict, 404: ErrorResponse})
+    async def update_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretUpdateSchema):
+        return await self.update_secret(request, project_id, key, data, environment)
+
+    @route.delete("/{project_id}/{environment}/{key}/", response={200: SuccessResponse, 404: ErrorResponse})
+    async def delete_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str):
+        return await self.delete_secret(request, project_id, key, environment)
