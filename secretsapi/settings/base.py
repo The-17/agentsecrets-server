@@ -48,6 +48,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.common.middleware.AuditLogMiddleware',
 ]
 
 ROOT_URLCONF = 'secretsapi.urls'
@@ -181,6 +182,9 @@ RESOLVER_SERVICE_KEY = config("RESOLVER_SERVICE_KEY", default="")
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
 }
 
 # ==========================================
@@ -247,6 +251,7 @@ LOGGING = {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
+            'stream': 'ext://sys.stdout',
         },
     },
     'loggers': {
