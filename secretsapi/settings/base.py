@@ -215,6 +215,20 @@ UNFOLD = {
 # LOGGING CONFIGURATION
 # ==========================================
 
+# Vercel and other serverless environments have read-only filesystems.
+# We only enable file logging if we can actually create the directory.
+IS_VERCEL = config("VERCEL", default=False, cast=bool)
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+ENABLE_FILE_LOGGING = False
+
+if not IS_VERCEL:
+    try:
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR)
+        ENABLE_FILE_LOGGING = True
+    except OSError:
+        pass
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -234,44 +248,39 @@ LOGGING = {
             'class': 'logging.StreamHandler',
             'formatter': 'simple',
         },
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': os.path.join(BASE_DIR, 'logs', 'django.log'),
-            'maxBytes': 1024 * 1024 * 5,  # 5 MB
-            'backupCount': 5,
-            'formatter': 'verbose',
-        },
     },
     'loggers': {
         'django': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': True,
         },
         'apps.accounts': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': False,
         },
         'apps.workspaces': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': False,
         },
         'apps.secrets_app': {
-            'handlers': ['console', 'file'],
+            'handlers': ['console'],
             'level': 'DEBUG',
             'propagate': False,
         },
     },
 }
 
-# Ensure logs directory exists (for local/VPS deployment)
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-if not os.path.exists(LOG_DIR):
-    try:
-        os.makedirs(LOG_DIR)
-    except OSError:
-        # Fallback for read-only environments like Vercel
-        pass
+if ENABLE_FILE_LOGGING:
+    LOGGING['handlers']['file'] = {
+        'level': 'INFO',
+        'class': 'logging.handlers.RotatingFileHandler',
+        'filename': os.path.join(LOG_DIR, 'django.log'),
+        'maxBytes': 1024 * 1024 * 5,  # 5 MB
+        'backupCount': 5,
+        'formatter': 'verbose',
+    }
+    for logger_name in LOGGING['loggers']:
+        LOGGING['loggers'][logger_name]['handlers'].append('file')
