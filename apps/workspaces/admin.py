@@ -2,7 +2,7 @@
 from django.contrib import admin
 
 # Third-party
-from unfold.admin import ModelAdmin
+from unfold.admin import ModelAdmin, TabularInline
 
 # Local
 from .models import (
@@ -10,14 +10,52 @@ from .models import (
     WorkspaceAllowlist, WorkspaceAllowlistLog,
     AgentRegistration, AgentToken, AuditLogEntry
 )
+from apps.secrets_app.models import Project
+
+
+class ProjectInline(TabularInline):
+    model = Project
+    extra = 0
+    readonly_fields = ('id', 'name', 'created_at', 'updated_at')
+    tab = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class WorkspaceAllowlistInline(TabularInline):
+    model = WorkspaceAllowlist
+    extra = 0
+    readonly_fields = ('domain', 'added_by', 'added_at')
+    tab = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Workspace)
 class WorkspaceAdmin(ModelAdmin):
-    list_display = ('name', 'owner', 'type', 'created_at')
+    list_display = ('name', 'owner', 'type', 'project_count', 'created_at')
     list_filter = ('type', 'created_at')
     search_fields = ('name', 'owner__email')
     readonly_fields = ('id', 'created_at', 'updated_at')
+    inlines = [ProjectInline, WorkspaceAllowlistInline]
+
+    def project_count(self, obj):
+        return obj.projects.count()
+    project_count.short_description = "Projects"
 
 
 @admin.register(Membership)

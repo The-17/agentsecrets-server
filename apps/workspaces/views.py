@@ -6,6 +6,9 @@ import logging
 import secrets as secrets_module
 import uuid
 
+
+logger = logging.getLogger("apps.workspaces")
+
 # Django
 from django.db.models import Count, Q
 from django.http import StreamingHttpResponse
@@ -65,6 +68,7 @@ class WorkspaceController(WorkspaceMixin):
     async def create_workspace(self, request, data: WorkspaceCreateSchema):
         workspace = await Workspace.objects.acreate(name=data.name, owner=request.auth, type=WorkspaceType.SHARED)
         await Membership.objects.acreate(user=request.auth, workspace=workspace, role=MembershipRole.OWNER, status=MembershipStatus.ACTIVE, encrypted_workspace_key=data.encrypted_workspace_key)
+        logger.info(f"WORKSPACE_CREATED: Workspace '{workspace.name}' (ID: {workspace.id}) created by user {request.auth.email}")
         return CustomResponse.success(message="Workspace created successfully", data={
             "id": str(workspace.id), "name": workspace.name, "type": workspace.type, "role": MembershipRole.OWNER,
         }, status_code=201)
@@ -100,6 +104,7 @@ class WorkspaceController(WorkspaceMixin):
             raise AuthorizationError("Personal workspaces cannot be deleted")
         name = ws.name
         await ws.adelete()
+        logger.warning(f"WORKSPACE_DELETED: Workspace '{name}' (ID: {workspace_id}) deleted by user {request.auth.email}")
         return CustomResponse.success(message=f"Workspace '{name}' deleted successfully")
 
     # --- Members ---
@@ -127,6 +132,7 @@ class WorkspaceController(WorkspaceMixin):
         if await Membership.objects.filter(user=invitee, workspace_id=workspace_id).aexists():
             raise ConflictError("User is already a member of this workspace")
         m = await Membership.objects.acreate(user=invitee, workspace_id=workspace_id, role=data.role, status=MembershipStatus.ACTIVE, encrypted_workspace_key=data.encrypted_workspace_key)
+        logger.info(f"MEMBER_INVITED: User {invitee.email} invited to workspace {workspace_id} with role {m.role} by user {request.auth.email}")
         return CustomResponse.success(message=f"Successfully invited {invitee.email} to the workspace", data={
             "membership_id": str(m.id), "user_email": invitee.email, "role": m.role,
         }, status_code=201)
@@ -159,6 +165,7 @@ class WorkspaceController(WorkspaceMixin):
             raise AuthorizationError("You don't have permission to remove members")
         email = tm.user.email
         await tm.adelete()
+        logger.warning(f"MEMBER_REMOVED: User {email} removed from workspace {workspace_id} by user {request.auth.email}")
         return CustomResponse.success(message=f"Member {email} removed from workspace")
 
     @route.post("/{workspace_id}/members/{user_id}/role/", response={200: dict, 403: ErrorResponse})

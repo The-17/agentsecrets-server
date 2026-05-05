@@ -5,8 +5,11 @@ import uuid
 from django.db.models import Count
 from asgiref.sync import sync_to_async
 
-# Third-party
+import logging
 from ninja_extra import api_controller, route
+
+
+logger = logging.getLogger("apps.secrets_app")
 
 # Local
 from apps.common.auth import JWTAuth
@@ -89,6 +92,7 @@ class ProjectController(ProjectsMixin):
 
         project = await Project.objects.acreate(workspace=membership.workspace, name=data.name, description=data.description)
         project.workspace = membership.workspace
+        logger.info(f"PROJECT_CREATED: Project '{project.name}' (ID: {project.id}) created in workspace '{project.workspace.name}' by user {request.auth.email}")
         return CustomResponse.success(message="Project Created Successfully!", data=self._project_data(project), status_code=201)
 
     @route.get("/{project_name}/", response={200: dict, 404: ErrorResponse})
@@ -116,6 +120,7 @@ class ProjectController(ProjectsMixin):
         name = project.name
         count = await project.secrets.acount()
         await project.adelete()
+        logger.warning(f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted by user {request.auth.email}")
         return CustomResponse.success(message=f"Project '{name}' and {count} secrets deleted successfully")
 
     # --- Workspace-scoped project endpoints ---
@@ -264,6 +269,7 @@ class SecretsController(SecretsMixin):
         if to_update:
             await Secret.objects.abulk_update(to_update, ["value"])
 
+        logger.info(f"SECRETS_BULK_UPSERT: Project '{project.name}' ({project.id}) env '{env}' - Created: {len(to_create)}, Updated: {len(to_update)} by user {request.auth.email}")
         return CustomResponse.success(message="Secrets processed", data={
             "created": len(to_create), "updated": len(to_update),
             "total": len(to_create) + len(to_update), "environment": env,
@@ -317,6 +323,7 @@ class SecretsController(SecretsMixin):
         if not secret:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
         await secret.adelete()
+        logger.warning(f"SECRET_DELETED: Secret '{key.upper()}' deleted from project '{project.name}' ({project.id}) env '{environment}' by user {request.auth.email}")
         return CustomResponse.success(message=f"Secret '{key.upper()}' deleted successfully")
 
     # --- Environment-scoped (env in URL path) ---
