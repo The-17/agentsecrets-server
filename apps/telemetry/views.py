@@ -165,6 +165,10 @@ class InternalComputeMetricsAPIView(APIView):
     permission_classes = [AllowAny]
 
     @extend_schema(exclude=True)
+    async def get(self, request):
+        return await self.post(request)
+
+    @extend_schema(exclude=True)
     async def post(self, request):
         cron_secret = request.headers.get('Authorization')
         expected_secret = f"Bearer {getattr(settings, 'CRON_SECRET', 'dev-secret')}"
