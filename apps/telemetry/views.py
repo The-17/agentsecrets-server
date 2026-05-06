@@ -75,113 +75,228 @@ class TelemetrySyncAPIView(APIView):
 
 class PublicMetricsAPIView(APIView):
     """
-    Public metrics endpoint for the AgentSecrets website.
+    Public metrics endpoint for the AgentSecrets website and internal dashboards.
     
-    Returns aggregate platform stats. No authentication required.
-    No sensitive data is exposed — only aggregate counts.
+    Returns the full platform report:
+    - Platform state: total users, projects, secrets, workspaces (from real models)
+    - Engagement: active users (rolling 7d, 30d), averages
+    - Growth: new signups, projects, secrets (today's delta)
+    - Security: cumulative proxy stats across all time
+    - Feature adoption: command usage, integrations, env distribution
     
-    Tries to use the latest DailyMetricsAggregate for performance.
-    Falls back to live database queries if no aggregate exists.
+    Uses the latest DailyMetricsAggregate if available (computed by cron).
+    Falls back to live queries if no aggregate exists.
     """
     permission_classes = [AllowAny]
     serializer_class = PublicMetricsSerializer
 
     @extend_schema(exclude=True)
     async def get(self, request):
-        """
-        Get the cumulative platform metrics report.
-        
-        This returns the lifetime state of the product (totals, averages, and rolling retention)
-        rather than a single day's snapshot.
-        """
-        # Try to get the latest aggregate for the current totals and engagement metrics
         latest = await DailyMetricsAggregate.objects.order_by('-date').afirst()
-        
-        # Calculate cumulative proxy calls across all time
+
+        if latest:
+            data = self._build_from_aggregate(latest)
+        else:
+            data = await self._build_live()
+
+        return CustomResponse.success(
+            message="Platform metrics report",
+            data=data,
+            status_code=200,
+            is_drf=True
+        )
+
+    def _build_from_aggregate(self, agg):
+        """Build the response from the latest pre-computed aggregate."""
+        return {
+            'platform': {
+                'total_users': agg.total_users,
+                'total_projects': agg.total_projects,
+                'total_secrets': agg.total_secrets,
+                'total_workspaces': agg.total_workspaces,
+                'shared_workspaces': agg.shared_workspaces,
+                'pending_invites': agg.total_invites,
+            },
+            'engagement': {
+                'active_users_daily': agg.active_users_daily,
+                'active_users_weekly': agg.active_users_weekly,
+                'active_users_monthly': agg.active_users_monthly,
+                'avg_secrets_per_project': agg.avg_secrets_per_project,
+                'avg_projects_per_workspace': agg.avg_projects_per_workspace,
+                'avg_members_per_shared_workspace': agg.avg_members_per_workspace,
+            },
+            'growth': {
+                'new_signups_today': agg.new_signups,
+                'new_projects_today': agg.new_projects,
+                'new_secrets_today': agg.new_secrets,
+            },
+            'security': {
+                'total_proxy_calls': agg.total_proxy_calls,
+                'total_proxy_blocked': agg.total_proxy_blocked,
+                'total_proxy_redacted': agg.total_proxy_redacted,
+            },
+            'feature_adoption': {
+                'environment_distribution': agg.environment_distribution,
+                'command_usage': agg.command_usage,
+                'integration_usage': agg.integration_usage,
+            },
+            'report_date': str(agg.date),
+            'computed_at': agg.computed_at.isoformat() if agg.computed_at else None,
+        }
+
+    async def _build_live(self):
+        """Fallback: compute all metrics live from the database."""
+        from datetime import timedelta
+
+        today = timezone.now().date()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
+
+        # Platform state
+        total_users = await User.objects.acount()
+        total_projects = await Project.objects.acount()
+        total_secrets = await Secret.objects.acount()
+        total_workspaces = await Workspace.objects.acount()
+        shared_workspaces = await Workspace.objects.filter(type=WorkspaceType.SHARED).acount()
+        pending_invites = await Membership.objects.filter(status=MembershipStatus.INVITED).acount()
+
+        # Engagement — rolling active users from telemetry
+        active_daily = await (
+            TelemetrySnapshot.objects
+            .filter(created_at__date=today, user__isnull=False)
+            .values('user').distinct().acount()
+        )
+        active_weekly = await (
+            TelemetrySnapshot.objects
+            .filter(created_at__date__gte=week_ago, user__isnull=False)
+            .values('user').distinct().acount()
+        )
+        active_monthly = await (
+            TelemetrySnapshot.objects
+            .filter(created_at__date__gte=month_ago, user__isnull=False)
+            .values('user').distinct().acount()
+        )
+
+        # Averages
+        projects_with_secrets = await Project.objects.filter(secrets__isnull=False).distinct().acount()
+        avg_spp = round(total_secrets / projects_with_secrets, 1) if projects_with_secrets > 0 else 0.0
+        avg_ppw = round(total_projects / total_workspaces, 1) if total_workspaces > 0 else 0.0
+
+        if shared_workspaces > 0:
+            active_shared_memberships = await (
+                Membership.objects
+                .filter(workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE)
+                .acount()
+            )
+            avg_mpw = round(active_shared_memberships / shared_workspaces, 1)
+        else:
+            avg_mpw = 0.0
+
+        # Growth
+        new_signups = await User.objects.filter(created_at__date=today).acount()
+        new_projects = await Project.objects.filter(created_at__date=today).acount()
+        new_secrets = await Secret.objects.filter(created_at__date=today).acount()
+
+        # Security — cumulative proxy stats across ALL telemetry
         proxy_agg = await TelemetrySnapshot.objects.aaggregate(
             total_calls=Sum('proxy_calls'),
             total_blocked=Sum('proxy_blocked'),
             total_redacted=Sum('proxy_redacted')
         )
 
-        if latest:
-            # Use pre-computed totals from the latest aggregate
-            data = {
-                'total_users': latest.total_users,
-                'total_projects': latest.total_projects,
-                'total_secrets': latest.total_secrets,
-                'total_workspaces': latest.total_workspaces,
-                'shared_workspaces': latest.shared_workspaces,
-                'total_proxy_calls': proxy_agg.get('total_calls') or 0,
-                'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
-                'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
-                'active_users_weekly': latest.active_users_weekly,
-                'active_users_monthly': latest.active_users_monthly,
-                'avg_secrets_per_project': latest.avg_secrets_per_project,
-                'avg_projects_per_workspace': latest.avg_projects_per_workspace,
-                'avg_members_per_workspace': latest.avg_members_per_workspace,
-                'command_usage_all_time': latest.command_usage,  # Today's command usage as a proxy for trend
-                'environment_distribution': latest.environment_distribution,
-                'integration_usage': latest.integration_usage,
-                'report_generated_at': latest.computed_at
-            }
-        else:
-            # Fall back to live queries if no aggregates exist yet
-            total_users = await User.objects.acount()
-            total_projects = await Project.objects.acount()
-            total_secrets = await Secret.objects.acount()
-            total_workspaces = await Workspace.objects.acount()
-            shared_workspaces = await Workspace.objects.filter(type=WorkspaceType.SHARED).acount()
+        # Environment distribution from actual secrets
+        env_dev = await Secret.objects.filter(environment='development').acount()
+        env_stg = await Secret.objects.filter(environment='staging').acount()
+        env_prd = await Secret.objects.filter(environment='production').acount()
 
-            data = {
+        return {
+            'platform': {
                 'total_users': total_users,
                 'total_projects': total_projects,
                 'total_secrets': total_secrets,
                 'total_workspaces': total_workspaces,
                 'shared_workspaces': shared_workspaces,
+                'pending_invites': pending_invites,
+            },
+            'engagement': {
+                'active_users_daily': active_daily,
+                'active_users_weekly': active_weekly,
+                'active_users_monthly': active_monthly,
+                'avg_secrets_per_project': avg_spp,
+                'avg_projects_per_workspace': avg_ppw,
+                'avg_members_per_shared_workspace': avg_mpw,
+            },
+            'growth': {
+                'new_signups_today': new_signups,
+                'new_projects_today': new_projects,
+                'new_secrets_today': new_secrets,
+            },
+            'security': {
                 'total_proxy_calls': proxy_agg.get('total_calls') or 0,
                 'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
                 'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
-                'avg_secrets_per_project': round(total_secrets / total_projects) if total_projects > 0 else 0,
-                'avg_projects_per_workspace': round(total_projects / total_workspaces) if total_workspaces > 0 else 0,
-                'report_generated_at': timezone.now()
-            }
-
-        return CustomResponse.success(
-            message="Cumulative platform report retrieved",
-            data=data,
-            status_code=200,
-            is_drf=True
-        )
+            },
+            'feature_adoption': {
+                'environment_distribution': {
+                    'development': env_dev,
+                    'staging': env_stg,
+                    'production': env_prd,
+                },
+                'command_usage': {},
+                'integration_usage': {},
+            },
+            'report_date': str(today),
+            'computed_at': timezone.now().isoformat(),
+        }
 
 
 class InternalComputeMetricsAPIView(APIView):
     """
     Internal trigger for Vercel Cron to calculate daily metrics.
     
-    Expects a CRON_SECRET header for security.
+    Vercel sends CRON_SECRET via the Authorization header.
+    We must bypass DRF's JWT auth entirely so it doesn't try
+    to decode the cron secret as a JWT token (which causes 401).
     """
-    authentication_classes = []  # Disable JWT auth so we can use manual secret check
-    permission_classes = [AllowAny]
+    authentication_classes = []  # No DRF auth classes
+    permission_classes = [AllowAny]  # No permission checks
+
+    def perform_authentication(self, request):
+        """
+        Override to completely skip DRF's authentication pipeline.
+        
+        Without this, DRF still runs the global DEFAULT_AUTHENTICATION_CLASSES
+        which tries to decode our CRON_SECRET as a JWT and returns 401.
+        """
+        pass
+
+    def _verify_cron_secret(self, request):
+        """Verify the Vercel CRON_SECRET from the Authorization header."""
+        import hmac
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return False
+        token = auth_header[7:]  # Strip 'Bearer '
+        expected = getattr(settings, 'CRON_SECRET', 'dev-secret')
+        return hmac.compare_digest(token, expected)
 
     @extend_schema(exclude=True)
     async def get(self, request):
-        return await self.post(request)
+        """Vercel cron calls GET by default."""
+        return await self._handle_cron(request)
 
     @extend_schema(exclude=True)
     async def post(self, request):
-        cron_secret = request.headers.get('Authorization')
-        expected_secret = f"Bearer {getattr(settings, 'CRON_SECRET', 'dev-secret')}"
-        
-        if cron_secret != expected_secret:
+        return await self._handle_cron(request)
+
+    async def _handle_cron(self, request):
+        if not self._verify_cron_secret(request):
             return CustomResponse.error(
                 message="Unauthorized cron trigger",
                 status_code=401,
                 is_drf=True
             )
 
-        # Run the management command in a separate thread to avoid blocking the async loop
-        # and to satisfy Django's sync-only database safety checks.
         try:
             await sync_to_async(call_command)('calculate_metrics')
             return CustomResponse.success(message="Metrics calculated successfully", is_drf=True)
