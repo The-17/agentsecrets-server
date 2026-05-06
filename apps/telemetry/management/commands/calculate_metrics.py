@@ -16,8 +16,20 @@ logger = logging.getLogger(__name__)
 class Command(BaseCommand):
     help = 'Calculates accurate platform metrics from the actual database state'
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--date',
+            type=str,
+            help='Calculate metrics for a specific date (YYYY-MM-DD)',
+        )
+
     def handle(self, *args, **options):
-        today = timezone.now().date()
+        if options['date']:
+            from datetime import datetime
+            today = datetime.strptime(options['date'], '%Y-%m-%d').date()
+        else:
+            today = timezone.now().date()
+            
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
 

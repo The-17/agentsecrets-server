@@ -92,12 +92,18 @@ class PublicMetricsAPIView(APIView):
 
     @extend_schema(exclude=True)
     async def get(self, request):
+        # 1. ALWAYS get live platform state (super fast queries)
+        # This guarantees the dashboard never shows stale core counts.
+        platform_state = await self._get_live_platform_state()
+        env_dist = await self._get_live_env_distribution()
+
+        # 2. Get heavy metrics (engagement, cumulative stats) from the daily aggregate
         latest = await DailyMetricsAggregate.objects.order_by('-date').afirst()
 
         if latest:
-            data = self._build_from_aggregate(latest)
+            data = self._build_from_aggregate(latest, platform_state, env_dist)
         else:
-            data = await self._build_live()
+            data = await self._build_live(platform_state, env_dist)
 
         return CustomResponse.success(
             message="Platform metrics report",
@@ -106,17 +112,27 @@ class PublicMetricsAPIView(APIView):
             is_drf=True
         )
 
-    def _build_from_aggregate(self, agg):
-        """Build the response from the latest pre-computed aggregate."""
+    async def _get_live_platform_state(self):
         return {
-            'platform': {
-                'total_users': agg.total_users,
-                'total_projects': agg.total_projects,
-                'total_secrets': agg.total_secrets,
-                'total_workspaces': agg.total_workspaces,
-                'shared_workspaces': agg.shared_workspaces,
-                'pending_invites': agg.total_invites,
-            },
+            'total_users': await User.objects.acount(),
+            'total_projects': await Project.objects.acount(),
+            'total_secrets': await Secret.objects.acount(),
+            'total_workspaces': await Workspace.objects.acount(),
+            'shared_workspaces': await Workspace.objects.filter(type=WorkspaceType.SHARED).acount(),
+            'pending_invites': await Membership.objects.filter(status=MembershipStatus.INVITED).acount(),
+        }
+
+    async def _get_live_env_distribution(self):
+        return {
+            'development': await Secret.objects.filter(environment='development').acount(),
+            'staging': await Secret.objects.filter(environment='staging').acount(),
+            'production': await Secret.objects.filter(environment='production').acount(),
+        }
+
+    def _build_from_aggregate(self, agg, platform_state, env_dist):
+        """Build response mixing live platform state with pre-computed heavy aggregates."""
+        return {
+            'platform': platform_state,
             'engagement': {
                 'active_users_daily': agg.active_users_daily,
                 'active_users_weekly': agg.active_users_weekly,
@@ -136,7 +152,7 @@ class PublicMetricsAPIView(APIView):
                 'total_proxy_redacted': agg.total_proxy_redacted,
             },
             'feature_adoption': {
-                'environment_distribution': agg.environment_distribution,
+                'environment_distribution': env_dist,
                 'command_usage': agg.command_usage,
                 'integration_usage': agg.integration_usage,
             },
@@ -144,21 +160,13 @@ class PublicMetricsAPIView(APIView):
             'computed_at': agg.computed_at.isoformat() if agg.computed_at else None,
         }
 
-    async def _build_live(self):
-        """Fallback: compute all metrics live from the database."""
+    async def _build_live(self, platform_state, env_dist):
+        """Fallback: compute heavy metrics live from the database."""
         from datetime import timedelta
 
         today = timezone.now().date()
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
-
-        # Platform state
-        total_users = await User.objects.acount()
-        total_projects = await Project.objects.acount()
-        total_secrets = await Secret.objects.acount()
-        total_workspaces = await Workspace.objects.acount()
-        shared_workspaces = await Workspace.objects.filter(type=WorkspaceType.SHARED).acount()
-        pending_invites = await Membership.objects.filter(status=MembershipStatus.INVITED).acount()
 
         # Engagement — rolling active users from telemetry
         active_daily = await (
@@ -179,16 +187,16 @@ class PublicMetricsAPIView(APIView):
 
         # Averages
         projects_with_secrets = await Project.objects.filter(secrets__isnull=False).distinct().acount()
-        avg_spp = round(total_secrets / projects_with_secrets, 1) if projects_with_secrets > 0 else 0.0
-        avg_ppw = round(total_projects / total_workspaces, 1) if total_workspaces > 0 else 0.0
+        avg_spp = round(platform_state['total_secrets'] / projects_with_secrets, 1) if projects_with_secrets > 0 else 0.0
+        avg_ppw = round(platform_state['total_projects'] / platform_state['total_workspaces'], 1) if platform_state['total_workspaces'] > 0 else 0.0
 
-        if shared_workspaces > 0:
+        if platform_state['shared_workspaces'] > 0:
             active_shared_memberships = await (
                 Membership.objects
                 .filter(workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE)
                 .acount()
             )
-            avg_mpw = round(active_shared_memberships / shared_workspaces, 1)
+            avg_mpw = round(active_shared_memberships / platform_state['shared_workspaces'], 1)
         else:
             avg_mpw = 0.0
 
@@ -204,20 +212,8 @@ class PublicMetricsAPIView(APIView):
             total_redacted=Sum('proxy_redacted')
         )
 
-        # Environment distribution from actual secrets
-        env_dev = await Secret.objects.filter(environment='development').acount()
-        env_stg = await Secret.objects.filter(environment='staging').acount()
-        env_prd = await Secret.objects.filter(environment='production').acount()
-
         return {
-            'platform': {
-                'total_users': total_users,
-                'total_projects': total_projects,
-                'total_secrets': total_secrets,
-                'total_workspaces': total_workspaces,
-                'shared_workspaces': shared_workspaces,
-                'pending_invites': pending_invites,
-            },
+            'platform': platform_state,
             'engagement': {
                 'active_users_daily': active_daily,
                 'active_users_weekly': active_weekly,
@@ -237,11 +233,7 @@ class PublicMetricsAPIView(APIView):
                 'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
             },
             'feature_adoption': {
-                'environment_distribution': {
-                    'development': env_dev,
-                    'staging': env_stg,
-                    'production': env_prd,
-                },
+                'environment_distribution': env_dist,
                 'command_usage': {},
                 'integration_usage': {},
             },
