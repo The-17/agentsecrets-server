@@ -179,6 +179,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ENCRYPTION_KEY = config("ENCRYPTION_KEY")
 RESOLVER_SERVICE_KEY = config("RESOLVER_SERVICE_KEY", default="")
+CRON_SECRET = config("CRON_SECRET", default="dev-secret")
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),
