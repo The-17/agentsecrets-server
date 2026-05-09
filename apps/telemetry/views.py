@@ -56,32 +56,88 @@ class TelemetrySyncAPIView(APIView):
 
     @extend_schema(exclude=True)
     async def post(self, request):
-        serializer = self.serializer_class(data=request.data)
+        # ──────────────────────────────────────────────
+        # 1. FORMAT DETECTION & TRANSFORMATION
+        #    Handles multiple formats for maximum compatibility:
+        #    A) Final CLI Batch: {"snapshots": [...]}
+        #    B) Intermediate Batch: {"daily": {"YYYY-MM-DD": {...}, ...}}
+        #    C) Generic Batch: [{...}, {...}]
+        #    D) Legacy Single: {...}
+        # ──────────────────────────────────────────────
+        if isinstance(request.data, dict) and "snapshots" in request.data:
+            payload = request.data["snapshots"]
+        elif isinstance(request.data, dict) and "daily" in request.data:
+            payload = []
+            for date_str, snapshot_data in request.data["daily"].items():
+                snapshot_data["date"] = date_str
+                payload.append(snapshot_data)
+        else:
+            payload = request.data if isinstance(request.data, list) else [request.data]
+
+        serializer = self.serializer_class(data=payload, many=True)
         serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
         
         user = request.user if request.user.is_authenticated else None
+        
+        snapshots = []
+        for item in serializer.validated_data:
+            # Determine the effective date of this snapshot for temporal pinning
+            # We check 'date' (new format) first, then 'timestamp' (legacy).
+            target_date = item.get('date')
+            client_ts = item.get('timestamp')
 
-        await TelemetrySnapshot.objects.acreate(
-            user=user,
-            cli_version=data.get('cli_version'),
-            os=data.get('os'),
-            arch=data.get('arch'),
-            command_executions=data.get('command_executions', {}),
-            active_environment=data.get('active_environment'),
-            workspace_type=data.get('workspace_type'),
-            workspace_member_count=data.get('workspace_member_count'),
-            project_secret_count=data.get('project_secret_count'),
-            proxy_calls=data.get('proxy_calls', 0),
-            proxy_blocked=data.get('proxy_blocked', 0),
-            proxy_redacted=data.get('proxy_redacted', 0),
-            injection_styles_used=data.get('injection_styles_used', []),
-            integrations_active=data.get('integrations_active', []),
-            client_timestamp=data.get('timestamp'),
-        )
+            if target_date:
+                # Convert DateField to an aware DateTime for the client_timestamp field
+                from datetime import datetime, time
+                client_ts = timezone.make_aware(datetime.combine(target_date, time.min))
+            elif not client_ts:
+                client_ts = timezone.now()
+            
+            # For server-side enrichment, we always use the target_date
+            effective_date = target_date or client_ts.date()
+
+            # Server-side Enrichment: Calculate accurate counts if IDs are provided
+            ws_id = item.get('workspace_id')
+            prj_id = item.get('project_id')
+            
+            member_count = item.get('workspace_member_count')
+            secret_count = item.get('project_secret_count')
+
+            if ws_id:
+                member_count = await Membership.objects.filter(
+                    workspace_id=ws_id,
+                    created_at__date__lte=effective_date,
+                    status=MembershipStatus.ACTIVE
+                ).acount()
+            
+            if prj_id:
+                secret_count = await Secret.objects.filter(
+                    project_id=prj_id,
+                    created_at__date__lte=effective_date
+                ).acount()
+
+            snapshots.append(TelemetrySnapshot(
+                user=user,
+                cli_version=item.get('cli_version'),
+                os=item.get('os'),
+                arch=item.get('arch'),
+                command_executions=item.get('command_executions', {}),
+                active_environment=item.get('active_environment'),
+                workspace_type=item.get('workspace_type'),
+                workspace_member_count=member_count,
+                project_secret_count=secret_count,
+                proxy_calls=item.get('proxy_calls', 0),
+                proxy_blocked=item.get('proxy_blocked', 0),
+                proxy_redacted=item.get('proxy_redacted', 0),
+                injection_styles_used=item.get('injection_styles_used', []),
+                integrations_active=item.get('integrations_active', []),
+                client_timestamp=client_ts,
+            ))
+
+        await TelemetrySnapshot.objects.abulk_create(snapshots)
 
         user_id = request.user.id if request.user.is_authenticated else "anonymous"
-        logger.info(f"Telemetry sync received from user {user_id}")
+        logger.info(f"Telemetry sync received from user {user_id} ({len(snapshots)} snapshots)")
 
         return CustomResponse.success(
             message="Telemetry synced successfully",

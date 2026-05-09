@@ -14,6 +14,10 @@ class TelemetrySyncSerializer(serializers.Serializer):
         required=False,
         help_text="Client-side timestamp when telemetry was generated"
     )
+    date = serializers.DateField(
+        required=False,
+        help_text="The date this telemetry bucket represents (YYYY-MM-DD)"
+    )
     command_executions = serializers.DictField(
         child=serializers.IntegerField(min_value=0),
         help_text="Map of command name to execution count"
@@ -39,6 +43,10 @@ class TelemetrySyncSerializer(serializers.Serializer):
     )
     workspace_member_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
     project_secret_count = serializers.IntegerField(min_value=0, required=False, allow_null=True)
+
+    # Context IDs for server-side enrichment
+    workspace_id = serializers.UUIDField(required=False, allow_null=True)
+    project_id = serializers.UUIDField(required=False, allow_null=True)
 
     # Proxy metrics
     proxy_calls = serializers.IntegerField(min_value=0, required=False, default=0)
