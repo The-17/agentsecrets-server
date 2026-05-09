@@ -24,8 +24,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--days',
             type=int,
-            default=7,
-            help='Number of days to look back for rolling refresh (default 7)',
+            default=3,
+            help='Number of days to look back for rolling refresh (default 3)',
         )
 
     def handle(self, *args, **options):

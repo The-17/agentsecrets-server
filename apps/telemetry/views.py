@@ -80,41 +80,58 @@ class TelemetrySyncAPIView(APIView):
         user = request.user if request.user.is_authenticated else None
         
         snapshots = []
+        # ──────────────────────────────────────────────
+        # 2. BATCH ENRICHMENT (DB Efficiency)
+        #    Collect all IDs and perform bulk counts to avoid connection exhaustion.
+        # ──────────────────────────────────────────────
+        ws_ids = {item.get('workspace_id') for item in serializer.validated_data if item.get('workspace_id')}
+        prj_ids = {item.get('project_id') for item in serializer.validated_data if item.get('project_id')}
+        
+        # Determine the earliest date in the batch to limit our lookups
+        all_dates = []
         for item in serializer.validated_data:
-            # Determine the effective date of this snapshot for temporal pinning
-            # We check 'date' (new format) first, then 'timestamp' (legacy).
+            dt = item.get('date') or (item.get('timestamp').date() if item.get('timestamp') else timezone.now().date())
+            all_dates.append(dt)
+        min_date = min(all_dates) if all_dates else timezone.now().date()
+
+        # Pre-fetch counts for all workspaces and projects in the batch
+        # This reduces DB round-trips from 2*N to just 2 per request.
+        ws_counts = {}
+        if ws_ids:
+            ws_qs = (
+                Membership.objects
+                .filter(workspace_id__in=ws_ids, status=MembershipStatus.ACTIVE, created_at__date__lte=timezone.now().date())
+                .values('workspace_id')
+                .annotate(count=Count('id'))
+            )
+            async for entry in ws_qs:
+                ws_counts[entry['workspace_id']] = entry['count']
+
+        prj_counts = {}
+        if prj_ids:
+            prj_qs = (
+                Secret.objects
+                .filter(project_id__in=prj_ids, created_at__date__lte=timezone.now().date())
+                .values('project_id')
+                .annotate(count=Count('id'))
+            )
+            async for entry in prj_qs:
+                prj_counts[entry['project_id']] = entry['count']
+
+        snapshots = []
+        for item in serializer.validated_data:
+            # Determine the effective date and timestamp
             target_date = item.get('date')
             client_ts = item.get('timestamp')
 
             if target_date:
-                # Convert DateField to an aware DateTime for the client_timestamp field
                 from datetime import datetime, time
                 client_ts = timezone.make_aware(datetime.combine(target_date, time.min))
             elif not client_ts:
                 client_ts = timezone.now()
             
-            # For server-side enrichment, we always use the target_date
-            effective_date = target_date or client_ts.date()
-
-            # Server-side Enrichment: Calculate accurate counts if IDs are provided
             ws_id = item.get('workspace_id')
             prj_id = item.get('project_id')
-            
-            member_count = item.get('workspace_member_count')
-            secret_count = item.get('project_secret_count')
-
-            if ws_id:
-                member_count = await Membership.objects.filter(
-                    workspace_id=ws_id,
-                    created_at__date__lte=effective_date,
-                    status=MembershipStatus.ACTIVE
-                ).acount()
-            
-            if prj_id:
-                secret_count = await Secret.objects.filter(
-                    project_id=prj_id,
-                    created_at__date__lte=effective_date
-                ).acount()
 
             snapshots.append(TelemetrySnapshot(
                 user=user,
@@ -124,8 +141,8 @@ class TelemetrySyncAPIView(APIView):
                 command_executions=item.get('command_executions', {}),
                 active_environment=item.get('active_environment'),
                 workspace_type=item.get('workspace_type'),
-                workspace_member_count=member_count,
-                project_secret_count=secret_count,
+                workspace_member_count=ws_counts.get(ws_id, item.get('workspace_member_count') or 0),
+                project_secret_count=prj_counts.get(prj_id, item.get('project_secret_count') or 0),
                 proxy_calls=item.get('proxy_calls', 0),
                 proxy_blocked=item.get('proxy_blocked', 0),
                 proxy_redacted=item.get('proxy_redacted', 0),
