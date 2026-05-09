@@ -9,6 +9,9 @@ from django.utils import timezone
 from adrf.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken
 from drf_spectacular.utils import extend_schema
 
 # Local
@@ -26,6 +29,19 @@ from .serializers import TelemetrySyncSerializer, PublicMetricsSerializer
 logger = logging.getLogger("apps.telemetry")
 
 
+class SoftJWTAuthentication(JWTAuthentication):
+    """
+    Tries to authenticate with JWT. If the token is invalid or expired,
+    it gracefully returns None (falling back to AnonymousUser) instead
+    of throwing an AuthenticationFailed exception.
+    """
+    def authenticate(self, request):
+        try:
+            return super().authenticate(request)
+        except (InvalidToken, AuthenticationFailed):
+            return None
+
+
 class TelemetrySyncAPIView(APIView):
     """
     Receive batched CLI telemetry data.
@@ -33,6 +49,7 @@ class TelemetrySyncAPIView(APIView):
     The CLI collects telemetry locally and syncs every 24 hours.
     This endpoint stores the payload for aggregation and analysis.
     """
+    authentication_classes = [SoftJWTAuthentication]
     permission_classes = [AllowAny]
     throttle_classes = [AnonRateThrottle, UserRateThrottle]
     serializer_class = TelemetrySyncSerializer

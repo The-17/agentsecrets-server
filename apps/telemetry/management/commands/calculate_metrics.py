@@ -28,7 +28,9 @@ class Command(BaseCommand):
             from datetime import datetime
             today = datetime.strptime(options['date'], '%Y-%m-%d').date()
         else:
-            today = timezone.now().date()
+            # If the cron runs slightly after midnight (e.g., 00:19), subtract 2 hours
+            # so we still calculate for the intended day.
+            today = (timezone.now() - timedelta(hours=2)).date()
             
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
