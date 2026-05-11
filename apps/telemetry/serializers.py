@@ -48,6 +48,9 @@ class TelemetrySyncSerializer(serializers.Serializer):
     workspace_id = serializers.UUIDField(required=False, allow_null=True)
     project_id = serializers.UUIDField(required=False, allow_null=True)
 
+    # User attribution (fallback when JWT is expired/anonymous)
+    user_email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+
     # Proxy metrics
     proxy_calls = serializers.IntegerField(min_value=0, required=False, default=0)
     proxy_blocked = serializers.IntegerField(min_value=0, required=False, default=0)

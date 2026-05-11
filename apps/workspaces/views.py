@@ -10,7 +10,7 @@ import uuid
 logger = logging.getLogger("apps.workspaces")
 
 # Django
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.conf import settings
@@ -248,12 +248,13 @@ class AllowlistController(WorkspaceMixin):
 class AgentController(WorkspaceMixin):
 
     def _serialize_agent(self, agent):
+        last_used = getattr(agent, "last_used_at", None)
         return {
             "id": str(agent.id), "name": agent.name,
             "project_id": str(agent.project_id) if agent.project_id else None,
             "token_count": getattr(agent, "token_count", 0),
             "active_token_count": getattr(agent, "active_token_count", 0),
-            "last_used_at": agent.last_used_at.isoformat() if agent.last_used_at else None,
+            "last_used_at": last_used.isoformat() if last_used else None,
             "created_at": agent.created_at.isoformat(),
         }
 
@@ -295,6 +296,7 @@ class AgentController(WorkspaceMixin):
         agents = []
         async for a in AgentRegistration.objects.filter(workspace_id=workspace_id, project__isnull=True).annotate(
             token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
+            last_used_at=Max("tokens__last_used_at"),
         ):
             agents.append(self._serialize_agent(a))
         return CustomResponse.success(message="Agents retrieved", data=agents)
@@ -309,6 +311,7 @@ class AgentController(WorkspaceMixin):
         agents = []
         async for a in AgentRegistration.objects.filter(workspace_id=workspace_id, project_id=project_id).annotate(
             token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
+            last_used_at=Max("tokens__last_used_at"),
         ):
             agents.append(self._serialize_agent(a))
         return CustomResponse.success(message="Project agents retrieved", data=agents)
@@ -322,6 +325,7 @@ class AgentController(WorkspaceMixin):
         await self._check_access(request.auth, workspace_id)
         agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).annotate(
             token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
+            last_used_at=Max("tokens__last_used_at"),
         ).afirst()
         if not agent:
             raise NotFoundError("Agent not found")

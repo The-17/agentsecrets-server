@@ -79,6 +79,18 @@ class TelemetrySyncAPIView(APIView):
         
         user = request.user if request.user.is_authenticated else None
         
+        # ──────────────────────────────────────────────
+        # 1b. USER ATTRIBUTION
+        #     If the JWT is expired (SoftJWTAuth returns anonymous), fall back
+        #     to user_email from the payload. Bulk-fetch all emails in one query.
+        # ──────────────────────────────────────────────
+        email_to_user = {}
+        if not user:
+            emails = {item.get('user_email') for item in serializer.validated_data if item.get('user_email')}
+            if emails:
+                async for u in User.objects.filter(email__in=emails):
+                    email_to_user[u.email] = u
+
         snapshots = []
         # ──────────────────────────────────────────────
         # 2. BATCH ENRICHMENT (DB Efficiency)
@@ -133,8 +145,11 @@ class TelemetrySyncAPIView(APIView):
             ws_id = item.get('workspace_id')
             prj_id = item.get('project_id')
 
+            # Resolve user: JWT auth takes priority, then email fallback
+            snapshot_user = user or email_to_user.get(item.get('user_email'))
+
             snapshots.append(TelemetrySnapshot(
-                user=user,
+                user=snapshot_user,
                 cli_version=item.get('cli_version'),
                 os=item.get('os'),
                 arch=item.get('arch'),
@@ -153,8 +168,14 @@ class TelemetrySyncAPIView(APIView):
 
         await TelemetrySnapshot.objects.abulk_create(snapshots)
 
-        user_id = request.user.id if request.user.is_authenticated else "anonymous"
-        logger.info(f"Telemetry sync received from user {user_id} ({len(snapshots)} snapshots)")
+        # Log with attribution source for debugging
+        if user:
+            user_label = user.email
+        elif email_to_user:
+            user_label = f"{list(email_to_user.keys())[0]} (via email)"
+        else:
+            user_label = "anonymous"
+        logger.info(f"Telemetry sync received from {user_label} ({len(snapshots)} snapshots)")
 
         return CustomResponse.success(
             message="Telemetry synced successfully",

@@ -24,24 +24,28 @@ class Command(BaseCommand):
         parser.add_argument(
             '--days',
             type=int,
-            default=3,
-            help='Number of days to look back for rolling refresh (default 3)',
+            default=7,
+            help='Number of days to look back for rolling refresh (default 7)',
         )
 
     def handle(self, *args, **options):
+        from django.db import connections
         if options['date']:
             target_dates = [datetime.strptime(options['date'], '%Y-%m-%d').date()]
         else:
-            # Default production mode: Recalculate a rolling window to account for late telemetry syncs.
+            # Production mode: Recalculate a rolling window to account for late telemetry syncs.
             # This ensures forensic accuracy even if users are offline for a few days.
-            # We subtract 2 hours to handle crons running slightly past midnight.
             anchor_date = (timezone.now() - timedelta(hours=2)).date()
             days_to_refresh = options['days']
             target_dates = [anchor_date - timedelta(days=i) for i in range(days_to_refresh)]
             target_dates.reverse() # Process oldest to newest for logical consistency
 
-        for date in target_dates:
-            self.calculate_for_date(date)
+        try:
+            for date in target_dates:
+                self.calculate_for_date(date)
+        finally:
+            # Ensure connections are closed to prevent leaks in serverless/pooled environments
+            connections.close_all()
 
     def calculate_for_date(self, target_date):
         week_ago = target_date - timedelta(days=7)
