@@ -130,6 +130,15 @@ class TelemetrySyncAPIView(APIView):
             async for entry in prj_qs:
                 prj_counts[entry['project_id']] = entry['count']
 
+        # ──────────────────────────────────────────────
+        # 3. BATCH DEFAULTS & SNAPSHOT CREATION
+        #    Handle sparse payloads by inheriting values from the batch
+        # ──────────────────────────────────────────────
+        batch_user_email = next((item.get('user_email') for item in serializer.validated_data if item.get('user_email')), None)
+        batch_cli_version = next((item.get('cli_version') for item in serializer.validated_data if item.get('cli_version')), None)
+        batch_os = next((item.get('os') for item in serializer.validated_data if item.get('os')), None)
+        batch_arch = next((item.get('arch') for item in serializer.validated_data if item.get('arch')), None)
+
         snapshots = []
         for item in serializer.validated_data:
             # Determine the effective date and timestamp
@@ -146,13 +155,14 @@ class TelemetrySyncAPIView(APIView):
             prj_id = item.get('project_id')
 
             # Resolve user: JWT auth takes priority, then email fallback
-            snapshot_user = user or email_to_user.get(item.get('user_email'))
+            item_email = item.get('user_email') or batch_user_email
+            snapshot_user = user or email_to_user.get(item_email)
 
             snapshots.append(TelemetrySnapshot(
                 user=snapshot_user,
-                cli_version=item.get('cli_version'),
-                os=item.get('os'),
-                arch=item.get('arch'),
+                cli_version=item.get('cli_version') or batch_cli_version,
+                os=item.get('os') or batch_os,
+                arch=item.get('arch') or batch_arch,
                 command_executions=item.get('command_executions', {}),
                 active_environment=item.get('active_environment'),
                 workspace_type=item.get('workspace_type'),
