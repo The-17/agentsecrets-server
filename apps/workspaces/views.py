@@ -36,6 +36,7 @@ from .models import (
 from .schemas import (
     WorkspaceCreateSchema, WorkspaceUpdateSchema,
     MemberInviteSchema, MemberUpdateSchema, MemberRoleActionSchema,
+    InviteEntrySchema, BatchInviteSchema,
     AllowlistBulkCreateSchema,
     AgentCreateSchema, AgentTokenCreateSchema,
     InternalAgentVerifySchema,
@@ -121,21 +122,62 @@ class WorkspaceController(WorkspaceMixin):
             })
         return CustomResponse.success(message="Members retrieved successfully", data=data)
 
-    @route.post("/{workspace_id}/members/", response={201: dict, 403: ErrorResponse, 404: ErrorResponse})
-    async def invite_member(self, request, workspace_id: uuid.UUID, data: MemberInviteSchema):
+    @route.post("/{workspace_id}/members/", response={201: dict, 200: dict, 403: ErrorResponse, 404: ErrorResponse})
+    async def invite_member(self, request, workspace_id: uuid.UUID, data: dict = None):
         um = await self._get_membership(request.auth, workspace_id)
         if um.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
-            raise AuthorizationError("You don't have permission to invite members")
-        invitee = await User.objects.filter(email=data.email).afirst()
-        if not invitee:
-            raise NotFoundError(f"User with email {data.email} not found")
-        if await Membership.objects.filter(user=invitee, workspace_id=workspace_id).aexists():
-            raise ConflictError("User is already a member of this workspace")
-        m = await Membership.objects.acreate(user=invitee, workspace_id=workspace_id, role=data.role, status=MembershipStatus.ACTIVE, encrypted_workspace_key=data.encrypted_workspace_key)
-        logger.info(f"MEMBER_INVITED: User {invitee.email} invited to workspace {workspace_id} with role {m.role} by user {request.auth.email}")
-        return CustomResponse.success(message=f"Successfully invited {invitee.email} to the workspace", data={
-            "membership_id": str(m.id), "user_email": invitee.email, "role": m.role,
-        }, status_code=201)
+            raise AuthorizationError("Only workspace admins can invite members.")
+
+        # Parse the raw body to detect batch vs single format
+        body = json.loads(request.body)
+
+        if "invites" in body:
+            # Batch format: {"invites": [{...}, {...}]}
+            parsed = BatchInviteSchema(**body)
+            entries = parsed.invites
+        else:
+            # Single format (backward compat): {"email": ..., "role": ..., ...}
+            entry = InviteEntrySchema(**body)
+            entries = [entry]
+
+        results = []
+        any_created = False
+
+        for invite in entries:
+            try:
+                invitee = await User.objects.filter(email=invite.email).afirst()
+                if not invitee:
+                    results.append({"email": invite.email, "error": "User not found"})
+                    continue
+
+                if await Membership.objects.filter(user=invitee, workspace_id=workspace_id).aexists():
+                    results.append({"email": invite.email, "error": "Already a member"})
+                    continue
+
+                await Membership.objects.acreate(
+                    user=invitee,
+                    workspace_id=workspace_id,
+                    role=invite.role,
+                    status=MembershipStatus.ACTIVE,
+                    encrypted_workspace_key=invite.encrypted_workspace_key,
+                )
+                logger.info(
+                    f"MEMBER_INVITED: User {invite.email} invited to workspace "
+                    f"{workspace_id} with role {invite.role} by user {request.auth.email}"
+                )
+                results.append({"email": invite.email, "error": ""})
+                any_created = True
+
+            except Exception as e:
+                logger.error(f"MEMBER_INVITE_FAILED: Error inviting {invite.email} to workspace {workspace_id}: {e}")
+                results.append({"email": invite.email, "error": str(e)})
+
+        status_code = 201 if any_created else 200
+        return CustomResponse.success(
+            message="Invites processed",
+            data=results,
+            status_code=status_code,
+        )
 
     @route.patch("/{workspace_id}/members/{user_id}/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
     async def update_member(self, request, workspace_id: uuid.UUID, user_id: uuid.UUID, data: MemberUpdateSchema):

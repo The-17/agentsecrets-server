@@ -48,6 +48,16 @@ class MemberInviteSchema(Schema):
     encrypted_workspace_key: str
 
 
+class InviteEntrySchema(Schema):
+    email: EmailStr
+    role: Literal["admin", "member", "read_only"] = "member"
+    encrypted_workspace_key: str
+
+
+class BatchInviteSchema(Schema):
+    invites: List[InviteEntrySchema]
+
+
 class MemberUpdateSchema(Schema):
     role: Literal["admin", "member", "read_only"]
 
