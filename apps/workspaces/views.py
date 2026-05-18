@@ -609,7 +609,7 @@ class ResolverController:
             "workspace_id": str(token.workspace_id), "environment": token.environment,
         }
 
-    @route.post("/audit/logs/", response={201: dict})
+    @route.post("/audit/logs/", response={201: dict}, auth=[ResolverServiceKeyAuth(), JWTAuth()])
     async def create_audit_logs(self, request):
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
