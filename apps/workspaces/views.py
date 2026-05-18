@@ -577,14 +577,14 @@ class AuditController(WorkspaceMixin):
         return response
 
 
-@api_controller("/internal", tags=["Internal"], auth=ResolverServiceKeyAuth())
+@api_controller("/internal", tags=["Internal"])
 class ResolverController:
     """
     Internal endpoints for the resolver service.
     Authenticated via RESOLVER_SERVICE_KEY — not user session auth.
     """
 
-    @route.post("/agents/verify/", response={200: dict})
+    @route.post("/agents/verify/", response={200: dict}, auth=ResolverServiceKeyAuth())
     async def verify_agent(self, request, data: InternalAgentVerifySchema):
         token = await AgentToken.objects.select_related("registration").filter(id=data.token_id).afirst()
         if not token:
