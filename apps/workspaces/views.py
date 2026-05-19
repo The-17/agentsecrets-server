@@ -613,5 +613,39 @@ class ResolverController:
     async def create_audit_logs(self, request):
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
-        created = await AuditLogEntry.objects.abulk_create([AuditLogEntry(**e) for e in entries])
+
+        def map_entry(e):
+            """Map CLI AuditEvent JSON fields to AuditLogEntry model fields."""
+            mapped = {}
+
+            # Direct 1:1 mappings
+            direct_fields = [
+                'id', 'schema_version', 'timestamp', 'environment',
+                'agent_id', 'identity_level', 'method', 'target_url',
+                'target_path', 'status_code', 'duration_ms', 'proxy_duration_ms',
+                'redacted', 'redaction_reason', 'resolution_path',
+                'allowlist_snapshot', 'caller_role', 'session_id',
+                'policy_snapshot_id', 'error', 'credential_ref', 'injection_style',
+                'target_domain',
+            ]
+            for field in direct_fields:
+                if field in e:
+                    mapped[field] = e[field]
+
+            # CLI sends 'domain' but model uses 'target_domain'
+            if 'domain' in e and 'target_domain' not in mapped:
+                mapped['target_domain'] = e['domain']
+
+            # FK references: CLI sends string IDs, model expects _id suffix
+            if 'workspace_id' in e and 'workspace' not in e:
+                mapped['workspace_id'] = e['workspace_id']
+            if 'project_id' in e and 'project' not in e:
+                mapped['project_id'] = e['project_id']
+            if 'token_id' in e and 'agent_token' not in e:
+                mapped['agent_token_id'] = e['token_id']
+
+            return mapped
+
+        model_entries = [AuditLogEntry(**map_entry(e)) for e in entries]
+        created = await AuditLogEntry.objects.abulk_create(model_entries)
         return 201, {"created_count": len(created), "ids": [str(log.id) for log in created]}
