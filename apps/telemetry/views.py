@@ -210,16 +210,26 @@ class PublicMetricsAPIView(APIView):
     serializer_class = PublicMetricsSerializer
 
     async def get(self, request):
-        # 1. ALWAYS get live platform state (super fast queries)
-        # This guarantees the dashboard never shows stale core counts.
-        platform_state = await self._get_live_platform_state()
-        env_dist = await self._get_live_env_distribution()
+        import asyncio
+        today = timezone.now().date()
+
+        # 1. ALWAYS get live platform state and today's growth/engagement (super fast queries)
+        # This guarantees the dashboard never shows stale core counts or today's activity.
+        (
+            platform_state,
+            env_dist,
+            today_metrics
+        ) = await asyncio.gather(
+            self._get_live_platform_state(),
+            self._get_live_env_distribution(),
+            self._get_today_live_metrics(today)
+        )
 
         # 2. Get heavy metrics (engagement, cumulative stats) from the daily aggregate
         latest = await DailyMetricsAggregate.objects.order_by('-date').afirst()
 
         if latest:
-            data = self._build_from_aggregate(latest, platform_state, env_dist)
+            data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today)
         else:
             data = await self._build_live(platform_state, env_dist)
 
@@ -247,12 +257,32 @@ class PublicMetricsAPIView(APIView):
             'production': await Secret.objects.filter(environment='production').acount(),
         }
 
-    def _build_from_aggregate(self, agg, platform_state, env_dist):
-        """Build response mixing live platform state with pre-computed heavy aggregates."""
+    async def _get_today_live_metrics(self, today):
+        import asyncio
+        (
+            active_daily,
+            new_signups,
+            new_projects,
+            new_secrets
+        ) = await asyncio.gather(
+            User.objects.filter(last_active_date=today).acount(),
+            User.objects.filter(created_at__date=today).acount(),
+            Project.objects.filter(created_at__date=today).acount(),
+            Secret.objects.filter(created_at__date=today).acount(),
+        )
+        return {
+            'active_users_daily': active_daily,
+            'new_signups_today': new_signups,
+            'new_projects_today': new_projects,
+            'new_secrets_today': new_secrets,
+        }
+
+    def _build_from_aggregate(self, agg, platform_state, env_dist, today_metrics, today):
+        """Build response mixing live platform state and today's live activity with pre-computed heavy aggregates."""
         return {
             'platform': platform_state,
             'engagement': {
-                'active_users_daily': agg.active_users_daily,
+                'active_users_daily': today_metrics['active_users_daily'],
                 'active_users_weekly': agg.active_users_weekly,
                 'active_users_monthly': agg.active_users_monthly,
                 'avg_secrets_per_project': agg.avg_secrets_per_project,
@@ -260,9 +290,9 @@ class PublicMetricsAPIView(APIView):
                 'avg_members_per_shared_workspace': agg.avg_members_per_workspace,
             },
             'growth': {
-                'new_signups_today': agg.new_signups,
-                'new_projects_today': agg.new_projects,
-                'new_secrets_today': agg.new_secrets,
+                'new_signups_today': today_metrics['new_signups_today'],
+                'new_projects_today': today_metrics['new_projects_today'],
+                'new_secrets_today': today_metrics['new_secrets_today'],
             },
             'security': {
                 'total_proxy_calls': agg.total_proxy_calls,
@@ -274,8 +304,8 @@ class PublicMetricsAPIView(APIView):
                 'command_usage': agg.command_usage,
                 'integration_usage': agg.integration_usage,
             },
-            'report_date': str(agg.date),
-            'computed_at': agg.computed_at.isoformat() if agg.computed_at else None,
+            'report_date': str(today),
+            'computed_at': timezone.now().isoformat(),
         }
 
     async def _build_live(self, platform_state, env_dist):
