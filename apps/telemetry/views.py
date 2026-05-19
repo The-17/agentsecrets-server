@@ -228,7 +228,8 @@ class PublicMetricsAPIView(APIView):
             latest,
             agg_yesterday,
             agg_week_ago,
-            agg_month_ago
+            agg_month_ago,
+            os_dist
         ) = await asyncio.gather(
             self._get_live_platform_state(),
             self._get_live_env_distribution(),
@@ -237,6 +238,7 @@ class PublicMetricsAPIView(APIView):
             DailyMetricsAggregate.objects.filter(date__lte=yesterday_date).order_by('-date').afirst(),
             DailyMetricsAggregate.objects.filter(date__lte=week_ago_date).order_by('-date').afirst(),
             DailyMetricsAggregate.objects.filter(date__lte=month_ago_date).order_by('-date').afirst(),
+            self._get_live_os_distribution(),
         )
 
         if latest:
@@ -244,6 +246,34 @@ class PublicMetricsAPIView(APIView):
             dau = today_metrics['active_users_daily']
             mau = today_metrics['active_users_monthly']
             stickiness = f"{round((dau / mau) * 100, 2)}%" if mau > 0 else "0.00%"
+
+            # Collaboration Index (Shared / Total Workspaces)
+            total_ws = platform_state['total_workspaces']
+            team_collab = f"{round((platform_state['shared_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
+
+            # Production Adoption Rate (Production Secrets / Total Secrets)
+            total_secrets = platform_state['total_secrets']
+            prod_adoption = f"{round((env_dist.get('production', 0) / total_secrets) * 100, 2)}%" if total_secrets > 0 else "0.00%"
+
+            # Security Redaction & Block Rates
+            total_calls = latest.total_proxy_calls
+            security_redaction = f"{round((latest.total_proxy_redacted / total_calls) * 100, 2)}%" if total_calls > 0 else "0.00%"
+            security_block = f"{round((latest.total_proxy_blocked / total_calls) * 100, 2)}%" if total_calls > 0 else "0.00%"
+
+            # Integration adoption from aggregate (percentage of total registered users using it)
+            total_users = platform_state['total_users']
+            integration_adoption = {}
+            for integration, count in latest.integration_usage.items():
+                pct = round((count / total_users) * 100, 2) if total_users > 0 else 0.0
+                integration_adoption[integration] = f"{pct}%"
+
+            # Command share from aggregate
+            command_usage = latest.command_usage
+            total_cmds = sum(command_usage.values())
+            command_share = {}
+            for cmd, count in command_usage.items():
+                pct = round((count / total_cmds) * 100, 2) if total_cmds > 0 else 0.0
+                command_share[cmd] = f"{pct}%"
 
             # Calculate growth helper
             def _growth(curr, past_agg, field):
@@ -258,6 +288,12 @@ class PublicMetricsAPIView(APIView):
 
             analytics = {
                 'stickiness_ratio_dau_mau': stickiness,
+                'team_collaboration_index': team_collab,
+                'production_adoption_rate': prod_adoption,
+                'security_metrics': {
+                    'redaction_rate': security_redaction,
+                    'block_rate': security_block,
+                },
                 'user_growth': {
                     'dod': _growth(platform_state['total_users'], agg_yesterday, 'total_users'),
                     'wow': _growth(platform_state['total_users'], agg_week_ago, 'total_users'),
@@ -277,11 +313,14 @@ class PublicMetricsAPIView(APIView):
                     'dod': _growth(dau, agg_yesterday, 'active_users_daily'),
                     'wow': _growth(dau, agg_week_ago, 'active_users_daily'),
                     'mom': _growth(dau, agg_month_ago, 'active_users_daily'),
-                }
+                },
+                'integration_adoption': integration_adoption,
+                'command_market_share': command_share,
+                'cli_os_distribution': os_dist,
             }
             data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today, analytics)
         else:
-            data = await self._build_live(platform_state, env_dist)
+            data = await self._build_live(platform_state, env_dist, os_dist)
 
         return CustomResponse.success(
             message="Platform metrics report",
@@ -306,6 +345,20 @@ class PublicMetricsAPIView(APIView):
             'staging': await Secret.objects.filter(environment='staging').acount(),
             'production': await Secret.objects.filter(environment='production').acount(),
         }
+
+    async def _get_live_os_distribution(self):
+        qs = TelemetrySnapshot.objects.values('os').annotate(unique_users=Count('user', distinct=True)).order_by('-unique_users')
+        results = {}
+        total = 0
+        async for item in qs:
+            os_name = item['os'] or 'unknown'
+            count = item['unique_users']
+            results[os_name] = count
+            total += count
+        
+        if total > 0:
+            return {os_name: f"{round((count / total) * 100, 2)}%" for os_name, count in results.items()}
+        return {}
 
     async def _get_today_live_metrics(self, today, week_ago, month_ago):
         import asyncio
@@ -365,7 +418,7 @@ class PublicMetricsAPIView(APIView):
             'computed_at': timezone.now().isoformat(),
         }
 
-    async def _build_live(self, platform_state, env_dist):
+    async def _build_live(self, platform_state, env_dist, os_dist):
         """Fallback: compute heavy metrics live from the database."""
         import asyncio
         from datetime import timedelta
@@ -414,6 +467,40 @@ class PublicMetricsAPIView(APIView):
         else:
             avg_mpw = 0.0
 
+        # Live integration & command usage scan
+        integration_usage = {}
+        async for snapshot in TelemetrySnapshot.objects.exclude(integrations_active=[]).only('integrations_active'):
+            for integration in snapshot.integrations_active:
+                integration_usage[integration] = integration_usage.get(integration, 0) + 1
+        
+        total_users = platform_state['total_users']
+        integration_adoption = {
+            k: f"{round((v / total_users) * 100, 2)}%" if total_users > 0 else "0.00%"
+            for k, v in integration_usage.items()
+        }
+
+        command_usage = {}
+        async for snapshot in TelemetrySnapshot.objects.exclude(command_executions={}).only('command_executions'):
+            for cmd, count in snapshot.command_executions.items():
+                command_usage[cmd] = command_usage.get(cmd, 0) + count
+        
+        total_cmds = sum(command_usage.values())
+        command_share = {
+            k: f"{round((v / total_cmds) * 100, 2)}%" if total_cmds > 0 else "0.00%"
+            for k, v in command_usage.items()
+        }
+
+        # Collaboration & adoption rates
+        total_ws = platform_state['total_workspaces']
+        team_collab = f"{round((platform_state['shared_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
+
+        total_sec = platform_state['total_secrets']
+        prod_adoption = f"{round((env_dist.get('production', 0) / total_sec) * 100, 2)}%" if total_sec > 0 else "0.00%"
+
+        total_calls = proxy_agg.get('total_calls') or 0
+        security_redaction = f"{round(((proxy_agg.get('total_redacted') or 0) / total_calls) * 100, 2)}%" if total_calls > 0 else "0.00%"
+        security_block = f"{round(((proxy_agg.get('total_blocked') or 0) / total_calls) * 100, 2)}%" if total_calls > 0 else "0.00%"
+
         return {
             'platform': platform_state,
             'engagement': {
@@ -431,20 +518,29 @@ class PublicMetricsAPIView(APIView):
             },
             'analytics': {
                 'stickiness_ratio_dau_mau': f"{round((active_daily / active_monthly) * 100, 2)}%" if active_monthly > 0 else "0.00%",
+                'team_collaboration_index': team_collab,
+                'production_adoption_rate': prod_adoption,
+                'security_metrics': {
+                    'redaction_rate': security_redaction,
+                    'block_rate': security_block,
+                },
                 'user_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
                 'project_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
                 'secret_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
                 'dau_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
+                'integration_adoption': integration_adoption,
+                'command_market_share': command_share,
+                'cli_os_distribution': os_dist,
             },
             'security': {
-                'total_proxy_calls': proxy_agg.get('total_calls') or 0,
+                'total_proxy_calls': total_calls,
                 'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
                 'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
             },
             'feature_adoption': {
                 'environment_distribution': env_dist,
-                'command_usage': {},
-                'integration_usage': {},
+                'command_usage': command_usage,
+                'integration_usage': integration_usage,
             },
             'report_date': str(today),
             'computed_at': timezone.now().isoformat(),
