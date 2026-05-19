@@ -243,16 +243,18 @@ class PublicMetricsAPIView(APIView):
             # Calculate stickiness (DAU/MAU)
             dau = today_metrics['active_users_daily']
             mau = today_metrics['active_users_monthly']
-            stickiness = round((dau / mau) * 100, 2) if mau > 0 else 0.0
+            stickiness = f"{round((dau / mau) * 100, 2)}%" if mau > 0 else "0.00%"
 
             # Calculate growth helper
             def _growth(curr, past_agg, field):
                 if not past_agg:
-                    return 0.0
+                    return "0.00%"
                 past_val = getattr(past_agg, field, 0)
                 if past_val == 0:
-                    return 0.0
-                return round(((curr - past_val) / past_val) * 100, 2)
+                    return "0.00%"
+                pct = round(((curr - past_val) / past_val) * 100, 2)
+                prefix = "+" if pct > 0 else ""
+                return f"{prefix}{pct}%"
 
             analytics = {
                 'stickiness_ratio_dau_mau': stickiness,
@@ -428,11 +430,11 @@ class PublicMetricsAPIView(APIView):
                 'new_secrets_today': new_secrets,
             },
             'analytics': {
-                'stickiness_ratio_dau_mau': round((active_daily / active_monthly) * 100, 2) if active_monthly > 0 else 0.0,
-                'user_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
-                'project_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
-                'secret_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
-                'dau_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
+                'stickiness_ratio_dau_mau': f"{round((active_daily / active_monthly) * 100, 2)}%" if active_monthly > 0 else "0.00%",
+                'user_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
+                'project_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
+                'secret_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
+                'dau_growth': {'dod': "0.00%", 'wow': "0.00%", 'mom': "0.00%"},
             },
             'security': {
                 'total_proxy_calls': proxy_agg.get('total_calls') or 0,
