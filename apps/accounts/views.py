@@ -95,6 +95,10 @@ class AuthController:
         key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
         expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
 
+        # Stamp user activity on successful login
+        from apps.accounts.utils import stamp_user_activity_async
+        await stamp_user_activity_async(user)
+
         workspaces_data = []
         async for m in Membership.objects.filter(user=user, status=MembershipStatus.ACTIVE).select_related("workspace"):
             workspaces_data.append({
@@ -189,6 +193,17 @@ class AuthController:
         try:
             refresh = await sync_to_async(RefreshToken)(data.refresh)
             expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
+            
+            # Extract user_id and stamp user activity on successful refresh
+            user_id = refresh.payload.get("user_id")
+            if user_id:
+                try:
+                    user = await User.objects.aget(id=user_id)
+                    from apps.accounts.utils import stamp_user_activity_async
+                    await stamp_user_activity_async(user)
+                except Exception as e:
+                    logger.error(f"Refresh: Failed to stamp user activity: {e}")
+
             return CustomResponse.success(message="Token refreshed successfully", data={
                 "access": str(refresh.access_token), "expires_at": expires_at.isoformat(),
             })

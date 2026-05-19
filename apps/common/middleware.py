@@ -46,3 +46,44 @@ class AuditLogMiddleware:
             logger.info(log_message)
             
         return response
+
+
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
+from apps.accounts.models import User
+from apps.accounts.utils import stamp_user_activity_async, stamp_user_activity_sync
+
+def get_user_from_request(request):
+    user = None
+    if hasattr(request, 'auth') and request.auth:
+        if isinstance(request.auth, User):
+            user = request.auth
+    if not user and hasattr(request, 'user') and request.user and request.user.is_authenticated:
+        if isinstance(request.user, User):
+            user = request.user
+    return user
+
+class ActivityTrackingMiddleware:
+    """
+    Middleware to capture and stamp active users once per day.
+    Runs after views to inspect request.auth / request.user on successful responses.
+    """
+    def __init__(self, get_response):
+        self.get_response = get_response
+        if iscoroutinefunction(self.get_response):
+            markcoroutinefunction(self)
+
+    async def __acall__(self, request):
+        response = await self.get_response(request)
+        if response.status_code < 400:
+            user = get_user_from_request(request)
+            if user:
+                await stamp_user_activity_async(user)
+        return response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if response.status_code < 400:
+            user = get_user_from_request(request)
+            if user:
+                stamp_user_activity_sync(user)
+        return response

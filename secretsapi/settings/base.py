@@ -48,6 +48,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.common.middleware.AuditLogMiddleware',
+    'apps.common.middleware.ActivityTrackingMiddleware',
 ]
 
 ROOT_URLCONF = 'secretsapi.urls'
