@@ -216,23 +216,68 @@ class PublicMetricsAPIView(APIView):
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
 
-        # 1. ALWAYS get live platform state and today's growth/engagement (super fast queries)
-        # This guarantees the dashboard never shows stale core counts or today's activity.
+        # 1. ALWAYS get live platform state, today's metrics and historical comparison aggregates concurrently
+        yesterday_date = today - timedelta(days=1)
+        week_ago_date = today - timedelta(days=7)
+        month_ago_date = today - timedelta(days=30)
+
         (
             platform_state,
             env_dist,
-            today_metrics
+            today_metrics,
+            latest,
+            agg_yesterday,
+            agg_week_ago,
+            agg_month_ago
         ) = await asyncio.gather(
             self._get_live_platform_state(),
             self._get_live_env_distribution(),
-            self._get_today_live_metrics(today, week_ago, month_ago)
+            self._get_today_live_metrics(today, week_ago, month_ago),
+            DailyMetricsAggregate.objects.order_by('-date').afirst(),
+            DailyMetricsAggregate.objects.filter(date__lte=yesterday_date).order_by('-date').afirst(),
+            DailyMetricsAggregate.objects.filter(date__lte=week_ago_date).order_by('-date').afirst(),
+            DailyMetricsAggregate.objects.filter(date__lte=month_ago_date).order_by('-date').afirst(),
         )
 
-        # 2. Get heavy metrics (engagement, cumulative stats) from the daily aggregate
-        latest = await DailyMetricsAggregate.objects.order_by('-date').afirst()
-
         if latest:
-            data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today)
+            # Calculate stickiness (DAU/MAU)
+            dau = today_metrics['active_users_daily']
+            mau = today_metrics['active_users_monthly']
+            stickiness = round((dau / mau) * 100, 2) if mau > 0 else 0.0
+
+            # Calculate growth helper
+            def _growth(curr, past_agg, field):
+                if not past_agg:
+                    return 0.0
+                past_val = getattr(past_agg, field, 0)
+                if past_val == 0:
+                    return 0.0
+                return round(((curr - past_val) / past_val) * 100, 2)
+
+            analytics = {
+                'stickiness_ratio_dau_mau': stickiness,
+                'user_growth': {
+                    'dod': _growth(platform_state['total_users'], agg_yesterday, 'total_users'),
+                    'wow': _growth(platform_state['total_users'], agg_week_ago, 'total_users'),
+                    'mom': _growth(platform_state['total_users'], agg_month_ago, 'total_users'),
+                },
+                'project_growth': {
+                    'dod': _growth(platform_state['total_projects'], agg_yesterday, 'total_projects'),
+                    'wow': _growth(platform_state['total_projects'], agg_week_ago, 'total_projects'),
+                    'mom': _growth(platform_state['total_projects'], agg_month_ago, 'total_projects'),
+                },
+                'secret_growth': {
+                    'dod': _growth(platform_state['total_secrets'], agg_yesterday, 'total_secrets'),
+                    'wow': _growth(platform_state['total_secrets'], agg_week_ago, 'total_secrets'),
+                    'mom': _growth(platform_state['total_secrets'], agg_month_ago, 'total_secrets'),
+                },
+                'dau_growth': {
+                    'dod': _growth(dau, agg_yesterday, 'active_users_daily'),
+                    'wow': _growth(dau, agg_week_ago, 'active_users_daily'),
+                    'mom': _growth(dau, agg_month_ago, 'active_users_daily'),
+                }
+            }
+            data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today, analytics)
         else:
             data = await self._build_live(platform_state, env_dist)
 
@@ -286,8 +331,8 @@ class PublicMetricsAPIView(APIView):
             'new_secrets_today': new_secrets,
         }
 
-    def _build_from_aggregate(self, agg, platform_state, env_dist, today_metrics, today):
-        """Build response mixing live platform state and today's live activity with pre-computed heavy aggregates."""
+    def _build_from_aggregate(self, agg, platform_state, env_dist, today_metrics, today, analytics):
+        """Build response mixing live platform state and today's live activity with pre-computed heavy aggregates and analytics."""
         return {
             'platform': platform_state,
             'engagement': {
@@ -303,6 +348,7 @@ class PublicMetricsAPIView(APIView):
                 'new_projects_today': today_metrics['new_projects_today'],
                 'new_secrets_today': today_metrics['new_secrets_today'],
             },
+            'analytics': analytics,
             'security': {
                 'total_proxy_calls': agg.total_proxy_calls,
                 'total_proxy_blocked': agg.total_proxy_blocked,
@@ -380,6 +426,13 @@ class PublicMetricsAPIView(APIView):
                 'new_signups_today': new_signups,
                 'new_projects_today': new_projects,
                 'new_secrets_today': new_secrets,
+            },
+            'analytics': {
+                'stickiness_ratio_dau_mau': round((active_daily / active_monthly) * 100, 2) if active_monthly > 0 else 0.0,
+                'user_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
+                'project_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
+                'secret_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
+                'dau_growth': {'dod': 0.0, 'wow': 0.0, 'mom': 0.0},
             },
             'security': {
                 'total_proxy_calls': proxy_agg.get('total_calls') or 0,
