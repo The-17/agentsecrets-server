@@ -254,7 +254,7 @@ class IdentityLevel(models.TextChoices):
 
 
 class AuditLogEntry(models.Model):
-    id = models.CharField(primary_key=True, max_length=32, default=generate_log_id, editable=False)
+    id = models.CharField(primary_key=True, max_length=64, default=generate_log_id, editable=False)
     schema_version = models.IntegerField(default=1)
     
     timestamp = models.DateTimeField()
