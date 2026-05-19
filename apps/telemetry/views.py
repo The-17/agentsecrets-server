@@ -209,7 +209,6 @@ class PublicMetricsAPIView(APIView):
     permission_classes = [AllowAny]
     serializer_class = PublicMetricsSerializer
 
-    @extend_schema(exclude=True)
     async def get(self, request):
         # 1. ALWAYS get live platform state (super fast queries)
         # This guarantees the dashboard never shows stale core counts.
@@ -391,12 +390,10 @@ class InternalComputeMetricsAPIView(APIView):
         expected = getattr(settings, 'CRON_SECRET', 'dev-secret')
         return hmac.compare_digest(token, expected)
 
-    @extend_schema(exclude=True)
     async def get(self, request):
         """Vercel cron calls GET by default."""
         return await self._handle_cron(request)
 
-    @extend_schema(exclude=True)
     async def post(self, request):
         return await self._handle_cron(request)
 
