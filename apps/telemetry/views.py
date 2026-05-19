@@ -211,7 +211,10 @@ class PublicMetricsAPIView(APIView):
 
     async def get(self, request):
         import asyncio
+        from datetime import timedelta
         today = timezone.now().date()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
 
         # 1. ALWAYS get live platform state and today's growth/engagement (super fast queries)
         # This guarantees the dashboard never shows stale core counts or today's activity.
@@ -222,7 +225,7 @@ class PublicMetricsAPIView(APIView):
         ) = await asyncio.gather(
             self._get_live_platform_state(),
             self._get_live_env_distribution(),
-            self._get_today_live_metrics(today)
+            self._get_today_live_metrics(today, week_ago, month_ago)
         )
 
         # 2. Get heavy metrics (engagement, cumulative stats) from the daily aggregate
@@ -257,21 +260,27 @@ class PublicMetricsAPIView(APIView):
             'production': await Secret.objects.filter(environment='production').acount(),
         }
 
-    async def _get_today_live_metrics(self, today):
+    async def _get_today_live_metrics(self, today, week_ago, month_ago):
         import asyncio
         (
-            active_daily,
+            active_counts,
             new_signups,
             new_projects,
             new_secrets
         ) = await asyncio.gather(
-            User.objects.filter(last_active_date=today).acount(),
+            User.objects.aaggregate(
+                active_daily=Count('id', filter=Q(last_active_date=today)),
+                active_weekly=Count('id', filter=Q(last_active_date__gte=week_ago)),
+                active_monthly=Count('id', filter=Q(last_active_date__gte=month_ago))
+            ),
             User.objects.filter(created_at__date=today).acount(),
             Project.objects.filter(created_at__date=today).acount(),
             Secret.objects.filter(created_at__date=today).acount(),
         )
         return {
-            'active_users_daily': active_daily,
+            'active_users_daily': active_counts['active_daily'],
+            'active_users_weekly': active_counts['active_weekly'],
+            'active_users_monthly': active_counts['active_monthly'],
             'new_signups_today': new_signups,
             'new_projects_today': new_projects,
             'new_secrets_today': new_secrets,
@@ -283,8 +292,8 @@ class PublicMetricsAPIView(APIView):
             'platform': platform_state,
             'engagement': {
                 'active_users_daily': today_metrics['active_users_daily'],
-                'active_users_weekly': agg.active_users_weekly,
-                'active_users_monthly': agg.active_users_monthly,
+                'active_users_weekly': today_metrics['active_users_weekly'],
+                'active_users_monthly': today_metrics['active_users_monthly'],
                 'avg_secrets_per_project': agg.avg_secrets_per_project,
                 'avg_projects_per_workspace': agg.avg_projects_per_workspace,
                 'avg_members_per_shared_workspace': agg.avg_members_per_workspace,
