@@ -78,35 +78,18 @@ class Command(BaseCommand):
         #    Prioritizes client_timestamp for accurate back-dating of offline activity.
         # ──────────────────────────────────────────────
         active_users_daily = (
-            TelemetrySnapshot.objects
-            .filter(
-                Q(client_timestamp__date=target_date) | Q(client_timestamp__isnull=True, created_at__date=target_date),
-                user__isnull=False
-            )
-            .values('user')
-            .distinct()
+            User.objects
+            .filter(last_active_date=target_date)
             .count()
         )
         active_users_weekly = (
-            TelemetrySnapshot.objects
-            .filter(
-                Q(client_timestamp__date__range=[week_ago, target_date]) | 
-                Q(client_timestamp__isnull=True, created_at__date__range=[week_ago, target_date]),
-                user__isnull=False
-            )
-            .values('user')
-            .distinct()
+            User.objects
+            .filter(last_active_date__range=[week_ago, target_date])
             .count()
         )
         active_users_monthly = (
-            TelemetrySnapshot.objects
-            .filter(
-                Q(client_timestamp__date__range=[month_ago, target_date]) | 
-                Q(client_timestamp__isnull=True, created_at__date__range=[month_ago, target_date]),
-                user__isnull=False
-            )
-            .values('user')
-            .distinct()
+            User.objects
+            .filter(last_active_date__range=[month_ago, target_date])
             .count()
         )
 

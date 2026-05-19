@@ -286,21 +286,21 @@ class PublicMetricsAPIView(APIView):
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
 
-        # Engagement — rolling active users from telemetry
+        # Engagement — rolling active users from User last_active_date
         active_daily = await (
-            TelemetrySnapshot.objects
-            .filter(created_at__date=today, user__isnull=False)
-            .values('user').distinct().acount()
+            User.objects
+            .filter(last_active_date=today)
+            .acount()
         )
         active_weekly = await (
-            TelemetrySnapshot.objects
-            .filter(created_at__date__gte=week_ago, user__isnull=False)
-            .values('user').distinct().acount()
+            User.objects
+            .filter(last_active_date__gte=week_ago)
+            .acount()
         )
         active_monthly = await (
-            TelemetrySnapshot.objects
-            .filter(created_at__date__gte=month_ago, user__isnull=False)
-            .values('user').distinct().acount()
+            User.objects
+            .filter(last_active_date__gte=month_ago)
+            .acount()
         )
 
         # Averages
