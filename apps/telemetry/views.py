@@ -247,9 +247,9 @@ class PublicMetricsAPIView(APIView):
             mau = today_metrics['active_users_monthly']
             stickiness = f"{round((dau / mau) * 100, 2)}%" if mau > 0 else "0.00%"
 
-            # Collaboration Index (Shared / Total Workspaces)
+            # Collaboration Index (Team Workspaces / Total Workspaces)
             total_ws = platform_state['total_workspaces']
-            team_collab = f"{round((platform_state['shared_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
+            team_collab = f"{round((platform_state['team_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
 
             # Production Adoption Rate (Production Secrets / Total Secrets)
             total_secrets = platform_state['total_secrets']
@@ -336,6 +336,11 @@ class PublicMetricsAPIView(APIView):
             'total_secrets': await Secret.objects.acount(),
             'total_workspaces': await Workspace.objects.acount(),
             'shared_workspaces': await Workspace.objects.filter(type=WorkspaceType.SHARED).acount(),
+            'team_workspaces': await Workspace.objects.filter(
+                type=WorkspaceType.SHARED
+            ).annotate(
+                active_members=Count('memberships', filter=Q(memberships__status=MembershipStatus.ACTIVE))
+            ).filter(active_members__gt=1).acount(),
             'pending_invites': await Membership.objects.filter(status=MembershipStatus.INVITED).acount(),
         }
 
@@ -489,10 +494,9 @@ class PublicMetricsAPIView(APIView):
             k: f"{round((v / total_cmds) * 100, 2)}%" if total_cmds > 0 else "0.00%"
             for k, v in command_usage.items()
         }
-
         # Collaboration & adoption rates
         total_ws = platform_state['total_workspaces']
-        team_collab = f"{round((platform_state['shared_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
+        team_collab = f"{round((platform_state['team_workspaces'] / total_ws) * 100, 2)}%" if total_ws > 0 else "0.00%"
 
         total_sec = platform_state['total_secrets']
         prod_adoption = f"{round((env_dist.get('production', 0) / total_sec) * 100, 2)}%" if total_sec > 0 else "0.00%"
