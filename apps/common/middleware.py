@@ -18,12 +18,16 @@ class AuditLogMiddleware:
         
         duration = time.time() - start_time
         
-        # Identify the user
+        # Identify the user — check both Django Ninja (request.auth) and Django session (request.user)
         user_identity = "Anonymous"
-        if hasattr(request, 'user') and request.user.is_authenticated:
+        if hasattr(request, 'auth') and request.auth:
+            # Django Ninja sets request.auth to the authenticated user/token
+            if hasattr(request.auth, 'email'):
+                user_identity = request.auth.email
+            else:
+                user_identity = str(request.auth)
+        elif hasattr(request, 'user') and request.user.is_authenticated:
             user_identity = request.user.email
-        elif hasattr(request, 'auth') and hasattr(request.auth, 'email'):
-            user_identity = request.auth.email
         
         # Get IP
         ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '0.0.0.0')).split(',')[0]

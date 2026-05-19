@@ -23,7 +23,6 @@ THIRD_PARTY_APPS = [
     "adrf",
     "rest_framework",
     "rest_framework_simplejwt",
-    "drf_spectacular",
     "ninja_extra",
     # "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
@@ -89,37 +88,6 @@ DATABASES = {
     }
 }
 
-
-REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-    ),
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle"
-    ],
-    "DEFAULT_THROTTLE_RATES": {
-        "anon": "100/day",
-        "user": "1000/day"
-    }
-}
-
-SPECTACULAR_SETTINGS = {
-    "TITLE": "Secrets API",
-    "DESCRIPTION": "Secrets API documentation",
-    "VERSION": "1.0.0",
-    "SECURITY": [
-        {
-            "bearerAuth": [],
-        }
-    ],
-    "TAGS": [
-        {"name": "Auth", "description": "Authentication endpoints"},
-        {"name": "Projects", "description": "Projects management endpoints"},
-        {"name": "Secrets", "description": "Secrets management endpoints"},
-    ],
-}
 
 
 # Password validation

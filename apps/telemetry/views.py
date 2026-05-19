@@ -12,7 +12,6 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken
-from drf_spectacular.utils import extend_schema
 
 # Local
 from asgiref.sync import sync_to_async
@@ -54,7 +53,6 @@ class TelemetrySyncAPIView(APIView):
     throttle_classes = [AnonRateThrottle, UserRateThrottle]
     serializer_class = TelemetrySyncSerializer
 
-    @extend_schema(exclude=True)
     async def post(self, request):
         # ──────────────────────────────────────────────
         # 1. FORMAT DETECTION & TRANSFORMATION

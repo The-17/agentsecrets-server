@@ -20,7 +20,7 @@ from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
 
 # Local
-from apps.common.auth import JWTAuth, ResolverServiceKeyAuth
+from apps.common.auth import JWTAuth, ResolverServiceKeyAuth, InternalOrUserAuth
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse
 from apps.common.exceptions import (
@@ -609,7 +609,7 @@ class ResolverController:
             "workspace_id": str(token.workspace_id), "environment": token.environment,
         }
 
-    @route.post("/audit/logs/", response={201: dict}, auth=[ResolverServiceKeyAuth(), JWTAuth()])
+    @route.post("/audit/logs/", response={201: dict}, auth=InternalOrUserAuth())
     async def create_audit_logs(self, request):
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
