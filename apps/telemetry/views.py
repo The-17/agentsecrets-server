@@ -280,55 +280,52 @@ class PublicMetricsAPIView(APIView):
 
     async def _build_live(self, platform_state, env_dist):
         """Fallback: compute heavy metrics live from the database."""
+        import asyncio
         from datetime import timedelta
 
         today = timezone.now().date()
         week_ago = today - timedelta(days=7)
         month_ago = today - timedelta(days=30)
 
-        # Engagement — rolling active users from User last_active_date
-        active_daily = await (
-            User.objects
-            .filter(last_active_date=today)
-            .acount()
-        )
-        active_weekly = await (
-            User.objects
-            .filter(last_active_date__gte=week_ago)
-            .acount()
-        )
-        active_monthly = await (
-            User.objects
-            .filter(last_active_date__gte=month_ago)
-            .acount()
+        # Run independent database queries concurrently
+        (
+            active_counts,
+            projects_with_secrets,
+            active_shared_memberships,
+            new_signups,
+            new_projects,
+            new_secrets,
+            proxy_agg
+        ) = await asyncio.gather(
+            User.objects.aaggregate(
+                active_daily=Count('id', filter=Q(last_active_date=today)),
+                active_weekly=Count('id', filter=Q(last_active_date__gte=week_ago)),
+                active_monthly=Count('id', filter=Q(last_active_date__gte=month_ago))
+            ),
+            Project.objects.filter(secrets__isnull=False).distinct().acount(),
+            Membership.objects.filter(workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE).acount(),
+            User.objects.filter(created_at__date=today).acount(),
+            Project.objects.filter(created_at__date=today).acount(),
+            Secret.objects.filter(created_at__date=today).acount(),
+            TelemetrySnapshot.objects.aaggregate(
+                total_calls=Sum('proxy_calls'),
+                total_blocked=Sum('proxy_blocked'),
+                total_redacted=Sum('proxy_redacted')
+            )
         )
 
+        active_daily = active_counts['active_daily']
+        active_weekly = active_counts['active_weekly']
+        active_monthly = active_counts['active_monthly']
+
         # Averages
-        projects_with_secrets = await Project.objects.filter(secrets__isnull=False).distinct().acount()
         avg_spp = round(platform_state['total_secrets'] / projects_with_secrets, 1) if projects_with_secrets > 0 else 0.0
         avg_ppw = round(platform_state['total_projects'] / platform_state['total_workspaces'], 1) if platform_state['total_workspaces'] > 0 else 0.0
 
         if platform_state['shared_workspaces'] > 0:
-            active_shared_memberships = await (
-                Membership.objects
-                .filter(workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE)
-                .acount()
-            )
             avg_mpw = round(active_shared_memberships / platform_state['shared_workspaces'], 1)
         else:
             avg_mpw = 0.0
-
-        # Growth
-        new_signups = await User.objects.filter(created_at__date=today).acount()
-        new_projects = await Project.objects.filter(created_at__date=today).acount()
-        new_secrets = await Secret.objects.filter(created_at__date=today).acount()
-
-        # Security — cumulative proxy stats across ALL telemetry
-        proxy_agg = await TelemetrySnapshot.objects.aaggregate(
-            total_calls=Sum('proxy_calls'),
-            total_blocked=Sum('proxy_blocked'),
-            total_redacted=Sum('proxy_redacted')
-        )
 
         return {
             'platform': platform_state,

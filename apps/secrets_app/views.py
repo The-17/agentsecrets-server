@@ -33,16 +33,26 @@ from .schemas import (
 class ProjectController(ProjectsMixin):
 
     async def _resolve_project(self, user, project_name, workspace_id=None):
-        workspace_ids = await sync_to_async(self.get_user_workspaces_ids)(user)
         name = project_name.lower()
         if workspace_id:
-            if workspace_id not in workspace_ids:
-                raise AuthorizationError("You don't have access to this workspace")
-            project = await Project.objects.select_related("workspace").filter(name=name, workspace_id=workspace_id).afirst()
+            project = await Project.objects.select_related("workspace").filter(
+                name=name,
+                workspace_id=workspace_id,
+                workspace__memberships__user=user,
+                workspace__memberships__status=MembershipStatus.ACTIVE
+            ).afirst()
+            if not project:
+                if await Project.objects.filter(name=name, workspace_id=workspace_id).aexists():
+                    raise AuthorizationError("You don't have access to this workspace")
+                raise NotFoundError("Project not found")
         else:
-            project = await Project.objects.select_related("workspace").filter(name=name, workspace_id__in=workspace_ids).afirst()
-        if not project:
-            raise NotFoundError("Project not found")
+            project = await Project.objects.select_related("workspace").filter(
+                name=name,
+                workspace__memberships__user=user,
+                workspace__memberships__status=MembershipStatus.ACTIVE
+            ).afirst()
+            if not project:
+                raise NotFoundError("Project not found")
         return project
 
     async def _resolve_project_by_id(self, user, project_id):
@@ -72,9 +82,11 @@ class ProjectController(ProjectsMixin):
 
     @route.get("/", response={200: dict})
     async def list_projects(self, request):
-        workspace_ids = await sync_to_async(self.get_user_workspaces_ids)(request.auth)
         projects = []
-        async for p in Project.objects.filter(workspace_id__in=workspace_ids).select_related("workspace"):
+        async for p in Project.objects.filter(
+            workspace__memberships__user=request.auth,
+            workspace__memberships__status=MembershipStatus.ACTIVE
+        ).select_related("workspace"):
             projects.append(self._project_data(p))
         return CustomResponse.success(message="Projects retrieved successfully!", data=projects)
 
@@ -219,8 +231,15 @@ class ProjectController(ProjectsMixin):
         valid = ["development", "staging", "production"]
         if from_env not in valid or to_env not in valid:
             raise BodyValidationError("environment", "Invalid from/to environment")
-        from_keys = set([k async for k in Secret.objects.filter(project=project, environment=from_env).values_list("key", flat=True)])
-        to_keys = set([k async for k in Secret.objects.filter(project=project, environment=to_env).values_list("key", flat=True)])
+
+        from_keys = set()
+        to_keys = set()
+        async for s in Secret.objects.filter(project=project, environment__in=[from_env, to_env]).values("key", "environment"):
+            if s["environment"] == from_env:
+                from_keys.add(s["key"])
+            else:
+                to_keys.add(s["key"])
+
         return CustomResponse.success(message="Cross-environment diff retrieved", data={
             "in_from_only": sorted(from_keys - to_keys), "in_to_only": sorted(to_keys - from_keys), "in_both": sorted(from_keys & to_keys),
         })
@@ -230,12 +249,16 @@ class ProjectController(ProjectsMixin):
 class SecretsController(SecretsMixin):
 
     async def _resolve(self, user, project_id):
-        project = await Project.objects.select_related("workspace").filter(id=project_id).afirst()
+        project = await Project.objects.select_related("workspace").filter(
+            id=project_id,
+            workspace__memberships__user=user,
+            workspace__memberships__status=MembershipStatus.ACTIVE
+        ).afirst()
         if not project:
+            if await Project.objects.filter(id=project_id).aexists():
+                raise AuthorizationError("You don't have access to this project")
             raise NotFoundError("Project not found")
-        membership = await Membership.objects.filter(user=user, workspace=project.workspace, status=MembershipStatus.ACTIVE).afirst()
-        if not membership:
-            raise AuthorizationError("You don't have access to this project")
+        membership = await Membership.objects.filter(user=user, workspace_id=project.workspace_id, status=MembershipStatus.ACTIVE).afirst()
         return project, membership
 
     def _validate_env(self, environment):
@@ -284,9 +307,9 @@ class SecretsController(SecretsMixin):
         project, _ = await self._resolve(request.auth, project_id)
         self._validate_env(environment)
         secrets = []
-        async for s in Secret.objects.filter(project=project, environment=environment):
+        async for s in Secret.objects.filter(project=project, environment=environment).values("id", "key", "value"):
             try:
-                secrets.append({"id": str(s.id), "key": s.key, "value": encryption_service.decrypt(s.value)})
+                secrets.append({"id": str(s["id"]), "key": s["key"], "value": encryption_service.decrypt(s["value"])})
             except Exception:
                 continue
         return CustomResponse.success(message="Secrets retrieved successfully", data={"project_id": str(project_id), "secrets": secrets})

@@ -56,13 +56,20 @@ class WorkspaceController(WorkspaceMixin):
 
     @route.get("/", response={200: dict})
     async def list_workspaces(self, request):
-        data = []
-        async for member in Membership.objects.filter(user=request.auth, status=MembershipStatus.ACTIVE).select_related("workspace"):
-            data.append({
-                "id": str(member.workspace.id), "name": member.workspace.name, "type": member.workspace.type,
-                "role": member.role, "encrypted_workspace_key": member.encrypted_workspace_key,
-                "created_at": member.workspace.created_at.isoformat(),
-            })
+        memberships = Membership.objects.filter(
+            user=request.auth, status=MembershipStatus.ACTIVE
+        ).values(
+            "role", "encrypted_workspace_key",
+            "workspace__id", "workspace__name", "workspace__type", "workspace__created_at"
+        )
+        data = [
+            {
+                "id": str(m["workspace__id"]), "name": m["workspace__name"], "type": m["workspace__type"],
+                "role": m["role"], "encrypted_workspace_key": m["encrypted_workspace_key"],
+                "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
+            }
+            async for m in memberships
+        ]
         return CustomResponse.success(message="Workspaces retrieved successfully", data=data)
 
     @route.post("/", response={201: dict})
@@ -113,13 +120,17 @@ class WorkspaceController(WorkspaceMixin):
     @route.get("/{workspace_id}/members/", response={200: dict, 404: ErrorResponse})
     async def list_members(self, request, workspace_id: uuid.UUID):
         await self._get_membership(request.auth, workspace_id)
-        data = []
-        async for m in Membership.objects.filter(workspace_id=workspace_id).select_related("user"):
-            data.append({
-                "id": str(m.id), "user_id": str(m.user.id), "email": m.user.email,
-                "name": f"{m.user.first_name} {m.user.last_name}",
-                "role": m.role, "status": m.status, "created_at": m.created_at.isoformat(),
-            })
+        memberships = Membership.objects.filter(workspace_id=workspace_id).values(
+            "id", "user_id", "user__email", "user__first_name", "user__last_name", "role", "status", "created_at"
+        )
+        data = [
+            {
+                "id": str(m["id"]), "user_id": str(m["user_id"]), "email": m["user__email"],
+                "name": f"{m['user__first_name']} {m['user__last_name']}",
+                "role": m["role"], "status": m["status"], "created_at": m["created_at"].isoformat() if m["created_at"] else None,
+            }
+            async for m in memberships
+        ]
         return CustomResponse.success(message="Members retrieved successfully", data=data)
 
     @route.post("/{workspace_id}/members/", response={201: dict, 200: dict, 403: ErrorResponse, 404: ErrorResponse})
@@ -486,17 +497,24 @@ class AuditController(WorkspaceMixin):
         await self._check_ws(request.auth, workspace_id)
         qs = self._apply_filters(AuditLogEntry.objects.filter(workspace_id=workspace_id), request)
         limit = max(1, min(limit, 1000))
-        data = []
-        async for log in qs.order_by("-timestamp")[:limit]:
-            data.append({
-                "id": str(log.id), "timestamp": log.timestamp.isoformat(),
-                "agent_id": log.agent_id, "identity_level": log.identity_level,
-                "credential_ref": log.credential_ref, "injection_style": log.injection_style,
-                "target_domain": log.target_domain, "target_url": log.target_url,
-                "method": log.method, "status_code": log.status_code,
-                "duration_ms": log.duration_ms, "redacted": log.redacted,
-                "resolution_path": log.resolution_path, "error": log.error,
-            })
+        fields = [
+            "id", "timestamp", "agent_id", "identity_level", "credential_ref",
+            "injection_style", "target_domain", "target_url", "method",
+            "status_code", "duration_ms", "redacted", "resolution_path", "error"
+        ]
+        logs = qs.order_by("-timestamp").values(*fields)[:limit]
+        data = [
+            {
+                "id": str(log["id"]), "timestamp": log["timestamp"].isoformat() if log["timestamp"] else None,
+                "agent_id": log["agent_id"], "identity_level": log["identity_level"],
+                "credential_ref": log["credential_ref"], "injection_style": log["injection_style"],
+                "target_domain": log["target_domain"], "target_url": log["target_url"],
+                "method": log["method"], "status_code": log["status_code"],
+                "duration_ms": log["duration_ms"], "redacted": log["redacted"],
+                "resolution_path": log["resolution_path"], "error": log["error"],
+            }
+            async for log in logs
+        ]
         return CustomResponse.success(message="Audit logs retrieved", data=data)
 
     @route.get("/logs/{log_id}/", response={200: dict, 404: ErrorResponse})
