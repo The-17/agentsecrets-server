@@ -79,17 +79,17 @@ class Command(BaseCommand):
         # ──────────────────────────────────────────────
         active_users_daily = (
             User.objects
-            .filter(last_active_date=target_date)
+            .filter(last_active_at__date=target_date)
             .count()
         )
         active_users_weekly = (
             User.objects
-            .filter(last_active_date__range=[week_ago, target_date])
+            .filter(last_active_at__date__range=[week_ago, target_date])
             .count()
         )
         active_users_monthly = (
             User.objects
-            .filter(last_active_date__range=[month_ago, target_date])
+            .filter(last_active_at__date__range=[month_ago, target_date])
             .count()
         )
 

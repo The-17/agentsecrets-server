@@ -233,7 +233,7 @@ class PublicMetricsAPIView(APIView):
         ) = await asyncio.gather(
             self._get_live_platform_state(),
             self._get_live_env_distribution(),
-            self._get_today_live_metrics(today, week_ago, month_ago),
+            self._get_today_live_metrics(today),
             DailyMetricsAggregate.objects.order_by('-date').afirst(),
             DailyMetricsAggregate.objects.filter(date__lte=yesterday_date).order_by('-date').afirst(),
             DailyMetricsAggregate.objects.filter(date__lte=week_ago_date).order_by('-date').afirst(),
@@ -365,8 +365,14 @@ class PublicMetricsAPIView(APIView):
             return {os_name: f"{round((count / total) * 100, 2)}%" for os_name, count in results.items()}
         return {}
 
-    async def _get_today_live_metrics(self, today, week_ago, month_ago):
+    async def _get_today_live_metrics(self, today):
         import asyncio
+        from datetime import timedelta
+        now = timezone.now()
+        rolling_daily = now - timedelta(hours=24)
+        rolling_weekly = now - timedelta(days=7)
+        rolling_monthly = now - timedelta(days=30)
+
         (
             active_counts,
             new_signups,
@@ -374,9 +380,9 @@ class PublicMetricsAPIView(APIView):
             new_secrets
         ) = await asyncio.gather(
             User.objects.aaggregate(
-                active_daily=Count('id', filter=Q(last_active_date=today)),
-                active_weekly=Count('id', filter=Q(last_active_date__gte=week_ago)),
-                active_monthly=Count('id', filter=Q(last_active_date__gte=month_ago))
+                active_daily=Count('id', filter=Q(last_active_at__gte=rolling_daily)),
+                active_weekly=Count('id', filter=Q(last_active_at__gte=rolling_weekly)),
+                active_monthly=Count('id', filter=Q(last_active_at__gte=rolling_monthly))
             ),
             User.objects.filter(created_at__date=today).acount(),
             Project.objects.filter(created_at__date=today).acount(),
@@ -428,9 +434,11 @@ class PublicMetricsAPIView(APIView):
         import asyncio
         from datetime import timedelta
 
-        today = timezone.now().date()
-        week_ago = today - timedelta(days=7)
-        month_ago = today - timedelta(days=30)
+        now = timezone.now()
+        today = now.date()
+        rolling_daily = now - timedelta(hours=24)
+        rolling_weekly = now - timedelta(days=7)
+        rolling_monthly = now - timedelta(days=30)
 
         # Run independent database queries concurrently
         (
@@ -443,9 +451,9 @@ class PublicMetricsAPIView(APIView):
             proxy_agg
         ) = await asyncio.gather(
             User.objects.aaggregate(
-                active_daily=Count('id', filter=Q(last_active_date=today)),
-                active_weekly=Count('id', filter=Q(last_active_date__gte=week_ago)),
-                active_monthly=Count('id', filter=Q(last_active_date__gte=month_ago))
+                active_daily=Count('id', filter=Q(last_active_at__gte=rolling_daily)),
+                active_weekly=Count('id', filter=Q(last_active_at__gte=rolling_weekly)),
+                active_monthly=Count('id', filter=Q(last_active_at__gte=rolling_monthly))
             ),
             Project.objects.filter(secrets__isnull=False).distinct().acount(),
             Membership.objects.filter(workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE).acount(),

@@ -41,10 +41,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     terms_agreement = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    last_active_date = models.DateField(
+    last_active_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="The last date the user was active on the platform (UTC date only)"
+        help_text="The last time the user was active on the platform (UTC)"
     )
 
     objects = CustomUserManager()
@@ -82,7 +82,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         verbose_name = _("User")
         verbose_name_plural = _("Users")
         indexes = [
-            models.Index(fields=['last_active_date']),
+            models.Index(fields=['last_active_at']),
         ]
     
     def __str__(self):
