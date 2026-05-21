@@ -41,6 +41,12 @@ class SoftJWTAuthentication(JWTAuthentication):
             return None
 
 
+class TelemetryAnonRateThrottle(AnonRateThrottle):
+    rate = '5/day'
+
+class TelemetryUserRateThrottle(UserRateThrottle):
+    rate = '20/day'
+
 class TelemetrySyncAPIView(APIView):
     """
     Receive batched CLI telemetry data.
@@ -50,7 +56,7 @@ class TelemetrySyncAPIView(APIView):
     """
     authentication_classes = [SoftJWTAuthentication]
     permission_classes = [AllowAny]
-    throttle_classes = [AnonRateThrottle, UserRateThrottle]
+    throttle_classes = [TelemetryAnonRateThrottle, TelemetryUserRateThrottle]
     serializer_class = TelemetrySyncSerializer
 
     async def post(self, request):
