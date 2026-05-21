@@ -629,6 +629,14 @@ class ResolverController:
 
     @route.post("/audit/logs/", response={201: dict}, auth=InternalOrUserAuth())
     async def create_audit_logs(self, request):
+        from django.core.cache import cache
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', 'unknown')).split(',')[0].strip()
+        key = f"rl_audit_{ip}"
+        count = cache.get(key, 0)
+        if count >= 3000:
+            return 429, {"detail": "Rate limit exceeded (Max 3000/day)"}
+        cache.set(key, count + 1, timeout=86400)
+
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
 
