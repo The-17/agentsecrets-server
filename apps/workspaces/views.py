@@ -627,7 +627,7 @@ class ResolverController:
             "workspace_id": str(token.workspace_id), "environment": token.environment,
         }
 
-    @route.post("/audit/logs/", response={201: dict}, auth=None)
+    @route.post("/audit/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
     async def create_audit_logs(self, request):
         from django.core.cache import cache
         from apps.common.auth import InternalOrUserAuth
