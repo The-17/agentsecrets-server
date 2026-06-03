@@ -285,7 +285,7 @@ class SecretsController(SecretsMixin):
                 existing[k].value = enc
                 to_update.append(existing[k])
             else:
-                to_create.append(Secret(project=project, environment=env, key=k, value=enc, policy={}))
+                to_create.append(Secret(project=project, environment=env, key=k, value=enc))
 
         if to_create:
             await Secret.objects.abulk_create(to_create)
@@ -307,14 +307,9 @@ class SecretsController(SecretsMixin):
         project, _ = await self._resolve(request.auth, project_id)
         self._validate_env(environment)
         secrets = []
-        async for s in Secret.objects.filter(project=project, environment=environment).values("id", "key", "value", "policy"):
+        async for s in Secret.objects.filter(project=project, environment=environment).values("id", "key", "value"):
             try:
-                secrets.append({
-                    "id": str(s["id"]),
-                    "key": s["key"],
-                    "value": encryption_service.decrypt(s["value"]),
-                    "policy": s["policy"] or {},
-                })
+                secrets.append({"id": str(s["id"]), "key": s["key"], "value": encryption_service.decrypt(s["value"])})
             except Exception:
                 continue
         return CustomResponse.success(message="Secrets retrieved successfully", data={"project_id": str(project_id), "secrets": secrets})
@@ -326,12 +321,7 @@ class SecretsController(SecretsMixin):
         secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
         if not secret:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
-        return CustomResponse.success(message="Secret retrieved successfully", data={
-            "id": str(secret.id),
-            "key": secret.key,
-            "value": encryption_service.decrypt(secret.value),
-            "policy": secret.policy or {},
-        })
+        return CustomResponse.success(message="Secret retrieved successfully", data={"id": str(secret.id), "key": secret.key, "value": encryption_service.decrypt(secret.value)})
 
     @route.patch("/{project_id}/{key}/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
     async def update_secret(self, request, project_id: uuid.UUID, key: str, data: SecretUpdateSchema, environment: str = "development"):
@@ -344,12 +334,7 @@ class SecretsController(SecretsMixin):
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
         secret.value = encryption_service.encrypt(data.value)
         await secret.asave()
-        return CustomResponse.success(message="Secret updated successfully", data={
-            "id": str(secret.id),
-            "key": secret.key,
-            "value": encryption_service.decrypt(secret.value),
-            "policy": secret.policy or {},
-        })
+        return CustomResponse.success(message="Secret updated successfully", data={"id": str(secret.id), "key": secret.key, "value": encryption_service.decrypt(secret.value)})
 
     @route.delete("/{project_id}/{key}/", response={200: SuccessResponse, 404: ErrorResponse})
     async def delete_secret(self, request, project_id: uuid.UUID, key: str, environment: str = "development"):
@@ -377,27 +362,3 @@ class SecretsController(SecretsMixin):
     @route.delete("/{project_id}/{environment}/{key}/", response={200: SuccessResponse, 404: ErrorResponse})
     async def delete_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str):
         return await self.delete_secret(request, project_id, key, environment)
-
-    # --- Policy endpoints ---
-
-    @route.get("/{project_id}/{environment}/{key}/policy/", response={200: dict, 404: ErrorResponse})
-    async def get_policy(self, request, project_id: uuid.UUID, environment: str, key: str):
-        project, _ = await self._resolve(request.auth, project_id)
-        self._validate_env(environment)
-        secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
-        if not secret:
-            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
-        return CustomResponse.success(message="Policy retrieved successfully", data=secret.policy or {})
-
-    @route.put("/{project_id}/{environment}/{key}/policy/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
-    async def set_policy(self, request, project_id: uuid.UUID, environment: str, key: str, data: dict):
-        project, membership = await self._resolve(request.auth, project_id)
-        if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
-            raise AuthorizationError("Only workspace owners and admins can modify policy")
-        self._validate_env(environment)
-        secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
-        if not secret:
-            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
-        secret.policy = data
-        await secret.asave()
-        return CustomResponse.success(message="Policy updated successfully", data=secret.policy or {})

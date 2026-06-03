@@ -43,10 +43,6 @@ class Secret(BaseModel):
     key = models.CharField(max_length=255)
     value = models.TextField()
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='secrets')
-    policy = models.JSONField(
-        default=dict, blank=True,
-        help_text="Usage policy: allowed domains and HTTP methods"
-    )
 
     def __str__(self):
         return f"{self.key} - {self.project.name} ({self.environment})"
