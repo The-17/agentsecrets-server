@@ -187,6 +187,10 @@ class AgentRegistration(models.Model):
         help_text="Project this agent is registered to (if project-scoped)"
     )
     name = models.CharField(max_length=64, help_text="Human-readable agent name")
+    capabilities = models.JSONField(
+        default=dict, blank=True,
+        help_text="Agent capability restrictions"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True,
