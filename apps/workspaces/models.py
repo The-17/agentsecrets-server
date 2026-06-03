@@ -192,6 +192,10 @@ class AgentRegistration(models.Model):
         User, on_delete=models.SET_NULL, null=True,
         related_name='created_agents'
     )
+    capabilities = models.JSONField(
+        default=dict, blank=True, null=True,
+        help_text="Agent capability restrictions"
+    )
 
     class Meta:
         db_table = 'agent_registrations'

@@ -393,6 +393,24 @@ class AgentController(WorkspaceMixin):
         await agent.adelete()
         return CustomResponse.success(message="Agent deleted")
 
+    @route.get("/{workspace_id}/agents/{registration_id}/capabilities/", response={200: dict, 404: ErrorResponse})
+    async def get_capabilities(self, request, workspace_id: uuid.UUID, registration_id: str):
+        await self._check_access(request.auth, workspace_id)
+        agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).afirst()
+        if not agent:
+            raise NotFoundError("Agent not found")
+        return CustomResponse.success(message="Capabilities retrieved successfully", data=agent.capabilities or {})
+
+    @route.put("/{workspace_id}/agents/{registration_id}/capabilities/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
+    async def set_capabilities(self, request, workspace_id: uuid.UUID, registration_id: str, data: dict):
+        await self._check_admin(request.auth, workspace_id)
+        agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).afirst()
+        if not agent:
+            raise NotFoundError("Agent not found")
+        agent.capabilities = data
+        await agent.asave()
+        return CustomResponse.success(message="Capabilities updated successfully", data=agent.capabilities or {})
+
 
 @api_controller("/workspaces", tags=["Agent Tokens"], auth=JWTAuth())
 class TokenController(WorkspaceMixin):
@@ -624,7 +642,9 @@ class ResolverController:
         agent = token.registration
         return {
             "valid": True, "agent_id": str(agent.id), "agent_name": agent.name,
-            "workspace_id": str(token.workspace_id), "environment": token.environment,
+            "workspace_id": str(token.workspace_id), "project_id": str(agent.project_id) if agent.project_id else None,
+            "environment": token.environment,
+            "capabilities": agent.capabilities or {},
         }
 
     @route.post("/audit/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
