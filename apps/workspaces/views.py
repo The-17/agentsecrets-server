@@ -651,6 +651,7 @@ class ResolverController:
     async def create_audit_logs(self, request):
         from django.core.cache import cache
         from apps.common.auth import InternalOrUserAuth
+        from asgiref.sync import sync_to_async
 
         ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', 'unknown')).split(',')[0].strip()
         
@@ -664,7 +665,7 @@ class ResolverController:
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         token = auth_header[7:] if auth_header.startswith('Bearer ') else None
         
-        user = InternalOrUserAuth().authenticate(request, token) if token else None
+        user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token) if token else None
         if not user:
             # Increment unauth counter and reject
             cache.set(unauth_key, unauth_count + 1, timeout=86400)
