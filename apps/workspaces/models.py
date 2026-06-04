@@ -225,7 +225,7 @@ class AgentToken(models.Model):
         Workspace, on_delete=models.CASCADE, related_name='agent_tokens'
     )
     environment = models.CharField(max_length=20, default='development')
-    token_hash = models.CharField(max_length=64, help_text="HMAC-SHA256 of the raw token value")
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True, help_text="SHA-256 of the raw token value")
     label = models.CharField(max_length=255, null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
