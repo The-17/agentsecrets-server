@@ -623,7 +623,15 @@ class ResolverController:
 
     @route.post("/agents/verify/", response={200: dict}, auth=InternalOrUserAuth())
     async def verify_agent(self, request, data: InternalAgentVerifySchema):
-        token = await AgentToken.objects.select_related("registration").filter(id=data.token_id).afirst()
+        token_hash = hashlib.sha256(data.token.encode()).hexdigest()
+
+        if data.token_id:
+            # Legacy path: lookup by DB primary key, then verify hash
+            token = await AgentToken.objects.select_related("registration").filter(id=data.token_id).afirst()
+        else:
+            # Hash-based lookup: the caller only has the raw token
+            token = await AgentToken.objects.select_related("registration").filter(token_hash=token_hash).afirst()
+
         if not token:
             return {"valid": False, "reason": "Not found"}
 
@@ -634,7 +642,6 @@ class ResolverController:
             if not has_access:
                 return {"valid": False, "reason": "Unauthorized workspace access"}
 
-        token_hash = hashlib.sha256(data.token.encode()).hexdigest()
         if not hmac_module.compare_digest(token_hash, token.token_hash):
             return {"valid": False, "reason": "Invalid token"}
 

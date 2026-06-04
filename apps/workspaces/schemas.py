@@ -113,5 +113,5 @@ class AgentCapabilitiesSchema(Schema):
 # ==========================================
 
 class InternalAgentVerifySchema(Schema):
-    token_id: str
+    token_id: Optional[str] = None
     token: str
