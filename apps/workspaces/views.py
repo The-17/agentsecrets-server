@@ -621,11 +621,18 @@ class ResolverController:
     Authenticated via RESOLVER_SERVICE_KEY — not user session auth.
     """
 
-    @route.post("/agents/verify/", response={200: dict}, auth=ResolverServiceKeyAuth())
+    @route.post("/agents/verify/", response={200: dict}, auth=InternalOrUserAuth())
     async def verify_agent(self, request, data: InternalAgentVerifySchema):
         token = await AgentToken.objects.select_related("registration").filter(id=data.token_id).afirst()
         if not token:
             return {"valid": False, "reason": "Not found"}
+
+        if isinstance(request.auth, User):
+            has_access = await Membership.objects.filter(
+                user=request.auth, workspace_id=token.workspace_id, status=MembershipStatus.ACTIVE
+            ).aexists()
+            if not has_access:
+                return {"valid": False, "reason": "Unauthorized workspace access"}
 
         token_hash = hashlib.sha256(data.token.encode()).hexdigest()
         if not hmac_module.compare_digest(token_hash, token.token_hash):
