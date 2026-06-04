@@ -39,6 +39,7 @@ from .schemas import (
     InviteEntrySchema, BatchInviteSchema,
     AllowlistBulkCreateSchema,
     AgentCreateSchema, AgentTokenCreateSchema,
+    AgentCapabilitiesSchema,
     InternalAgentVerifySchema,
 )
 
@@ -402,12 +403,12 @@ class AgentController(WorkspaceMixin):
         return CustomResponse.success(message="Capabilities retrieved successfully", data=agent.capabilities or {})
 
     @route.put("/{workspace_id}/agents/{registration_id}/capabilities/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
-    async def set_capabilities(self, request, workspace_id: uuid.UUID, registration_id: str, data: dict):
+    async def set_capabilities(self, request, workspace_id: uuid.UUID, registration_id: str, data: AgentCapabilitiesSchema):
         await self._check_admin(request.auth, workspace_id)
         agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).afirst()
         if not agent:
             raise NotFoundError("Agent not found")
-        agent.capabilities = data
+        agent.capabilities = data.dict()
         await agent.asave()
         return CustomResponse.success(message="Capabilities updated successfully", data=agent.capabilities or {})
 

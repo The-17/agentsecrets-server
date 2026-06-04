@@ -103,6 +103,11 @@ class AgentTokenCreateSchema(Schema):
     expires_in_days: Optional[int] = None
 
 
+class AgentCapabilitiesSchema(Schema):
+    allowed_secrets: List[str] = []
+    denied_secrets: List[str] = []
+
+
 # ==========================================
 # AUDIT LOG SCHEMAS
 # ==========================================
