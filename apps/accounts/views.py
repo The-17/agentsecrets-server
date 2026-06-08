@@ -181,11 +181,12 @@ class AuthController:
         return CustomResponse.success(message="Password changed successfully")
 
     @route.post("/logout/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
-    async def logout(self, request, data: LogoutSchema):
-        try:
-            await sync_to_async(RefreshToken(data.refresh_token).blacklist)()
-        except TokenError:
-            raise AuthenticationError("Token is invalid or expired")
+    async def logout(self, request, data: LogoutSchema = None):
+        if data and data.refresh_token:
+            try:
+                await sync_to_async(RefreshToken(data.refresh_token).blacklist)()
+            except TokenError:
+                pass  # Ignore invalid token on logout
         return CustomResponse.success(message="Logged out successfully")
 
     @route.post("/refresh/", response={200: dict, 401: ErrorResponse})
