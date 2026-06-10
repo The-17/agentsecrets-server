@@ -20,6 +20,7 @@ api.exception_handler(RequestError)(request_errors)
 # Explicitly import all controllers so they register with the API.
 # ninja-extra auto_discover looks for controllers.py by default,
 # but our controllers live in views.py per project convention.
+from apps.common.views import StatusController  # noqa: F401, E402
 from apps.accounts.views import AuthController, UserController  # noqa: F401, E402
 from apps.secrets_app.views import ProjectController, SecretsController  # noqa: F401, E402
 from apps.workspaces.views import (  # noqa: F401, E402

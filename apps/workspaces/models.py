@@ -255,6 +255,7 @@ class IdentityLevel(models.TextChoices):
     ANONYMOUS = 'anonymous', 'Anonymous'
     DECLARED = 'declared', 'Declared'
     ISSUED = 'issued', 'Issued'
+    USER = 'user', 'User'
 
 
 class AuditLogEntry(models.Model):
