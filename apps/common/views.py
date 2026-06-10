@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import secrets as secrets_module
 import logging
+import time
 from datetime import date
 
 # Django
@@ -50,7 +51,7 @@ class StatusController:
         return await self._get_status_response(request)
 
     async def _get_status_response(self, request):
-        # 1. Caching logic to prevent high request volume database load
+        # Caching logic to prevent high request volume database load
         fresh = request.GET.get("fresh", "false").lower() == "true"
         if not fresh and request.headers.get("Cache-Control") == "no-cache":
             fresh = True
@@ -58,7 +59,6 @@ class StatusController:
         if not fresh:
             cached_data = cache.get("status_check_result")
             if cached_data:
-                # Return cached healthy response immediately
                 return cached_data["code"], cached_data["data"]
 
         now = timezone.now()
@@ -68,6 +68,7 @@ class StatusController:
         db_ok = False
         db_write_ok = False
         functional_ok = False
+        checks = {}
         functional_details = {}
         db_details = {}
 
@@ -78,6 +79,7 @@ class StatusController:
                 db_read_ready = False
                 db_write_ready = False
                 local_db_details = {}
+                local_checks = {}
                 func_ok = False
                 func_err = None
 
@@ -106,179 +108,250 @@ class StatusController:
                 if db_read_ready:
                     try:
                         with transaction.atomic():
-                            # Step 1: User owner creation (using set_unusable_password to avoid expensive hashing)
-                            owner = User(
-                                email=f"health-owner-{uuid.uuid4()}@agentsecrets.local",
-                                first_name="Health",
-                                last_name="Owner"
-                            )
-                            owner.set_unusable_password()
-                            owner.save()
-
-                            # Step 2: User invitee creation
-                            invitee = User(
-                                email=f"health-invitee-{uuid.uuid4()}@agentsecrets.local",
-                                first_name="Health",
-                                last_name="Invitee"
-                            )
-                            invitee.set_unusable_password()
-                            invitee.save()
-
-                            # Step 3: One-Time Password (OTP) creation
-                            OneTimePassword.objects.create(
-                                user=owner,
-                                code="123456"
-                            )
-
-                            # Step 4: JWT token generation
-                            tokens = owner.tokens()
-                            if not tokens or "access" not in tokens:
-                                raise Exception("JWT generation failed")
-
-                            # Step 5: Workspace creation & Owner membership
-                            workspace = Workspace.objects.create(
-                                name="Health Workspace",
-                                owner=owner,
-                                type=WorkspaceType.SHARED
-                            )
-                            Membership.objects.create(
-                                user=owner,
-                                workspace=workspace,
-                                role=MembershipRole.OWNER,
-                                status=MembershipStatus.ACTIVE,
-                                encrypted_workspace_key="dummy-owner-key"
-                            )
-
-                            # Step 6: Workspace Invite & Membership lifecycle
-                            invitee_membership = Membership.objects.create(
-                                user=invitee,
-                                workspace=workspace,
-                                role=MembershipRole.MEMBER,
-                                status=MembershipStatus.ACTIVE,
-                                encrypted_workspace_key="dummy-invitee-key"
-                            )
-                            # Promote
-                            invitee_membership.role = MembershipRole.ADMIN
-                            invitee_membership.save()
-                            # Demote
-                            invitee_membership.role = MembershipRole.MEMBER
-                            invitee_membership.save()
-                            # Kick
-                            invitee_membership.delete()
-
-                            # Step 7: Workspace Allowlist addition
-                            allowlist = WorkspaceAllowlist.objects.create(
-                                workspace=workspace,
-                                domain="healthcheck.local",
-                                added_by=owner
-                            )
-
-                            # Step 8: Workspace Allowlist Log auditing
-                            WorkspaceAllowlistLog.objects.create(
-                                workspace=workspace,
-                                domain="healthcheck.local",
-                                action="added",
-                                performed_by=owner
-                            )
-                            allowlist.delete()
-
-                            # Step 9: Project management
-                            project = Project.objects.create(
-                                workspace=workspace,
-                                name="healthcheck-project"
-                            )
-
-                            # Step 10: Secrets creation & Encryption
+                            owner = None
+                            invitee = None
+                            workspace = None
+                            invitee_membership = None
+                            allowlist = None
+                            project = None
+                            secret = None
+                            agent = None
+                            token = None
+                            raw_token = None
+                            token_hash = None
                             test_plaintext = "very-secret-plaintext"
-                            encrypted_value = encryption_service.encrypt(test_plaintext)
-                            secret = Secret.objects.create(
-                                project=project,
-                                environment="development",
-                                key="HEALTHCHECK_KEY",
-                                value=encrypted_value,
-                                policy={"allowed_ips": ["127.0.0.1"]}
-                            )
 
-                            # Step 11: Secrets retrieval & Decryption
-                            fetched_secret = Secret.objects.get(id=secret.id)
-                            decrypted = encryption_service.decrypt(fetched_secret.value)
-                            if decrypted != test_plaintext:
-                                raise Exception("Encryption/Decryption value mismatch")
-                            if fetched_secret.policy.get("allowed_ips") != ["127.0.0.1"]:
-                                raise Exception("Policy JSON mismatch")
+                            # Helper function to run steps and record detailed latencies/status
+                            def run_step(step_name, func):
+                                t0 = time.perf_counter()
+                                try:
+                                    func()
+                                    duration = (time.perf_counter() - t0) * 1000
+                                    local_checks[step_name] = {
+                                        "status": "healthy",
+                                        "duration_ms": round(duration, 2)
+                                    }
+                                except Exception as ex:
+                                    duration = (time.perf_counter() - t0) * 1000
+                                    local_checks[step_name] = {
+                                        "status": "unhealthy",
+                                        "duration_ms": round(duration, 2),
+                                        "error": str(ex)
+                                    }
+                                    raise ex
 
-                            # Step 12: Agent & Token Registration
-                            agent = AgentRegistration.objects.create(
-                                workspace=workspace,
-                                project=project,
-                                name="Health Agent",
-                                capabilities={"read_only": True}
-                            )
-                            raw_token = secrets_module.token_urlsafe(32)
-                            token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-                            token = AgentToken.objects.create(
-                                registration=agent,
-                                workspace=workspace,
-                                token_hash=token_hash,
-                                label="Health Token"
-                            )
+                            # Step 1: User registration & creation
+                            def step_users():
+                                nonlocal owner, invitee
+                                owner = User(
+                                    email=f"health-owner-{uuid.uuid4()}@agentsecrets.local",
+                                    first_name="Health",
+                                    last_name="Owner"
+                                )
+                                owner.set_unusable_password()
+                                owner.save()
 
-                            # Step 13: Agent Token Verification (HMAC compare)
-                            verified_token = AgentToken.objects.select_related("registration").filter(token_hash=token_hash).first()
-                            if not verified_token or not hmac.compare_digest(verified_token.token_hash, token_hash):
-                                raise Exception("Agent token comparison mismatch")
+                                invitee = User(
+                                    email=f"health-invitee-{uuid.uuid4()}@agentsecrets.local",
+                                    first_name="Health",
+                                    last_name="Invitee"
+                                )
+                                invitee.set_unusable_password()
+                                invitee.save()
+                            run_step("user_management", step_users)
 
-                            # Step 14: Audit Logging
-                            AuditLogEntry.objects.create(
-                                timestamp=timezone.now(),
-                                workspace=workspace,
-                                project=project,
-                                agent_id=str(agent.id),
-                                agent_token=token,
-                                identity_level=IdentityLevel.ISSUED,
-                                credential_ref="HEALTHCHECK_KEY",
-                                injection_style="env",
-                                target_domain="healthcheck.local",
-                                target_url="https://healthcheck.local/resolve",
-                                target_path="/resolve",
-                                method="POST",
-                                duration_ms=15,
-                                resolution_path="local",
-                                caller_role="agent"
-                            )
+                            # Step 2: One-Time Password (OTP) creation
+                            def step_otp():
+                                OneTimePassword.objects.create(
+                                    user=owner,
+                                    code="123456"
+                                )
+                            run_step("otp_service", step_otp)
 
-                            # Step 15: Telemetry snapshot creation
-                            TelemetrySnapshot.objects.create(
-                                user=owner,
-                                cli_version="1.0.0",
-                                os="linux",
-                                arch="amd64",
-                                command_executions={"run": 1},
-                                proxy_calls=1
-                            )
+                            # Step 3: JWT token generation
+                            def step_jwt():
+                                tokens = owner.tokens()
+                                if not tokens or "access" not in tokens:
+                                    raise Exception("JWT generation failed")
+                            run_step("jwt_auth", step_jwt)
 
-                            # Step 16: Daily Metrics Aggregate creation
-                            # Use far future date to avoid conflict with actual daily metrics
-                            DailyMetricsAggregate.objects.create(
-                                date=date(2099, 12, 31),
-                                total_users=2,
-                                total_projects=1,
-                                total_secrets=1
-                            )
+                            # Step 4: Workspace creation & Owner membership
+                            def step_workspace():
+                                nonlocal workspace
+                                workspace = Workspace.objects.create(
+                                    name="Health Workspace",
+                                    owner=owner,
+                                    type=WorkspaceType.SHARED
+                                )
+                                Membership.objects.create(
+                                    user=owner,
+                                    workspace=workspace,
+                                    role=MembershipRole.OWNER,
+                                    status=MembershipStatus.ACTIVE,
+                                    encrypted_workspace_key="dummy-owner-key"
+                                )
+                            run_step("workspace_management", step_workspace)
 
-                            # If all steps pass without exception, the functional logic works!
+                            # Step 5: Workspace Invite & Membership lifecycle
+                            def step_membership():
+                                nonlocal invitee_membership
+                                invitee_membership = Membership.objects.create(
+                                    user=invitee,
+                                    workspace=workspace,
+                                    role=MembershipRole.MEMBER,
+                                    status=MembershipStatus.ACTIVE,
+                                    encrypted_workspace_key="dummy-invitee-key"
+                                )
+                                # Promote
+                                invitee_membership.role = MembershipRole.ADMIN
+                                invitee_membership.save()
+                                # Demote
+                                invitee_membership.role = MembershipRole.MEMBER
+                                invitee_membership.save()
+                                # Kick
+                                invitee_membership.delete()
+                            run_step("workspace_membership", step_membership)
+
+                            # Step 6: Workspace Allowlist addition
+                            def step_allowlist():
+                                nonlocal allowlist
+                                allowlist = WorkspaceAllowlist.objects.create(
+                                    workspace=workspace,
+                                    domain="healthcheck.local",
+                                    added_by=owner
+                                )
+                            run_step("workspace_allowlist", step_allowlist)
+
+                            # Step 7: Workspace Allowlist Log auditing
+                            def step_allowlist_log():
+                                WorkspaceAllowlistLog.objects.create(
+                                    workspace=workspace,
+                                    domain="healthcheck.local",
+                                    action="added",
+                                    performed_by=owner
+                                )
+                                allowlist.delete()
+                            run_step("allowlist_logging", step_allowlist_log)
+
+                            # Step 8: Project management
+                            def step_project():
+                                nonlocal project
+                                project = Project.objects.create(
+                                    workspace=workspace,
+                                    name="healthcheck-project"
+                                )
+                            run_step("project_management", step_project)
+
+                            # Step 9: Secrets creation & Encryption
+                            def step_secret():
+                                nonlocal secret
+                                encrypted_value = encryption_service.encrypt(test_plaintext)
+                                secret = Secret.objects.create(
+                                    project=project,
+                                    environment="development",
+                                    key="HEALTHCHECK_KEY",
+                                    value=encrypted_value,
+                                    policy={"allowed_ips": ["127.0.0.1"]}
+                                )
+                            run_step("secrets_management", step_secret)
+
+                            # Step 10: Secrets retrieval & Decryption
+                            def step_decrypt():
+                                fetched_secret = Secret.objects.get(id=secret.id)
+                                decrypted = encryption_service.decrypt(fetched_secret.value)
+                                if decrypted != test_plaintext:
+                                    raise Exception("Encryption/Decryption value mismatch")
+                                if fetched_secret.policy.get("allowed_ips") != ["127.0.0.1"]:
+                                    raise Exception("Policy JSON mismatch")
+                            run_step("decryption_and_policy", step_decrypt)
+
+                            # Step 11: Agent & Token Registration
+                            def step_agent():
+                                nonlocal agent, token, raw_token, token_hash
+                                agent = AgentRegistration.objects.create(
+                                    workspace=workspace,
+                                    project=project,
+                                    name="Health Agent",
+                                    capabilities={"read_only": True}
+                                )
+                                raw_token = secrets_module.token_urlsafe(32)
+                                token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+                                token = AgentToken.objects.create(
+                                    registration=agent,
+                                    workspace=workspace,
+                                    token_hash=token_hash,
+                                    label="Health Token"
+                                )
+                            run_step("agent_registration", step_agent)
+
+                            # Step 12: Agent Token Verification
+                            def step_token_verify():
+                                verified_token = AgentToken.objects.select_related("registration").filter(token_hash=token_hash).first()
+                                if not verified_token or not hmac.compare_digest(verified_token.token_hash, token_hash):
+                                    raise Exception("Agent token comparison mismatch")
+                            run_step("token_verification", step_token_verify)
+
+                            # Step 13: Audit Logging
+                            def step_audit_log():
+                                AuditLogEntry.objects.create(
+                                    timestamp=timezone.now(),
+                                    workspace=workspace,
+                                    project=project,
+                                    agent_id=str(agent.id),
+                                    agent_token=token,
+                                    identity_level=IdentityLevel.ISSUED,
+                                    credential_ref="HEALTHCHECK_KEY",
+                                    injection_style="env",
+                                    target_domain="healthcheck.local",
+                                    target_url="https://healthcheck.local/resolve",
+                                    target_path="/resolve",
+                                    method="POST",
+                                    duration_ms=15,
+                                    resolution_path="local",
+                                    caller_role="agent"
+                                )
+                            run_step("audit_logging", step_audit_log)
+
+                            # Step 14: Telemetry snapshots
+                            def step_telemetry():
+                                TelemetrySnapshot.objects.create(
+                                    user=owner,
+                                    cli_version="1.0.0",
+                                    os="linux",
+                                    arch="amd64",
+                                    command_executions={"run": 1},
+                                    proxy_calls=1
+                                )
+                            run_step("telemetry_sync", step_telemetry)
+
+                            # Step 15: Daily Metrics Aggregates
+                            def step_metrics():
+                                DailyMetricsAggregate.objects.update_or_create(
+                                    date=date(2099, 12, 31),
+                                    defaults={
+                                        "total_users": 2,
+                                        "total_projects": 1,
+                                        "total_secrets": 1
+                                    }
+                                )
+                            run_step("metrics_aggregate", step_metrics)
+
+                            # Complete!
                             func_ok = True
 
-                            # ALWAYS roll back database changes to keep DB clean (must be called INSIDE atomic block)
+                            # ALWAYS roll back database changes to keep DB clean
                             transaction.set_rollback(True)
                     except Exception as e:
                         func_ok = False
                         func_err = str(e)
                         logger.error(f"Status check functional pipeline failed: {e}")
 
-                return db_read_ready, db_write_ready, local_db_details, func_ok, func_err
+                return db_read_ready, db_write_ready, local_db_details, func_ok, func_err, local_checks
 
-            db_ok, db_write_ok, db_details, functional_ok, func_error = await sync_to_async(run_db_and_functional_checks)()
+            db_ok, db_write_ok, db_details, functional_ok, func_error, checks = await sync_to_async(run_db_and_functional_checks)()
+            functional_details = {
+                "checks": checks
+            }
             if func_error:
                 functional_details["error"] = func_error
         except Exception as e:
@@ -319,23 +392,27 @@ class StatusController:
         fs_ok = False
         fs_details = {}
         try:
-            total, used, free = shutil.disk_usage(settings.BASE_DIR)
-            free_gb = free / (1024 ** 3)
-            free_percent = (free / total) * 100
-            fs_details = {
-                "free_space_gb": round(free_gb, 2),
-                "free_space_percent": round(free_percent, 2),
-            }
-
-            if free_percent < 5.0 or free_gb < 1.0:
-                fs_details["warning"] = "Low disk space"
-
-            # Skip write tests in read-only serverless environment (Vercel)
+            # Skip write tests & false low disk space warnings in read-only serverless environment (Vercel)
             is_vercel = getattr(settings, 'IS_VERCEL', False)
             if is_vercel:
-                fs_details["write_status"] = "skipped_on_serverless"
+                fs_details = {
+                    "free_space_gb": "not_applicable",
+                    "free_space_percent": "not_applicable",
+                    "write_status": "skipped_on_serverless"
+                }
                 fs_ok = True
             else:
+                total, used, free = shutil.disk_usage(settings.BASE_DIR)
+                free_gb = free / (1024 ** 3)
+                free_percent = (free / total) * 100
+                fs_details = {
+                    "free_space_gb": round(free_gb, 2),
+                    "free_space_percent": round(free_percent, 2),
+                }
+
+                if free_percent < 5.0 or free_gb < 1.0:
+                    fs_details["warning"] = "Low disk space"
+
                 test_dir = settings.LOG_DIR if getattr(settings, 'ENABLE_FILE_LOGGING', False) else settings.BASE_DIR
                 test_file_path = os.path.join(test_dir, f".health_write_test_{uuid.uuid4()}")
                 try:
