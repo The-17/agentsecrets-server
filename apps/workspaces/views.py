@@ -660,6 +660,7 @@ class ResolverController:
             "workspace_id": str(token.workspace_id), "project_id": str(agent.project_id) if agent.project_id else None,
             "environment": token.environment,
             "capabilities": agent.capabilities or {},
+            "token_id": str(token.id),
         }
 
     @route.post("/audit/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
