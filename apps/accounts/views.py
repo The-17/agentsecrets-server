@@ -194,7 +194,25 @@ class AuthController:
         try:
             refresh = await sync_to_async(RefreshToken)(data.refresh)
             expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
-            
+
+            # Generate the new access token BEFORE rotation so the payload is correct
+            new_access = str(refresh.access_token)
+
+            # Perform token rotation to match SIMPLE_JWT settings:
+            # 1. Blacklist the old refresh token
+            # 2. Issue a new refresh token with fresh jti/exp/iat
+            rotate = settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False)
+            if rotate:
+                blacklist = settings.SIMPLE_JWT.get("BLACKLIST_AFTER_ROTATION", False)
+                if blacklist:
+                    try:
+                        await sync_to_async(refresh.blacklist)()
+                    except AttributeError:
+                        pass
+                refresh.set_jti()
+                refresh.set_exp()
+                refresh.set_iat()
+
             # Extract user_id and stamp user activity on successful refresh
             user_id = refresh.payload.get("user_id")
             if user_id:
@@ -205,9 +223,14 @@ class AuthController:
                 except Exception as e:
                     logger.error(f"Refresh: Failed to stamp user activity: {e}")
 
-            return CustomResponse.success(message="Token refreshed successfully", data={
-                "access": str(refresh.access_token), "expires_at": expires_at.isoformat(),
-            })
+            response_data = {
+                "access": new_access,
+                "expires_at": expires_at.isoformat(),
+            }
+            if rotate:
+                response_data["refresh"] = str(refresh)
+
+            return CustomResponse.success(message="Token refreshed successfully", data=response_data)
         except TokenError:
             raise AuthenticationError("Invalid or expired refresh token")
 
