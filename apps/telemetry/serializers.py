@@ -68,6 +68,63 @@ class TelemetrySyncSerializer(serializers.Serializer):
         default=[]
     )
 
+    # v3.0.0 Core
+    secrets_resolved = serializers.IntegerField(min_value=0, required=False, default=0)
+    total_proxy_duration_ms = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Execution Path Breakdown
+    proxy_calls_daemon = serializers.IntegerField(min_value=0, required=False, default=0)
+    proxy_calls_transient = serializers.IntegerField(min_value=0, required=False, default=0)
+    proxy_calls_mcp = serializers.IntegerField(min_value=0, required=False, default=0)
+    proxy_calls_direct = serializers.IntegerField(min_value=0, required=False, default=0)
+    developer_commands = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Agentic Shielding
+    ssrf_attempts_blocked = serializers.IntegerField(min_value=0, required=False, default=0)
+    allowlist_violations = serializers.IntegerField(min_value=0, required=False, default=0)
+    response_redactions = serializers.IntegerField(min_value=0, required=False, default=0)
+    process_verifications_failed = serializers.IntegerField(min_value=0, required=False, default=0)
+    production_write_challenges = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Latency & Performance
+    keychain_resolution_ms = serializers.IntegerField(min_value=0, required=False, default=0)
+    session_refresh_ms = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Onboarding & Friction
+    interactive_prompts_shown = serializers.IntegerField(min_value=0, required=False, default=0)
+    interactive_prompts_skipped = serializers.IntegerField(min_value=0, required=False, default=0)
+    drift_diffs_detected = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Cryptographic Integrity
+    log_chain_verifications = serializers.IntegerField(min_value=0, required=False, default=0)
+    tampering_detected = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Node Metadata
+    is_headless_node = serializers.BooleanField(required=False, default=False)
+    keychain_initialized = serializers.BooleanField(required=False, default=False)
+
+    # Typos
+    typos = serializers.DictField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        default=dict
+    )
+
+    # Agent Identity & Capabilities
+    identity_anonymous_calls = serializers.IntegerField(min_value=0, required=False, default=0)
+    identity_declared_calls = serializers.IntegerField(min_value=0, required=False, default=0)
+    identity_issued_calls = serializers.IntegerField(min_value=0, required=False, default=0)
+    capability_violations_blocked = serializers.IntegerField(min_value=0, required=False, default=0)
+    process_verifications_passed = serializers.IntegerField(min_value=0, required=False, default=0)
+
+    # Granular Error Categories
+    errors_auth_count = serializers.IntegerField(min_value=0, required=False, default=0)
+    errors_keychain_count = serializers.IntegerField(min_value=0, required=False, default=0)
+    errors_secrets_count = serializers.IntegerField(min_value=0, required=False, default=0)
+    errors_network_count = serializers.IntegerField(min_value=0, required=False, default=0)
+    errors_system_count = serializers.IntegerField(min_value=0, required=False, default=0)
+    errors_unknown_count = serializers.IntegerField(min_value=0, required=False, default=0)
+
 
 from .models import DailyMetricsAggregate
 

@@ -177,6 +177,39 @@ class TelemetrySyncAPIView(APIView):
                 proxy_redacted=item.get('proxy_redacted', 0),
                 injection_styles_used=item.get('injection_styles_used', []),
                 integrations_active=item.get('integrations_active', []),
+                secrets_resolved=item.get('secrets_resolved', 0),
+                total_proxy_duration_ms=item.get('total_proxy_duration_ms', 0),
+                proxy_calls_daemon=item.get('proxy_calls_daemon', 0),
+                proxy_calls_transient=item.get('proxy_calls_transient', 0),
+                proxy_calls_mcp=item.get('proxy_calls_mcp', 0),
+                proxy_calls_direct=item.get('proxy_calls_direct', 0),
+                developer_commands=item.get('developer_commands', 0),
+                ssrf_attempts_blocked=item.get('ssrf_attempts_blocked', 0),
+                allowlist_violations=item.get('allowlist_violations', 0),
+                response_redactions=item.get('response_redactions', 0),
+                process_verifications_failed=item.get('process_verifications_failed', 0),
+                production_write_challenges=item.get('production_write_challenges', 0),
+                keychain_resolution_ms=item.get('keychain_resolution_ms', 0),
+                session_refresh_ms=item.get('session_refresh_ms', 0),
+                interactive_prompts_shown=item.get('interactive_prompts_shown', 0),
+                interactive_prompts_skipped=item.get('interactive_prompts_skipped', 0),
+                drift_diffs_detected=item.get('drift_diffs_detected', 0),
+                log_chain_verifications=item.get('log_chain_verifications', 0),
+                tampering_detected=item.get('tampering_detected', 0),
+                is_headless_node=item.get('is_headless_node', False),
+                keychain_initialized=item.get('keychain_initialized', False),
+                typos=item.get('typos', {}),
+                identity_anonymous_calls=item.get('identity_anonymous_calls', 0),
+                identity_declared_calls=item.get('identity_declared_calls', 0),
+                identity_issued_calls=item.get('identity_issued_calls', 0),
+                capability_violations_blocked=item.get('capability_violations_blocked', 0),
+                process_verifications_passed=item.get('process_verifications_passed', 0),
+                errors_auth_count=item.get('errors_auth_count', 0),
+                errors_keychain_count=item.get('errors_keychain_count', 0),
+                errors_secrets_count=item.get('errors_secrets_count', 0),
+                errors_network_count=item.get('errors_network_count', 0),
+                errors_system_count=item.get('errors_system_count', 0),
+                errors_unknown_count=item.get('errors_unknown_count', 0),
                 client_timestamp=client_ts,
             ))
 
@@ -216,6 +249,21 @@ class PublicMetricsAPIView(APIView):
     serializer_class = PublicMetricsSerializer
 
     async def get(self, request):
+        bypass_cache = request.query_params.get('bypass_cache', '').lower() == 'true'
+        cache_key = "public_platform_metrics"
+        
+        if not bypass_cache:
+            from django.core.cache import cache
+            from asgiref.sync import sync_to_async
+            cached_data = await sync_to_async(cache.get)(cache_key)
+            if cached_data:
+                return CustomResponse.success(
+                    message="Platform metrics report",
+                    data=cached_data,
+                    status_code=200,
+                    is_drf=True
+                )
+
         import asyncio
         from datetime import timedelta
         today = timezone.now().date()
@@ -323,6 +371,7 @@ class PublicMetricsAPIView(APIView):
                 'integration_adoption': integration_adoption,
                 'command_market_share': command_share,
                 'cli_os_distribution': os_dist,
+                'unique_agents': latest.total_identity_declared_calls + latest.total_identity_issued_calls,
             }
             data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today, analytics)
         else:
@@ -425,11 +474,34 @@ class PublicMetricsAPIView(APIView):
                 'total_proxy_calls': agg.total_proxy_calls,
                 'total_proxy_blocked': agg.total_proxy_blocked,
                 'total_proxy_redacted': agg.total_proxy_redacted,
+                'total_secrets_resolved': agg.total_secrets_resolved,
+            },
+            'agent_infrastructure': {
+                'execution_paths': {
+                    'daemon': agg.total_proxy_calls_daemon,
+                    'transient': agg.total_proxy_calls_transient,
+                    'mcp': agg.total_proxy_calls_mcp,
+                    'direct': agg.total_proxy_calls_direct,
+                    'developer': agg.total_developer_commands,
+                },
+                'identity_levels': {
+                    'anonymous': agg.total_identity_anonymous_calls,
+                    'declared': agg.total_identity_declared_calls,
+                    'issued': agg.total_identity_issued_calls,
+                },
+                'shielding': {
+                    'ssrf_blocked': agg.total_ssrf_blocked,
+                    'allowlist_violations': agg.total_allowlist_violations,
+                    'capability_violations': agg.total_capability_violations_blocked,
+                    'process_verifications_failed': agg.total_process_verifications_failed,
+                    'process_verifications_passed': agg.total_process_verifications_passed,
+                }
             },
             'feature_adoption': {
                 'environment_distribution': env_dist,
                 'command_usage': agg.command_usage,
                 'integration_usage': agg.integration_usage,
+                'typos_usage': agg.typos_usage,
             },
             'report_date': str(today),
             'computed_at': timezone.now().isoformat(),
