@@ -398,6 +398,7 @@ class PublicMetricsAPIView(APIView):
             ).filter(active_members__gt=1).acount(),
             'pending_invites': await Membership.objects.filter(status=MembershipStatus.INVITED).acount(),
             'total_agents': await AgentRegistration.objects.acount(),
+            'total_policies': await Secret.objects.filter(policy__isnull=False).exclude(policy={}).acount(),
         }
 
     async def _get_live_env_distribution(self):
