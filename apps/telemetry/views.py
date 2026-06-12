@@ -20,7 +20,7 @@ from django.conf import settings
 from apps.common.response import CustomResponse
 from apps.accounts.models import User
 from apps.secrets_app.models import Project, Secret
-from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipStatus
+from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipStatus, AgentRegistration
 from .models import TelemetrySnapshot, DailyMetricsAggregate
 from .serializers import TelemetrySyncSerializer, PublicMetricsSerializer
 
@@ -371,7 +371,7 @@ class PublicMetricsAPIView(APIView):
                 'integration_adoption': integration_adoption,
                 'command_market_share': command_share,
                 'cli_os_distribution': os_dist,
-                'unique_agents': latest.total_identity_declared_calls + latest.total_identity_issued_calls,
+                'unique_agents': platform_state.get('total_agents', 0),
             }
             data = self._build_from_aggregate(latest, platform_state, env_dist, today_metrics, today, analytics)
         else:
@@ -397,6 +397,7 @@ class PublicMetricsAPIView(APIView):
                 active_members=Count('memberships', filter=Q(memberships__status=MembershipStatus.ACTIVE))
             ).filter(active_members__gt=1).acount(),
             'pending_invites': await Membership.objects.filter(status=MembershipStatus.INVITED).acount(),
+            'total_agents': await AgentRegistration.objects.acount(),
         }
 
     async def _get_live_env_distribution(self):
@@ -570,10 +571,19 @@ class PublicMetricsAPIView(APIView):
             for k, v in integration_usage.items()
         }
 
+        VALID_COMMANDS = {
+            'root', 'init', 'login', 'logout', 'status', 'workspace', 'project',
+            'secrets', 'agent', 'log', 'proxy', 'mcp', 'call', 'environment',
+            'env', 'exec', 'docs', '-h', '-v', '--help', '--version'
+        }
         command_usage = {}
+        typos_usage = {}
         async for snapshot in TelemetrySnapshot.objects.exclude(command_executions={}).only('command_executions'):
             for cmd, count in snapshot.command_executions.items():
-                command_usage[cmd] = command_usage.get(cmd, 0) + count
+                if cmd in VALID_COMMANDS:
+                    command_usage[cmd] = command_usage.get(cmd, 0) + count
+                else:
+                    typos_usage[cmd] = typos_usage.get(cmd, 0) + count
         
         total_cmds = sum(command_usage.values())
         command_share = {
@@ -621,6 +631,7 @@ class PublicMetricsAPIView(APIView):
                 'integration_adoption': integration_adoption,
                 'command_market_share': command_share,
                 'cli_os_distribution': os_dist,
+                'unique_agents': platform_state.get('total_agents', 0),
             },
             'security': {
                 'total_proxy_calls': total_calls,
@@ -631,6 +642,7 @@ class PublicMetricsAPIView(APIView):
                 'environment_distribution': env_dist,
                 'command_usage': command_usage,
                 'integration_usage': integration_usage,
+                'typos_usage': typos_usage,
             },
             'report_date': str(today),
             'computed_at': timezone.now().isoformat(),

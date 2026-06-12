@@ -140,13 +140,60 @@ class Command(BaseCommand):
         ).aggregate(
             total_calls=Sum('proxy_calls'),
             total_blocked=Sum('proxy_blocked'),
-            total_redacted=Sum('proxy_redacted')
+            total_redacted=Sum('proxy_redacted'),
+            # v3 Core
+            total_secrets_resolved=Sum('secrets_resolved'),
+            total_proxy_duration_ms=Sum('total_proxy_duration_ms'),
+            # Execution Paths
+            total_proxy_calls_daemon=Sum('proxy_calls_daemon'),
+            total_proxy_calls_transient=Sum('proxy_calls_transient'),
+            total_proxy_calls_mcp=Sum('proxy_calls_mcp'),
+            total_proxy_calls_direct=Sum('proxy_calls_direct'),
+            total_developer_commands=Sum('developer_commands'),
+            # Shielding
+            total_ssrf_blocked=Sum('ssrf_attempts_blocked'),
+            total_allowlist_violations=Sum('allowlist_violations'),
+            total_redactions_performed=Sum('response_redactions'),
+            total_process_verifications_failed=Sum('process_verifications_failed'),
+            total_production_write_challenges=Sum('production_write_challenges'),
+            # Latency Averages
+            avg_keychain_resolution_ms=Avg('keychain_resolution_ms'),
+            avg_session_refresh_ms=Avg('session_refresh_ms'),
+            # Onboarding
+            total_interactive_prompts_shown=Sum('interactive_prompts_shown'),
+            total_interactive_prompts_skipped=Sum('interactive_prompts_skipped'),
+            total_drift_diffs_detected=Sum('drift_diffs_detected'),
+            # Integrity
+            total_log_verifications=Sum('log_chain_verifications'),
+            total_tampering_alerts=Sum('tampering_detected'),
+            # Node Metadata (Boolean flag aggregation)
+            total_headless_nodes=Count('id', filter=Q(is_headless_node=True)),
+            total_active_keychains=Count('id', filter=Q(keychain_initialized=True)),
+            # Identity & Capabilities
+            total_identity_anonymous_calls=Sum('identity_anonymous_calls'),
+            total_identity_declared_calls=Sum('identity_declared_calls'),
+            total_identity_issued_calls=Sum('identity_issued_calls'),
+            total_capability_violations_blocked=Sum('capability_violations_blocked'),
+            total_process_verifications_passed=Sum('process_verifications_passed'),
+            # Errors
+            total_errors_auth=Sum('errors_auth_count'),
+            total_errors_keychain=Sum('errors_keychain_count'),
+            total_errors_secrets=Sum('errors_secrets_count'),
+            total_errors_network=Sum('errors_network_count'),
+            total_errors_system=Sum('errors_system_count'),
+            total_errors_unknown=Sum('errors_unknown_count'),
         )
 
         # ──────────────────────────────────────────────
         # 6. COMMAND USAGE — CUMULATIVE UP TO TARGET DATE
         # ──────────────────────────────────────────────
+        VALID_COMMANDS = {
+            'root', 'init', 'login', 'logout', 'status', 'workspace', 'project',
+            'secrets', 'agent', 'log', 'proxy', 'mcp', 'call', 'environment',
+            'env', 'exec', 'docs', '-h', '-v', '--help', '--version'
+        }
         command_usage = {}
+        typos_usage = {}
         relevant_snapshots = (
             TelemetrySnapshot.objects
             .filter(
@@ -158,7 +205,10 @@ class Command(BaseCommand):
         )
         for snapshot in relevant_snapshots:
             for cmd, count in snapshot.command_executions.items():
-                command_usage[cmd] = command_usage.get(cmd, 0) + count
+                if cmd in VALID_COMMANDS:
+                    command_usage[cmd] = command_usage.get(cmd, 0) + count
+                else:
+                    typos_usage[cmd] = typos_usage.get(cmd, 0) + count
 
         # ──────────────────────────────────────────────
         # 7. ENVIRONMENT DISTRIBUTION — PINNED STATE
@@ -213,5 +263,38 @@ class Command(BaseCommand):
                 'command_usage': command_usage,
                 'environment_distribution': env_dist,
                 'integration_usage': integration_usage,
+                'total_secrets_resolved': proxy_stats['total_secrets_resolved'] or 0,
+                'total_proxy_duration_ms': proxy_stats['total_proxy_duration_ms'] or 0,
+                'total_proxy_calls_daemon': proxy_stats['total_proxy_calls_daemon'] or 0,
+                'total_proxy_calls_transient': proxy_stats['total_proxy_calls_transient'] or 0,
+                'total_proxy_calls_mcp': proxy_stats['total_proxy_calls_mcp'] or 0,
+                'total_proxy_calls_direct': proxy_stats['total_proxy_calls_direct'] or 0,
+                'total_developer_commands': proxy_stats['total_developer_commands'] or 0,
+                'total_ssrf_blocked': proxy_stats['total_ssrf_blocked'] or 0,
+                'total_allowlist_violations': proxy_stats['total_allowlist_violations'] or 0,
+                'total_redactions_performed': proxy_stats['total_redactions_performed'] or 0,
+                'total_process_verifications_failed': proxy_stats['total_process_verifications_failed'] or 0,
+                'total_production_write_challenges': proxy_stats['total_production_write_challenges'] or 0,
+                'avg_keychain_resolution_ms': proxy_stats['avg_keychain_resolution_ms'] or 0.0,
+                'avg_session_refresh_ms': proxy_stats['avg_session_refresh_ms'] or 0.0,
+                'total_interactive_prompts_shown': proxy_stats['total_interactive_prompts_shown'] or 0,
+                'total_interactive_prompts_skipped': proxy_stats['total_interactive_prompts_skipped'] or 0,
+                'total_drift_diffs_detected': proxy_stats['total_drift_diffs_detected'] or 0,
+                'total_log_verifications': proxy_stats['total_log_verifications'] or 0,
+                'total_tampering_alerts': proxy_stats['total_tampering_alerts'] or 0,
+                'total_headless_nodes': proxy_stats['total_headless_nodes'] or 0,
+                'total_active_keychains': proxy_stats['total_active_keychains'] or 0,
+                'total_identity_anonymous_calls': proxy_stats['total_identity_anonymous_calls'] or 0,
+                'total_identity_declared_calls': proxy_stats['total_identity_declared_calls'] or 0,
+                'total_identity_issued_calls': proxy_stats['total_identity_issued_calls'] or 0,
+                'total_capability_violations_blocked': proxy_stats['total_capability_violations_blocked'] or 0,
+                'total_process_verifications_passed': proxy_stats['total_process_verifications_passed'] or 0,
+                'total_errors_auth': proxy_stats['total_errors_auth'] or 0,
+                'total_errors_keychain': proxy_stats['total_errors_keychain'] or 0,
+                'total_errors_secrets': proxy_stats['total_errors_secrets'] or 0,
+                'total_errors_network': proxy_stats['total_errors_network'] or 0,
+                'total_errors_system': proxy_stats['total_errors_system'] or 0,
+                'total_errors_unknown': proxy_stats['total_errors_unknown'] or 0,
+                'typos_usage': typos_usage,
             }
         )
