@@ -345,10 +345,13 @@ class AgentController(WorkspaceMixin):
         return CustomResponse.success(message="Agent created", data={"agent": agent_data, "token": raw_token, "token_id": str(token.id)}, status_code=201)
 
     @route.get("/{workspace_id}/agents/", response={200: dict, 404: ErrorResponse})
-    async def list_agents(self, request, workspace_id: uuid.UUID):
+    async def list_agents(self, request, workspace_id: uuid.UUID, include_projects: bool = False):
         await self._check_access(request.auth, workspace_id)
         agents = []
-        async for a in AgentRegistration.objects.filter(workspace_id=workspace_id, project__isnull=True).annotate(
+        qs = AgentRegistration.objects.filter(workspace_id=workspace_id)
+        if not include_projects:
+            qs = qs.filter(project__isnull=True)
+        async for a in qs.annotate(
             token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
             last_used_at=Max("tokens__last_used_at"),
         ):
