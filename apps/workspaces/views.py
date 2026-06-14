@@ -765,6 +765,17 @@ class ResolverController:
             tok_val = str(e.get('token_id')) if e.get('token_id') else None
             mapped['agent_token_id'] = tok_val if tok_val in existing_tokens else None
 
+            # Set defaults for required fields to prevent NOT NULL database constraint errors
+            mapped['credential_ref'] = mapped.get('credential_ref') or ''
+            mapped['injection_style'] = mapped.get('injection_style') or ''
+            mapped['target_domain'] = mapped.get('target_domain') or ''
+            mapped['target_url'] = mapped.get('target_url') or ''
+            mapped['target_path'] = mapped.get('target_path') or ''
+            mapped['method'] = (mapped.get('method') or 'GET').upper()
+            mapped['duration_ms'] = mapped.get('duration_ms') if mapped.get('duration_ms') is not None else 0
+            mapped['resolution_path'] = mapped.get('resolution_path') or 'unknown'
+            mapped['caller_role'] = mapped.get('caller_role') or 'unknown'
+
             return mapped
 
         model_entries = []
