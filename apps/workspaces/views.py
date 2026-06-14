@@ -707,6 +707,29 @@ class ResolverController:
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
 
+        # Collect IDs for batch verification to prevent ForeignKeyViolations
+        ws_ids = {e.get('workspace_id') for e in entries if e.get('workspace_id')}
+        prj_ids = {e.get('project_id') for e in entries if e.get('project_id')}
+        token_ids = {e.get('token_id') for e in entries if e.get('token_id')}
+
+        from apps.workspaces.models import Workspace, AgentToken
+        from apps.secrets_app.models import Project
+
+        existing_ws = set()
+        if ws_ids:
+            async for w_id in Workspace.objects.filter(id__in=ws_ids).values_list('id', flat=True):
+                existing_ws.add(str(w_id))
+
+        existing_prj = set()
+        if prj_ids:
+            async for p_id in Project.objects.filter(id__in=prj_ids).values_list('id', flat=True):
+                existing_prj.add(str(p_id))
+
+        existing_tokens = set()
+        if token_ids:
+            async for t_id in AgentToken.objects.filter(id__in=token_ids).values_list('id', flat=True):
+                existing_tokens.add(str(t_id))
+
         def map_entry(e):
             """Map CLI AuditEvent JSON fields to AuditLogEntry model fields."""
             mapped = {}
@@ -730,15 +753,28 @@ class ResolverController:
                 mapped['target_domain'] = e['domain']
 
             # FK references: CLI sends string IDs, model expects _id suffix
-            if 'workspace_id' in e and 'workspace' not in e:
-                mapped['workspace_id'] = e['workspace_id'] if e['workspace_id'] else None
-            if 'project_id' in e and 'project' not in e:
-                mapped['project_id'] = e['project_id'] if e['project_id'] else None
-            if 'token_id' in e and 'agent_token' not in e:
-                mapped['agent_token_id'] = e['token_id'] if e['token_id'] else None
+            ws_val = str(e.get('workspace_id')) if e.get('workspace_id') else None
+            if ws_val and ws_val in existing_ws:
+                mapped['workspace_id'] = ws_val
+            else:
+                return None  # Skip if workspace doesn't exist to prevent crash
+
+            prj_val = str(e.get('project_id')) if e.get('project_id') else None
+            mapped['project_id'] = prj_val if prj_val in existing_prj else None
+
+            tok_val = str(e.get('token_id')) if e.get('token_id') else None
+            mapped['agent_token_id'] = tok_val if tok_val in existing_tokens else None
 
             return mapped
 
-        model_entries = [AuditLogEntry(**map_entry(e)) for e in entries]
+        model_entries = []
+        for e in entries:
+            mapped = map_entry(e)
+            if mapped:
+                model_entries.append(AuditLogEntry(**mapped))
+
+        if not model_entries:
+            return 201, {"created_count": 0, "ids": []}
+
         created = await AuditLogEntry.objects.abulk_create(model_entries)
         return 201, {"created_count": len(created), "ids": [str(log.id) for log in created]}
