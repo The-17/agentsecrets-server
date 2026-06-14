@@ -98,8 +98,8 @@ class AgentTokenAdmin(ModelAdmin):
 
 @admin.register(AuditLogEntry)
 class AuditLogEntryAdmin(ModelAdmin):
-    list_display = ('timestamp', 'identity_level', 'agent_id', 'credential_ref', 'target_domain', 'method', 'status_code', 'duration_ms')
-    list_filter = ('identity_level', 'method', 'environment', 'redacted', 'timestamp')
-    search_fields = ('agent_id', 'credential_ref', 'target_domain')
+    list_display = ('timestamp', 'workspace', 'project', 'identity_level', 'agent_id', 'credential_ref', 'target_domain', 'method', 'status_code', 'duration_ms')
+    list_filter = ('workspace', 'project', 'identity_level', 'method', 'environment', 'redacted', 'timestamp')
+    search_fields = ('agent_id', 'credential_ref', 'target_domain', 'workspace__name', 'project__name')
     readonly_fields = ('id', 'recorded_at')
     date_hierarchy = 'timestamp'
