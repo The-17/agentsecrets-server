@@ -684,7 +684,12 @@ class ResolverController:
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         token = auth_header[7:] if auth_header.startswith('Bearer ') else None
         
-        user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token) if token else None
+        user = None
+        if hasattr(request, "user") and request.user and request.user.is_authenticated:
+            user = request.user
+        elif token:
+            user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token)
+
         if not user:
             # Increment unauth counter and reject
             cache.set(unauth_key, unauth_count + 1, timeout=86400)
@@ -726,11 +731,11 @@ class ResolverController:
 
             # FK references: CLI sends string IDs, model expects _id suffix
             if 'workspace_id' in e and 'workspace' not in e:
-                mapped['workspace_id'] = e['workspace_id']
+                mapped['workspace_id'] = e['workspace_id'] if e['workspace_id'] else None
             if 'project_id' in e and 'project' not in e:
-                mapped['project_id'] = e['project_id']
+                mapped['project_id'] = e['project_id'] if e['project_id'] else None
             if 'token_id' in e and 'agent_token' not in e:
-                mapped['agent_token_id'] = e['token_id']
+                mapped['agent_token_id'] = e['token_id'] if e['token_id'] else None
 
             return mapped
 

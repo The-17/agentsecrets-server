@@ -22,6 +22,11 @@ class JWTAuth(HttpBearer):
     validates it via SimpleJWT, and sets request.user.
     """
 
+    def __call__(self, request):
+        if hasattr(request, "user") and request.user and request.user.is_authenticated:
+            return request.user
+        return super().__call__(request)
+
     def authenticate(self, request, token):
         jwt_auth = JWTAuthentication()
         try:
@@ -64,6 +69,11 @@ class InternalOrUserAuth(HttpBearer):
     Combined auth class that allows BOTH ResolverServiceKeyAuth and JWTAuth.
     Manually checks both to avoid framework bugs with lists of authenticators.
     """
+
+    def __call__(self, request):
+        if hasattr(request, "user") and request.user and request.user.is_authenticated:
+            return request.user
+        return super().__call__(request)
 
     def authenticate(self, request, token):
         logger.info(f"InternalOrUserAuth: Received token (first 20 chars): {token[:20]}...")
