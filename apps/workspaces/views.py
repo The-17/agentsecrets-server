@@ -10,7 +10,8 @@ import uuid
 logger = logging.getLogger("apps.workspaces")
 
 # Django
-from django.db.models import Count, Max, Q
+from django.db.models import Count, Max, Q, Subquery, OuterRef, IntegerField
+from django.db.models.functions import Coalesce
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.conf import settings
@@ -351,9 +352,38 @@ class AgentController(WorkspaceMixin):
         qs = AgentRegistration.objects.filter(workspace_id=workspace_id)
         if not include_projects:
             qs = qs.filter(project__isnull=True)
+
+        token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"))
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        active_token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"), revoked_at__isnull=True)
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        last_used_at_sub = Subquery(
+            AgentToken.objects.filter(registration=OuterRef("pk"))
+            .values("registration")
+            .annotate(max_used=Max("last_used_at"))
+            .values("max_used")
+        )
+
         async for a in qs.annotate(
-            token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
-            last_used_at=Max("tokens__last_used_at"),
+            token_count=token_count_sub,
+            active_token_count=active_token_count_sub,
+            last_used_at=last_used_at_sub,
         ):
             agents.append(self._serialize_agent(a))
         return CustomResponse.success(message="Agents retrieved", data=agents)
@@ -366,9 +396,38 @@ class AgentController(WorkspaceMixin):
     async def list_project_agents(self, request, workspace_id: uuid.UUID, project_id: uuid.UUID):
         await self._check_access(request.auth, workspace_id)
         agents = []
+
+        token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"))
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        active_token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"), revoked_at__isnull=True)
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        last_used_at_sub = Subquery(
+            AgentToken.objects.filter(registration=OuterRef("pk"))
+            .values("registration")
+            .annotate(max_used=Max("last_used_at"))
+            .values("max_used")
+        )
+
         async for a in AgentRegistration.objects.filter(workspace_id=workspace_id, project_id=project_id).annotate(
-            token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
-            last_used_at=Max("tokens__last_used_at"),
+            token_count=token_count_sub,
+            active_token_count=active_token_count_sub,
+            last_used_at=last_used_at_sub,
         ):
             agents.append(self._serialize_agent(a))
         return CustomResponse.success(message="Project agents retrieved", data=agents)
@@ -380,9 +439,38 @@ class AgentController(WorkspaceMixin):
     @route.get("/{workspace_id}/agents/{registration_id}/", response={200: dict, 404: ErrorResponse})
     async def get_agent(self, request, workspace_id: uuid.UUID, registration_id: str):
         await self._check_access(request.auth, workspace_id)
+
+        token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"))
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        active_token_count_sub = Coalesce(
+            Subquery(
+                AgentToken.objects.filter(registration=OuterRef("pk"), revoked_at__isnull=True)
+                .values("registration")
+                .annotate(cnt=Count("pk"))
+                .values("cnt"),
+                output_field=IntegerField()
+            ),
+            0
+        )
+        last_used_at_sub = Subquery(
+            AgentToken.objects.filter(registration=OuterRef("pk"))
+            .values("registration")
+            .annotate(max_used=Max("last_used_at"))
+            .values("max_used")
+        )
+
         agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).annotate(
-            token_count=Count("tokens"), active_token_count=Count("tokens", filter=Q(tokens__revoked_at__isnull=True)),
-            last_used_at=Max("tokens__last_used_at"),
+            token_count=token_count_sub,
+            active_token_count=active_token_count_sub,
+            last_used_at=last_used_at_sub,
         ).afirst()
         if not agent:
             raise NotFoundError("Agent not found")
@@ -517,7 +605,7 @@ class AuditController(WorkspaceMixin):
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await self._check_ws(request.auth, workspace_id)
-        qs = self._apply_filters(AuditLogEntry.objects.filter(workspace_id=workspace_id), request)
+        qs = self._apply_filters(AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER), request)
         limit = max(1, min(limit, 1000))
         fields = [
             "id", "timestamp", "agent_id", "identity_level", "credential_ref",
@@ -561,7 +649,7 @@ class AuditController(WorkspaceMixin):
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await self._check_ws(request.auth, workspace_id)
-        qs = AuditLogEntry.objects.filter(workspace_id=workspace_id)
+        qs = AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER)
         start = request.GET.get("start")
         end = request.GET.get("end")
         if start:
@@ -597,7 +685,7 @@ class AuditController(WorkspaceMixin):
         fmt = request.GET.get("format", "jsonl").lower()
         if fmt != "jsonl":
             raise BodyValidationError("format", "Unsupported format. Only 'jsonl' is supported.")
-        qs = self._apply_filters(AuditLogEntry.objects.filter(workspace_id=workspace_id), request)
+        qs = self._apply_filters(AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER), request)
 
         def generate_jsonl():
             for log in qs.order_by("-timestamp"):
