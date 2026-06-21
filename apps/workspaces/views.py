@@ -278,6 +278,14 @@ class AllowlistController(WorkspaceMixin):
         result = [{"id": str(e.id), "domain": e.domain, "added_by_email": e.added_by.email, "added_at": e.added_at.isoformat()} for e in entries]
         return CustomResponse.success(message=f"Added {len(new_domains)} domain(s) to allowlist", data=result, status_code=201)
 
+    @route.get("/{workspace_id}/allowlist/log/", response={200: dict, 404: ErrorResponse})
+    async def logs(self, request, workspace_id: uuid.UUID):
+        await self._check_access(request.auth, workspace_id)
+        data = []
+        async for log in WorkspaceAllowlistLog.objects.filter(workspace_id=workspace_id).select_related("performed_by"):
+            data.append({"domain": log.domain, "action": log.action, "performed_by_email": log.performed_by.email, "performed_at": log.performed_at.isoformat()})
+        return CustomResponse.success(message="Logs retrieved", data=data)
+
     @route.delete("/{workspace_id}/allowlist/{domain}/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
     async def remove_domain(self, request, workspace_id: uuid.UUID, domain: str):
         m = await self._check_access(request.auth, workspace_id)
@@ -289,14 +297,6 @@ class AllowlistController(WorkspaceMixin):
         await entry.adelete()
         await WorkspaceAllowlistLog.objects.acreate(workspace_id=workspace_id, domain=domain.lower(), action="removed", performed_by=request.auth)
         return CustomResponse.success(message="Domain removed from allowlist")
-
-    @route.get("/{workspace_id}/allowlist/log/", response={200: dict, 404: ErrorResponse})
-    async def logs(self, request, workspace_id: uuid.UUID):
-        await self._check_access(request.auth, workspace_id)
-        data = []
-        async for log in WorkspaceAllowlistLog.objects.filter(workspace_id=workspace_id).select_related("performed_by"):
-            data.append({"domain": log.domain, "action": log.action, "performed_by_email": log.performed_by.email, "performed_at": log.performed_at.isoformat()})
-        return CustomResponse.success(message="Logs retrieved", data=data)
 
 
 @api_controller("/workspaces", tags=["Agents"], auth=JWTAuth())

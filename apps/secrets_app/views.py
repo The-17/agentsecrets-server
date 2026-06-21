@@ -7,6 +7,8 @@ from asgiref.sync import sync_to_async
 
 import logging
 from ninja_extra import api_controller, route
+from ninja import Body
+
 
 
 logger = logging.getLogger("apps.secrets_app")
@@ -390,7 +392,7 @@ class SecretsController(SecretsMixin):
         return CustomResponse.success(message="Policy retrieved successfully", data=secret.policy or {})
 
     @route.put("/{project_id}/{environment}/{key}/policy/", response={200: dict, 403: ErrorResponse, 404: ErrorResponse})
-    async def set_policy(self, request, project_id: uuid.UUID, environment: str, key: str, data: dict):
+    async def set_policy(self, request, project_id: uuid.UUID, environment: str, key: str, data: dict = Body(...)):
         project, membership = await self._resolve(request.auth, project_id)
         if membership.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace owners and admins can modify policy")
