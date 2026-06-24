@@ -875,5 +875,5 @@ class ResolverController:
         if not model_entries:
             return 201, {"created_count": 0, "ids": []}
 
-        created = await AuditLogEntry.objects.abulk_create(model_entries)
+        created = await AuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
         return 201, {"created_count": len(created), "ids": [str(log.id) for log in created]}
