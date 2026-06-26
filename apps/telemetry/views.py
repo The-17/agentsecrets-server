@@ -583,7 +583,21 @@ class PublicMetricsAPIView(APIView):
             TelemetrySnapshot.objects.aaggregate(
                 total_calls=Sum('proxy_calls'),
                 total_blocked=Sum('proxy_blocked'),
-                total_redacted=Sum('proxy_redacted')
+                total_redacted=Sum('proxy_redacted'),
+                total_secrets_resolved=Sum('secrets_resolved'),
+                total_proxy_calls_daemon=Sum('proxy_calls_daemon'),
+                total_proxy_calls_transient=Sum('proxy_calls_transient'),
+                total_proxy_calls_mcp=Sum('proxy_calls_mcp'),
+                total_proxy_calls_direct=Sum('proxy_calls_direct'),
+                total_developer_commands=Sum('developer_commands'),
+                total_identity_anonymous_calls=Sum('identity_anonymous_calls'),
+                total_identity_declared_calls=Sum('identity_declared_calls'),
+                total_identity_issued_calls=Sum('identity_issued_calls'),
+                total_ssrf_blocked=Sum('ssrf_attempts_blocked'),
+                total_allowlist_violations=Sum('allowlist_violations'),
+                total_capability_violations_blocked=Sum('capability_violations_blocked'),
+                total_process_verifications_failed=Sum('process_verifications_failed'),
+                total_process_verifications_passed=Sum('process_verifications_passed')
             )
         )
 
@@ -678,6 +692,28 @@ class PublicMetricsAPIView(APIView):
                 'total_proxy_calls': total_calls,
                 'total_proxy_blocked': proxy_agg.get('total_blocked') or 0,
                 'total_proxy_redacted': proxy_agg.get('total_redacted') or 0,
+                'total_secrets_resolved': proxy_agg.get('total_secrets_resolved') or 0,
+            },
+            'agent_infrastructure': {
+                'execution_paths': {
+                    'daemon': proxy_agg.get('total_proxy_calls_daemon') or 0,
+                    'transient': proxy_agg.get('total_proxy_calls_transient') or 0,
+                    'mcp': proxy_agg.get('total_proxy_calls_mcp') or 0,
+                    'direct': proxy_agg.get('total_proxy_calls_direct') or 0,
+                    'developer': proxy_agg.get('total_developer_commands') or 0,
+                },
+                'identity_levels': {
+                    'anonymous': proxy_agg.get('total_identity_anonymous_calls') or 0,
+                    'declared': proxy_agg.get('total_identity_declared_calls') or 0,
+                    'issued': proxy_agg.get('total_identity_issued_calls') or 0,
+                },
+                'shielding': {
+                    'ssrf_blocked': proxy_agg.get('total_ssrf_blocked') or 0,
+                    'allowlist_violations': proxy_agg.get('total_allowlist_violations') or 0,
+                    'capability_violations': proxy_agg.get('total_capability_violations_blocked') or 0,
+                    'process_verifications_failed': proxy_agg.get('total_process_verifications_failed') or 0,
+                    'process_verifications_passed': proxy_agg.get('total_process_verifications_passed') or 0,
+                }
             },
             'feature_adoption': {
                 'environment_distribution': env_dist,
