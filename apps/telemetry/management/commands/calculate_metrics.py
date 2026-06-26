@@ -66,6 +66,25 @@ class Command(BaseCommand):
             created_at__date__lte=target_date
         ).count()
 
+        # Count active policies: secrets with a non-empty policy dict + agents with
+        # a non-empty capabilities dict, both pinned to target_date.
+        from apps.workspaces.models import AgentRegistration
+        secret_policies = (
+            Secret.objects
+            .filter(created_at__date__lte=target_date)
+            .exclude(policy__isnull=True)
+            .exclude(policy__exact={})
+            .count()
+        )
+        agent_policies = (
+            AgentRegistration.objects
+            .filter(created_at__date__lte=target_date)
+            .exclude(capabilities__isnull=True)
+            .exclude(capabilities__exact={})
+            .count()
+        )
+        total_policies = secret_policies + agent_policies
+
         # ──────────────────────────────────────────────
         # 2. GROWTH — GROWTH ON SPECIFIC DATE
         # ──────────────────────────────────────────────
@@ -257,6 +276,7 @@ class Command(BaseCommand):
                 'avg_members_per_workspace': avg_members_per_workspace,
                 'avg_secrets_per_project': avg_secrets_per_project,
                 'avg_projects_per_workspace': avg_projects_per_workspace,
+                'total_policies': total_policies,
                 'total_proxy_calls': proxy_stats['total_calls'] or 0,
                 'total_proxy_blocked': proxy_stats['total_blocked'] or 0,
                 'total_proxy_redacted': proxy_stats['total_redacted'] or 0,

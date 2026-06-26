@@ -188,6 +188,11 @@ class DailyMetricsAggregate(models.Model):
     avg_secrets_per_project = models.FloatField(default=0.0)
     avg_projects_per_workspace = models.FloatField(default=0.0)
 
+    # Policy metrics
+    # Counts both secret-level policies (Secret.policy != {}) and agent capability
+    # policies (AgentRegistration.capabilities != {}), pinned to the aggregate date.
+    total_policies = models.IntegerField(default=0)
+
     # Proxy & security metrics (aggregated from telemetry snapshots)
     total_proxy_calls = models.IntegerField(default=0)
     total_proxy_blocked = models.IntegerField(default=0)

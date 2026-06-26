@@ -213,7 +213,33 @@ class TelemetrySyncAPIView(APIView):
                 client_timestamp=client_ts,
             ))
 
-        await TelemetrySnapshot.objects.abulk_create(snapshots)
+        # ──────────────────────────────────────────────
+        # 4. DEDUP & UPSERT
+        #    Deduplicate by (user, client_timestamp date) to prevent
+        #    stale CLI re-sends from creating duplicate rows.
+        # ──────────────────────────────────────────────
+        created_count = 0
+        updated_count = 0
+        for snap in snapshots:
+            ts_date = snap.client_timestamp.date() if snap.client_timestamp else None
+            existing = None
+            if snap.user and ts_date:
+                existing = await TelemetrySnapshot.objects.filter(
+                    user=snap.user,
+                    client_timestamp__date=ts_date,
+                ).afirst()
+
+            if existing:
+                # Update all metric fields on the existing row
+                for field in TelemetrySnapshot._meta.get_fields():
+                    if not hasattr(field, 'attname') or field.attname in ('id', 'created_at', 'updated_at', 'user_id', 'client_timestamp'):
+                        continue
+                    setattr(existing, field.attname, getattr(snap, field.attname))
+                await existing.asave()
+                updated_count += 1
+            else:
+                await snap.asave()
+                created_count += 1
 
         # Log with attribution source for debugging
         if user:
@@ -222,7 +248,7 @@ class TelemetrySyncAPIView(APIView):
             user_label = f"{list(email_to_user.keys())[0]} (via email)"
         else:
             user_label = "anonymous"
-        logger.info(f"Telemetry sync received from {user_label} ({len(snapshots)} snapshots)")
+        logger.info(f"Telemetry sync from {user_label}: {created_count} created, {updated_count} updated")
 
         return CustomResponse.success(
             message="Telemetry synced successfully",
@@ -385,6 +411,14 @@ class PublicMetricsAPIView(APIView):
         )
 
     async def _get_live_platform_state(self):
+        import asyncio
+        # Count secret-level policies (non-null, non-empty policy JSONField)
+        # and agent capability policies (non-null, non-empty capabilities JSONField)
+        # separately then sum, to avoid a cross-model join.
+        secret_policies, agent_policies = await asyncio.gather(
+            Secret.objects.exclude(policy__isnull=True).exclude(policy__exact={}).acount(),
+            AgentRegistration.objects.exclude(capabilities__isnull=True).exclude(capabilities__exact={}).acount(),
+        )
         return {
             'total_users': await User.objects.acount(),
             'total_projects': await Project.objects.acount(),
@@ -398,7 +432,8 @@ class PublicMetricsAPIView(APIView):
             ).filter(active_members__gt=1).acount(),
             'pending_invites': await Membership.objects.filter(status=MembershipStatus.INVITED).acount(),
             'total_agents': await AgentRegistration.objects.acount(),
-            'total_policies': await Secret.objects.filter(policy__isnull=False).exclude(policy={}).acount(),
+            # total_policies = secret-level policies + agent capability policies
+            'total_policies': secret_policies + agent_policies,
         }
 
     async def _get_live_env_distribution(self):
@@ -455,7 +490,12 @@ class PublicMetricsAPIView(APIView):
         }
 
     def _build_from_aggregate(self, agg, platform_state, env_dist, today_metrics, today, analytics):
-        """Build response mixing live platform state and today's live activity with pre-computed heavy aggregates and analytics."""
+        """Build response mixing live platform state and today's live activity with pre-computed heavy aggregates and analytics.
+
+        platform_state is always fetched live (includes total_policies computed fresh),
+        so the aggregate path surfaces an accurate policy count without needing it in the
+        DailyMetricsAggregate table.
+        """
         return {
             'platform': platform_state,
             'engagement': {
