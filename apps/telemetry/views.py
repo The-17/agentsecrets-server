@@ -1,65 +1,114 @@
 # Standard library
+import hmac
+import json
 import logging
 
 # Django
+from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
 
 # Third-party
-from adrf.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
-from rest_framework.exceptions import AuthenticationFailed
-from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken
-
-# Local
 from asgiref.sync import sync_to_async
 from django.core.management import call_command
-from django.conf import settings
-from apps.common.response import CustomResponse
+from ninja_extra import api_controller, route
+from pydantic import TypeAdapter
+
+# Local
 from apps.accounts.models import User
+from apps.common.response import CustomResponse
 from apps.secrets_app.models import Project, Secret
 from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipStatus, AgentRegistration
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from .models import TelemetrySnapshot, DailyMetricsAggregate
-from .serializers import TelemetrySyncSerializer, PublicMetricsSerializer
+from .schemas import TelemetrySyncSchema
 
 
 logger = logging.getLogger("apps.telemetry")
 
+# Pydantic TypeAdapter for validating a list of telemetry snapshots
+_sync_list_adapter = TypeAdapter(list[TelemetrySyncSchema])
 
-class SoftJWTAuthentication(JWTAuthentication):
+
+@api_controller("/", tags=["Telemetry"], auth=None)
+class TelemetryController:
     """
-    Tries to authenticate with JWT. If the token is invalid or expired,
-    it gracefully returns None (falling back to AnonymousUser) instead
-    of throwing an AuthenticationFailed exception.
+    Telemetry ingestion and metrics controller.
+
+    Replaces the previous DRF-based telemetry views with native
+    Django Ninja endpoints for consistency and performance.
     """
-    def authenticate(self, request):
+
+    # ──────────────────────────────────────────────
+    # HELPERS
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _soft_authenticate(request):
+        """
+        Try to authenticate with JWT. If the token is invalid or expired,
+        gracefully return None (anonymous) instead of raising 401.
+        """
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header[7:]
         try:
-            return super().authenticate(request)
-        except (InvalidToken, AuthenticationFailed):
+            jwt_auth = JWTAuthentication()
+            validated_token = jwt_auth.get_validated_token(token)
+            user = jwt_auth.get_user(validated_token)
+            return user
+        except (InvalidToken, TokenError):
+            return None
+        except Exception:
             return None
 
+    @staticmethod
+    def _check_rate_limit(request, user):
+        """
+        Cache-backed rate limiting: 5/day anonymous, 20/day authenticated.
+        Returns True if the request is allowed, False if rate-limited.
+        """
+        if user:
+            key = f"rl_telemetry_user_{user.id}"
+            limit = 20
+        else:
+            ip = request.META.get("REMOTE_ADDR", "unknown")
+            key = f"rl_telemetry_anon_{ip}"
+            limit = 5
 
-class TelemetryAnonRateThrottle(AnonRateThrottle):
-    rate = '5/day'
+        current = cache.get(key, 0)
+        if current >= limit:
+            return False
+        cache.set(key, current + 1, 86400)  # 24-hour window
+        return True
 
-class TelemetryUserRateThrottle(UserRateThrottle):
-    rate = '20/day'
+    # ──────────────────────────────────────────────
+    # POST /sync/
+    # ──────────────────────────────────────────────
 
-class TelemetrySyncAPIView(APIView):
-    """
-    Receive batched CLI telemetry data.
-    
-    The CLI collects telemetry locally and syncs every 24 hours.
-    This endpoint stores the payload for aggregation and analysis.
-    """
-    authentication_classes = [SoftJWTAuthentication]
-    permission_classes = [AllowAny]
-    throttle_classes = [TelemetryAnonRateThrottle, TelemetryUserRateThrottle]
-    serializer_class = TelemetrySyncSerializer
+    @route.post("/sync/", response={200: dict, 429: dict})
+    async def sync(self, request):
+        """
+        Receive batched CLI telemetry data.
 
-    async def post(self, request):
+        The CLI collects telemetry locally and syncs every 24 hours.
+        This endpoint stores the payload for aggregation and analysis.
+        """
+        # ── AUTH (soft — anonymous fallback) ──
+        user = await sync_to_async(self._soft_authenticate)(request)
+
+        # ── RATE LIMIT ──
+        allowed = await sync_to_async(self._check_rate_limit)(request, user)
+        if not allowed:
+            return CustomResponse.error(
+                message="Rate limit exceeded. Try again tomorrow.",
+                code="rate_limited",
+                status_code=429,
+            )
+
         # ──────────────────────────────────────────────
         # 1. FORMAT DETECTION & TRANSFORMATION
         #    Handles multiple formats for maximum compatibility:
@@ -68,45 +117,44 @@ class TelemetrySyncAPIView(APIView):
         #    C) Generic Batch: [{...}, {...}]
         #    D) Legacy Single: {...}
         # ──────────────────────────────────────────────
-        if isinstance(request.data, dict) and "snapshots" in request.data:
-            payload = request.data["snapshots"]
-        elif isinstance(request.data, dict) and "daily" in request.data:
+        body = json.loads(request.body)
+
+        if isinstance(body, dict) and "snapshots" in body:
+            payload = body["snapshots"]
+        elif isinstance(body, dict) and "daily" in body:
             payload = []
-            for date_str, snapshot_data in request.data["daily"].items():
+            for date_str, snapshot_data in body["daily"].items():
                 snapshot_data["date"] = date_str
                 payload.append(snapshot_data)
         else:
-            payload = request.data if isinstance(request.data, list) else [request.data]
+            payload = body if isinstance(body, list) else [body]
 
-        serializer = self.serializer_class(data=payload, many=True)
-        serializer.is_valid(raise_exception=True)
-        
-        user = request.user if request.user.is_authenticated else None
-        
+        # ── VALIDATE with Pydantic ──
+        validated_items = _sync_list_adapter.validate_python(payload)
+
         # ──────────────────────────────────────────────
         # 1b. USER ATTRIBUTION
-        #     If the JWT is expired (SoftJWTAuth returns anonymous), fall back
+        #     If the JWT is expired (soft auth returns None), fall back
         #     to user_email from the payload. Bulk-fetch all emails in one query.
         # ──────────────────────────────────────────────
         email_to_user = {}
         if not user:
-            emails = {item.get('user_email') for item in serializer.validated_data if item.get('user_email')}
+            emails = {item.user_email for item in validated_items if item.user_email}
             if emails:
                 async for u in User.objects.filter(email__in=emails):
                     email_to_user[u.email] = u
 
-        snapshots = []
         # ──────────────────────────────────────────────
         # 2. BATCH ENRICHMENT (DB Efficiency)
         #    Collect all IDs and perform bulk counts to avoid connection exhaustion.
         # ──────────────────────────────────────────────
-        ws_ids = {item.get('workspace_id') for item in serializer.validated_data if item.get('workspace_id')}
-        prj_ids = {item.get('project_id') for item in serializer.validated_data if item.get('project_id')}
-        
+        ws_ids = {item.workspace_id for item in validated_items if item.workspace_id}
+        prj_ids = {item.project_id for item in validated_items if item.project_id}
+
         # Determine the earliest date in the batch to limit our lookups
         all_dates = []
-        for item in serializer.validated_data:
-            dt = item.get('date') or (item.get('timestamp').date() if item.get('timestamp') else timezone.now().date())
+        for item in validated_items:
+            dt = item.date or (item.timestamp.date() if item.timestamp else timezone.now().date())
             all_dates.append(dt)
         min_date = min(all_dates) if all_dates else timezone.now().date()
 
@@ -138,78 +186,78 @@ class TelemetrySyncAPIView(APIView):
         # 3. BATCH DEFAULTS & SNAPSHOT CREATION
         #    Handle sparse payloads by inheriting values from the batch
         # ──────────────────────────────────────────────
-        batch_user_email = next((item.get('user_email') for item in serializer.validated_data if item.get('user_email')), None)
-        batch_cli_version = next((item.get('cli_version') for item in serializer.validated_data if item.get('cli_version')), None)
-        batch_os = next((item.get('os') for item in serializer.validated_data if item.get('os')), None)
-        batch_arch = next((item.get('arch') for item in serializer.validated_data if item.get('arch')), None)
+        batch_user_email = next((item.user_email for item in validated_items if item.user_email), None)
+        batch_cli_version = next((item.cli_version for item in validated_items if item.cli_version), None)
+        batch_os = next((item.os for item in validated_items if item.os), None)
+        batch_arch = next((item.arch for item in validated_items if item.arch), None)
 
         snapshots = []
-        for item in serializer.validated_data:
+        for item in validated_items:
             # Determine the effective date and timestamp
-            target_date = item.get('date')
-            client_ts = item.get('timestamp')
+            target_date = item.date
+            client_ts = item.timestamp
 
             if target_date:
                 from datetime import datetime, time
                 client_ts = timezone.make_aware(datetime.combine(target_date, time.min))
             elif not client_ts:
                 client_ts = timezone.now()
-            
-            ws_id = item.get('workspace_id')
-            prj_id = item.get('project_id')
+
+            ws_id = item.workspace_id
+            prj_id = item.project_id
 
             # Resolve user: JWT auth takes priority, then email fallback
-            item_email = item.get('user_email') or batch_user_email
+            item_email = item.user_email or batch_user_email
             snapshot_user = user or email_to_user.get(item_email)
 
             snapshots.append(TelemetrySnapshot(
                 user=snapshot_user,
-                cli_version=item.get('cli_version') or batch_cli_version,
-                os=item.get('os') or batch_os,
-                arch=item.get('arch') or batch_arch,
-                command_executions=item.get('command_executions', {}),
-                active_environment=item.get('active_environment'),
-                workspace_type=item.get('workspace_type'),
-                workspace_member_count=ws_counts.get(ws_id, item.get('workspace_member_count') or 0),
-                project_secret_count=prj_counts.get(prj_id, item.get('project_secret_count') or 0),
-                proxy_calls=item.get('proxy_calls', 0),
-                proxy_blocked=item.get('proxy_blocked', 0),
-                proxy_redacted=item.get('proxy_redacted', 0),
-                injection_styles_used=item.get('injection_styles_used', []),
-                integrations_active=item.get('integrations_active', []),
-                secrets_resolved=item.get('secrets_resolved', 0),
-                total_proxy_duration_ms=item.get('total_proxy_duration_ms', 0),
-                proxy_calls_daemon=item.get('proxy_calls_daemon', 0),
-                proxy_calls_transient=item.get('proxy_calls_transient', 0),
-                proxy_calls_mcp=item.get('proxy_calls_mcp', 0),
-                proxy_calls_direct=item.get('proxy_calls_direct', 0),
-                developer_commands=item.get('developer_commands', 0),
-                ssrf_attempts_blocked=item.get('ssrf_attempts_blocked', 0),
-                allowlist_violations=item.get('allowlist_violations', 0),
-                response_redactions=item.get('response_redactions', 0),
-                process_verifications_failed=item.get('process_verifications_failed', 0),
-                production_write_challenges=item.get('production_write_challenges', 0),
-                keychain_resolution_ms=item.get('keychain_resolution_ms', 0),
-                session_refresh_ms=item.get('session_refresh_ms', 0),
-                interactive_prompts_shown=item.get('interactive_prompts_shown', 0),
-                interactive_prompts_skipped=item.get('interactive_prompts_skipped', 0),
-                drift_diffs_detected=item.get('drift_diffs_detected', 0),
-                log_chain_verifications=item.get('log_chain_verifications', 0),
-                tampering_detected=item.get('tampering_detected', 0),
-                is_headless_node=item.get('is_headless_node', False),
-                keychain_initialized=item.get('keychain_initialized', False),
-                typos=item.get('typos') or {},
-                identity_anonymous_calls=item.get('identity_anonymous_calls', 0),
-                identity_declared_calls=item.get('identity_declared_calls', 0),
-                identity_issued_calls=item.get('identity_issued_calls', 0),
-                capability_violations_blocked=item.get('capability_violations_blocked', 0),
-                process_verifications_passed=item.get('process_verifications_passed', 0),
-                errors_auth_count=item.get('errors_auth_count', 0),
-                errors_keychain_count=item.get('errors_keychain_count', 0),
-                errors_secrets_count=item.get('errors_secrets_count', 0),
-                errors_network_count=item.get('errors_network_count', 0),
-                errors_system_count=item.get('errors_system_count', 0),
-                errors_unknown_count=item.get('errors_unknown_count', 0),
+                cli_version=item.cli_version or batch_cli_version,
+                os=item.os or batch_os,
+                arch=item.arch or batch_arch,
+                command_executions=item.command_executions or {},
+                active_environment=item.active_environment,
+                workspace_type=item.workspace_type,
+                workspace_member_count=ws_counts.get(ws_id, item.workspace_member_count or 0),
+                project_secret_count=prj_counts.get(prj_id, item.project_secret_count or 0),
+                proxy_calls=item.proxy_calls,
+                proxy_blocked=item.proxy_blocked,
+                proxy_redacted=item.proxy_redacted,
+                injection_styles_used=item.injection_styles_used or [],
+                integrations_active=item.integrations_active or [],
+                secrets_resolved=item.secrets_resolved,
+                total_proxy_duration_ms=item.total_proxy_duration_ms,
+                proxy_calls_daemon=item.proxy_calls_daemon,
+                proxy_calls_transient=item.proxy_calls_transient,
+                proxy_calls_mcp=item.proxy_calls_mcp,
+                proxy_calls_direct=item.proxy_calls_direct,
+                developer_commands=item.developer_commands,
+                ssrf_attempts_blocked=item.ssrf_attempts_blocked,
+                allowlist_violations=item.allowlist_violations,
+                response_redactions=item.response_redactions,
+                process_verifications_failed=item.process_verifications_failed,
+                production_write_challenges=item.production_write_challenges,
+                keychain_resolution_ms=item.keychain_resolution_ms,
+                session_refresh_ms=item.session_refresh_ms,
+                interactive_prompts_shown=item.interactive_prompts_shown,
+                interactive_prompts_skipped=item.interactive_prompts_skipped,
+                drift_diffs_detected=item.drift_diffs_detected,
+                log_chain_verifications=item.log_chain_verifications,
+                tampering_detected=item.tampering_detected,
+                is_headless_node=item.is_headless_node,
+                keychain_initialized=item.keychain_initialized,
+                typos=item.typos or {},
+                identity_anonymous_calls=item.identity_anonymous_calls,
+                identity_declared_calls=item.identity_declared_calls,
+                identity_issued_calls=item.identity_issued_calls,
+                capability_violations_blocked=item.capability_violations_blocked,
+                process_verifications_passed=item.process_verifications_passed,
+                errors_auth_count=item.errors_auth_count,
+                errors_keychain_count=item.errors_keychain_count,
+                errors_secrets_count=item.errors_secrets_count,
+                errors_network_count=item.errors_network_count,
+                errors_system_count=item.errors_system_count,
+                errors_unknown_count=item.errors_unknown_count,
                 client_timestamp=client_ts,
             ))
 
@@ -253,48 +301,42 @@ class TelemetrySyncAPIView(APIView):
         return CustomResponse.success(
             message="Telemetry synced successfully",
             status_code=200,
-            is_drf=True
         )
 
+    # ──────────────────────────────────────────────
+    # GET /metrics/
+    # ──────────────────────────────────────────────
 
-class PublicMetricsAPIView(APIView):
-    """
-    Public metrics endpoint for the AgentSecrets website and internal dashboards.
-    
-    Returns the full platform report:
-    - Platform state: total users, projects, secrets, workspaces (from real models)
-    - Engagement: active users (rolling 7d, 30d), averages
-    - Growth: new signups, projects, secrets (today's delta)
-    - Security: cumulative proxy stats across all time
-    - Feature adoption: command usage, integrations, env distribution
-    
-    Uses the latest DailyMetricsAggregate if available (computed by cron).
-    Falls back to live queries if no aggregate exists.
-    """
-    permission_classes = [AllowAny]
-    serializer_class = PublicMetricsSerializer
+    @route.get("/metrics/", response={200: dict})
+    async def metrics(self, request, bypass_cache: bool = False):
+        """
+        Public metrics endpoint for the AgentSecrets website and internal dashboards.
 
-    async def get(self, request):
-        bypass_cache = request.query_params.get('bypass_cache', '').lower() == 'true'
+        Returns the full platform report:
+        - Platform state: total users, projects, secrets, workspaces (from real models)
+        - Engagement: active users (rolling 7d, 30d), averages
+        - Growth: new signups, projects, secrets (today's delta)
+        - Security: cumulative proxy stats across all time
+        - Feature adoption: command usage, integrations, env distribution
+        - Analytics: stickiness, collaboration, growth rates
+
+        Uses the latest DailyMetricsAggregate if available (computed by cron).
+        Falls back to live queries if no aggregate exists.
+        """
         cache_key = "public_platform_metrics"
-        
+
         if not bypass_cache:
-            from django.core.cache import cache
-            from asgiref.sync import sync_to_async
             cached_data = await sync_to_async(cache.get)(cache_key)
             if cached_data:
                 return CustomResponse.success(
                     message="Platform metrics report",
                     data=cached_data,
                     status_code=200,
-                    is_drf=True
                 )
 
         import asyncio
         from datetime import timedelta
         today = timezone.now().date()
-        week_ago = today - timedelta(days=7)
-        month_ago = today - timedelta(days=30)
 
         # 1. ALWAYS get live platform state, today's metrics and historical comparison aggregates concurrently
         yesterday_date = today - timedelta(days=1)
@@ -407,7 +449,6 @@ class PublicMetricsAPIView(APIView):
             message="Platform metrics report",
             data=data,
             status_code=200,
-            is_drf=True
         )
 
     async def _get_live_platform_state(self):
@@ -452,7 +493,7 @@ class PublicMetricsAPIView(APIView):
             count = item['unique_users']
             results[os_name] = count
             total += count
-        
+
         if total > 0:
             return {os_name: f"{round((count / total) * 100, 2)}%" for os_name, count in results.items()}
         return {}
@@ -619,7 +660,7 @@ class PublicMetricsAPIView(APIView):
         async for snapshot in TelemetrySnapshot.objects.exclude(integrations_active=[]).only('integrations_active'):
             for integration in snapshot.integrations_active:
                 integration_usage[integration] = integration_usage.get(integration, 0) + 1
-        
+
         total_users = platform_state['total_users']
         integration_adoption = {
             k: f"{round((v / total_users) * 100, 2)}%" if total_users > 0 else "0.00%"
@@ -639,7 +680,7 @@ class PublicMetricsAPIView(APIView):
                     command_usage[cmd] = command_usage.get(cmd, 0) + count
                 else:
                     typos_usage[cmd] = typos_usage.get(cmd, 0) + count
-        
+
         total_cmds = sum(command_usage.values())
         command_share = {
             k: f"{round((v / total_cmds) * 100, 2)}%" if total_cmds > 0 else "0.00%"
@@ -725,56 +766,44 @@ class PublicMetricsAPIView(APIView):
             'computed_at': timezone.now().isoformat(),
         }
 
+    # ──────────────────────────────────────────────
+    # GET/POST /internal/compute-metrics/
+    # ──────────────────────────────────────────────
 
-class InternalComputeMetricsAPIView(APIView):
-    """
-    Internal trigger for Vercel Cron to calculate daily metrics.
-    
-    Vercel sends CRON_SECRET via the Authorization header.
-    We must bypass DRF's JWT auth entirely so it doesn't try
-    to decode the cron secret as a JWT token (which causes 401).
-    """
-    authentication_classes = []  # No DRF auth classes
-    permission_classes = [AllowAny]  # No permission checks
+    @route.get("/internal/compute-metrics/", response={200: dict, 401: dict, 500: dict})
+    async def compute_metrics_get(self, request):
+        """Vercel cron calls GET by default."""
+        return await self._handle_cron(request)
 
-    def perform_authentication(self, request):
+    @route.post("/internal/compute-metrics/", response={200: dict, 401: dict, 500: dict})
+    async def compute_metrics_post(self, request):
+        return await self._handle_cron(request)
+
+    async def _handle_cron(self, request):
         """
-        Override to completely skip DRF's authentication pipeline.
-        
-        Without this, DRF still runs the global DEFAULT_AUTHENTICATION_CLASSES
-        which tries to decode our CRON_SECRET as a JWT and returns 401.
-        """
-        pass
+        Internal trigger for Vercel Cron to calculate daily metrics.
 
-    def _verify_cron_secret(self, request):
+        Vercel sends CRON_SECRET via the Authorization header.
+        """
+        if not self._verify_cron_secret(request):
+            return CustomResponse.error(
+                message="Unauthorized cron trigger",
+                status_code=401,
+            )
+
+        try:
+            await sync_to_async(call_command)('calculate_metrics')
+            return CustomResponse.success(message="Metrics calculated successfully")
+        except Exception as e:
+            logger.error(f"Cron metrics calculation failed: {str(e)}")
+            return CustomResponse.error(message="Metrics calculation failed", status_code=500)
+
+    @staticmethod
+    def _verify_cron_secret(request):
         """Verify the Vercel CRON_SECRET from the Authorization header."""
-        import hmac
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
             return False
         token = auth_header[7:]  # Strip 'Bearer '
         expected = getattr(settings, 'CRON_SECRET', 'dev-secret')
         return hmac.compare_digest(token, expected)
-
-    async def get(self, request):
-        """Vercel cron calls GET by default."""
-        return await self._handle_cron(request)
-
-    async def post(self, request):
-        return await self._handle_cron(request)
-
-    async def _handle_cron(self, request):
-        if not self._verify_cron_secret(request):
-            return CustomResponse.error(
-                message="Unauthorized cron trigger",
-                status_code=401,
-                is_drf=True
-            )
-
-        try:
-            await sync_to_async(call_command)('calculate_metrics')
-            return CustomResponse.success(message="Metrics calculated successfully", is_drf=True)
-        except Exception as e:
-            logger.error(f"Cron metrics calculation failed: {str(e)}")
-            return CustomResponse.error(message="Metrics calculation failed", status_code=500, is_drf=True)
-
