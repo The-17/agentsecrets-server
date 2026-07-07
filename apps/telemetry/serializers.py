@@ -107,6 +107,7 @@ class TelemetrySyncSerializer(serializers.Serializer):
     typos = serializers.DictField(
         child=serializers.IntegerField(min_value=1),
         required=False,
+        allow_null=True,
         default=dict
     )
 

@@ -198,7 +198,7 @@ class TelemetrySyncAPIView(APIView):
                 tampering_detected=item.get('tampering_detected', 0),
                 is_headless_node=item.get('is_headless_node', False),
                 keychain_initialized=item.get('keychain_initialized', False),
-                typos=item.get('typos', {}),
+                typos=item.get('typos') or {},
                 identity_anonymous_calls=item.get('identity_anonymous_calls', 0),
                 identity_declared_calls=item.get('identity_declared_calls', 0),
                 identity_issued_calls=item.get('identity_issued_calls', 0),
