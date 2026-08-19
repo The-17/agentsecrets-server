@@ -1,1 +1,0 @@
-# Permissions logic has been moved inline to controller methods as per Django Ninja conventions.
