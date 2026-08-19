@@ -2,7 +2,8 @@
 import uuid
 
 # Django
-from django.db.models import Count
+from django.db.models import Count, F
+from django.db import transaction
 from asgiref.sync import sync_to_async
 
 import logging
@@ -255,13 +256,18 @@ class SecretsController(SecretsMixin):
             id=project_id,
             workspace__memberships__user=user,
             workspace__memberships__status=MembershipStatus.ACTIVE
+        ).annotate(
+            membership_role=F("workspace__memberships__role")
         ).afirst()
         if not project:
             if await Project.objects.filter(id=project_id).aexists():
                 raise AuthorizationError("You don't have access to this project")
             raise NotFoundError("Project not found")
-        membership = await Membership.objects.filter(user=user, workspace_id=project.workspace_id, status=MembershipStatus.ACTIVE).afirst()
-        return project, membership
+        class _MembershipProxy:
+            def __init__(self, role, workspace_id):
+                self.role = role
+                self.workspace_id = workspace_id
+        return project, _MembershipProxy(project.membership_role, project.workspace_id)
 
     def _validate_env(self, environment):
         if environment not in ["development", "staging", "production"]:
@@ -289,10 +295,16 @@ class SecretsController(SecretsMixin):
             else:
                 to_create.append(Secret(project=project, environment=env, key=k, value=enc, policy={}))
 
-        if to_create:
-            await Secret.objects.abulk_create(to_create)
-        if to_update:
-            await Secret.objects.abulk_update(to_update, ["value"])
+        @sync_to_async
+        def _save_secrets():
+            with transaction.atomic():
+                if to_create:
+                    Secret.objects.bulk_create(to_create)
+                if to_update:
+                    Secret.objects.bulk_update(to_update, ["value"])
+
+        if to_create or to_update:
+            await _save_secrets()
 
         logger.info(f"SECRETS_BULK_UPSERT: Project '{project.name}' ({project.id}) env '{env}' - Created: {len(to_create)}, Updated: {len(to_update)} by user {request.auth.email}")
         return CustomResponse.success(message="Secrets processed", data={

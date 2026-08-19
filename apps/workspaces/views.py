@@ -629,7 +629,10 @@ class AuditController(WorkspaceMixin):
 
     @route.get("/logs/{log_id}/", response={200: dict, 404: ErrorResponse})
     async def detail(self, request, log_id: str):
-        log = await AuditLogEntry.objects.filter(id=log_id).afirst()
+        # Exclude management events (identity_level=user) for parity with the
+        # list/summary/export endpoints: this is the proxy access-log detail
+        # view, so a management entry must not surface here as a garbled row.
+        log = await AuditLogEntry.objects.filter(id=log_id).exclude(identity_level=IdentityLevel.USER).afirst()
         if not log:
             raise NotFoundError("Log not found")
         await self._check_ws(request.auth, log.workspace_id)
@@ -863,6 +866,27 @@ class ResolverController:
             mapped['duration_ms'] = mapped.get('duration_ms') if mapped.get('duration_ms') is not None else 0
             mapped['resolution_path'] = mapped.get('resolution_path') or 'unknown'
             mapped['caller_role'] = mapped.get('caller_role') or 'unknown'
+
+            # Safety truncation: prevent 'value too long' database errors.
+            # Matches each CharField's max_length on the AuditLogEntry model.
+            char_limits = {
+                'id': 64,
+                'environment': 20,
+                'agent_id': 64,
+                'identity_level': 20,
+                'credential_ref': 255,
+                'injection_style': 50,
+                'target_domain': 253,
+                'method': 10,
+                'redaction_reason': 255,
+                'resolution_path': 50,
+                'caller_role': 50,
+                'session_id': 255,
+                'policy_snapshot_id': 255,
+            }
+            for field, limit in char_limits.items():
+                if field in mapped and isinstance(mapped[field], str) and len(mapped[field]) > limit:
+                    mapped[field] = mapped[field][:limit]
 
             return mapped
 
