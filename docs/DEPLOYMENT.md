@@ -23,7 +23,7 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 |---|---|---|
 | `SECRET_KEY` | Django cryptographic secret key | `django-insecure-...` (or strong random string) |
 | `ENCRYPTION_KEY` | Fernet 32-byte urlsafe base64 encryption key | Generated via `cryptography.fernet.Fernet.generate_key()` |
-| `SETTINGS` | Django settings module path | `secretsapi.settings.prod` or `secretsapi.settings.dev` |
+| `SETTINGS` | Django settings module path | `core.settings.prod` or `core.settings.dev` |
 | `ALLOWED_HOSTS` | Comma-separated list of allowed host domains | `api.agentsecrets.yourcompany.com,localhost` |
 | `POSTGRES_DB` | PostgreSQL database name | `agentsecrets` |
 | `POSTGRES_USER` | PostgreSQL user | `postgres` |
@@ -51,7 +51,7 @@ agentsecrets project create agentsecrets-server
 # 2. Store all required credentials
 agentsecrets secrets set SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(50))')"
 agentsecrets secrets set ENCRYPTION_KEY="$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
-agentsecrets secrets set SETTINGS="secretsapi.settings.prod"
+agentsecrets secrets set SETTINGS="core.settings.prod"
 agentsecrets secrets set ALLOWED_HOSTS="api.agentsecrets.yourcompany.com"
 agentsecrets secrets set POSTGRES_DB="agentsecrets"
 agentsecrets secrets set POSTGRES_USER="postgres"
@@ -85,7 +85,7 @@ pip install gunicorn uvicorn[standard]
 
 Run with zero-knowledge credential injection:
 ```bash
-agentsecrets env -- gunicorn secretsapi.asgi:application \
+agentsecrets env -- gunicorn core.asgi:application \
   -k uvicorn.workers.UvicornWorker \
   --bind 0.0.0.0:8000 \
   --workers 4 \
@@ -118,7 +118,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["gunicorn", "secretsapi.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
+CMD ["gunicorn", "core.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
 ```
 
 ### `docker-compose.yml`:
@@ -146,7 +146,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SETTINGS=secretsapi.settings.prod
+      - SETTINGS=core.settings.prod
       - ALLOWED_HOSTS=*
       - POSTGRES_DB=agentsecrets
       - POSTGRES_USER=postgres

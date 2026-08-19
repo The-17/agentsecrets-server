@@ -163,7 +163,7 @@ agentsecrets project create agentsecrets-server
 # Set all required server credentials
 agentsecrets secrets set SECRET_KEY="your-django-secret-key"
 agentsecrets secrets set ENCRYPTION_KEY="your-fernet-encryption-key"
-agentsecrets secrets set SETTINGS="secretsapi.settings.dev"
+agentsecrets secrets set SETTINGS="core.settings.dev"
 agentsecrets secrets set ALLOWED_HOSTS="localhost,127.0.0.1"
 agentsecrets secrets set POSTGRES_DB="agentsecrets"
 agentsecrets secrets set POSTGRES_USER="postgres"

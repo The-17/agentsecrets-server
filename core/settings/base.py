@@ -51,7 +51,7 @@ MIDDLEWARE = [
     'apps.common.middleware.ActivityTrackingMiddleware',
 ]
 
-ROOT_URLCONF = 'secretsapi.urls'
+ROOT_URLCONF = 'core.urls'
 
 TEMPLATES = [
     {
@@ -68,7 +68,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'secretsapi.wsgi.application'
+WSGI_APPLICATION = 'core.wsgi.application'
 
 
 # Database
