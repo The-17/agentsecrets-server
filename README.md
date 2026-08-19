@@ -1,103 +1,109 @@
 # SecretsAPI
 
-A secure REST API for managing secrets, designed to work with SecretsCLI. SecretsAPI provides encrypted secret storage with project-based organization.
+The high-performance, asynchronous REST backend for **AgentSecrets** — zero-knowledge secrets management and agent credential proxying.
 
-## Features
+---
 
-- **End-to-end encryption** - Secrets are encrypted both in transit and at rest
-- **Project-based organization** - Group secrets by project/environment
-- **JWT Authentication** - Secure token-based authentication
-- **OpenAPI Documentation** - Interactive Swagger UI documentation
-- **Async Support** - Built with Django ADRF for high performance
+## Overview
+
+SecretsAPI powers client secret synchronization, asymmetric workspace sharing, real-time agent verification, and telemetry aggregation. It is engineered with a strict **5-Layer Django Ninja Architecture** designed for high throughput, minimal database overhead, and open-source transparency.
+
+### Architecture Highlights
+
+- **5-Layer Architecture**: Controllers (Thin HTTP Adapters) &rarr; Domain Services (Mutations & Atomic Transactions) &rarr; Query Selectors (Read-Only DB Queries) &rarr; Pydantic Schemas (Strict Validation) &rarr; Django Models.
+- **Asymmetric Zero-Knowledge Sharing**: Workspace encryption keys are encrypted on the client using recipients' public keys (RSA-OAEP / AES-GCM). The server never possesses plaintext workspace keys.
+- **Microsecond Agent Verification**: Constant-time hashed token authentication (`AgentToken`) and fast internal resolver endpoints for runtime credential injection.
+- **Async First**: Fully asynchronous endpoint handlers utilizing `asgiref` and Django 5+ async ORM methods (`afirst()`, `acount()`, `asave()`, `adelete()`).
+- **Telemetry & Metrics**: Batched sync ingestion, deduplication, and daily aggregate rollups.
+- **Clean Audit Logs**: Strict logging policy with zero PII, zero tokens, and zero plain secrets in console or file logs.
+
+---
+
+## Tech Stack
+
+- **Framework**: Django 5.x + [Django Ninja Extra](https://eadwincode.github.io/django-ninja-extra/)
+- **Authentication**: `SimpleJWT` + HMAC-SHA256 Service Tokens + Asymmetric Public Keys
+- **Admin UI**: [Django Unfold](https://github.com/unfoldadmin/django-unfold)
+- **Database**: PostgreSQL (Production) / SQLite (Testing)
+- **Caching**: Django Cache Framework
+
+---
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.10+
-- PostgreSQL database
-- A valid encryption key (Fernet)
+- PostgreSQL database (or SQLite for local dev)
+- Fernet encryption key
 
-### Installation
+### Setup
 
-1. Clone the repository:
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/agentsecrets/SecretsAPI.git
+   cd SecretsAPI
+   ```
+
+2. **Create and activate a virtual environment**:
+   ```bash
+   python3 -m venv env
+   source env/bin/activate  # On Windows: env\Scripts\activate
+   ```
+
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure environment variables**:
+   ```bash
+   cp .env.example .env
+   # Update .env with your PostgreSQL credentials and ENCRYPTION_KEY
+   ```
+
+5. **Generate a Fernet Encryption Key** (if you don't have one):
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+6. **Apply migrations**:
+   ```bash
+   python manage.py migrate
+   ```
+
+7. **Run the development server**:
+   ```bash
+   python manage.py runserver
+   ```
+
+---
+
+## API Endpoints
+
+| Area | Prefix | Description |
+|---|---|---|
+| **System Status** | `/api/status/` | System diagnostic & health check (`/`, `/health/`) |
+| **Authentication** | `/api/auth/` | User registration, login, token refresh, recovery |
+| **Users** | `/api/users/` | Profile management and public key lookup |
+| **Workspaces** | `/api/workspaces/` | Workspace management, memberships, and role management |
+| **Projects** | `/api/projects/` | Project grouping inside workspaces |
+| **Secrets** | `/api/secrets/` | Encrypted secret bulk upsert, diffing, listing, and deletion |
+| **Agents & Allowlist** | `/api/workspaces/{id}/agents/` | Agent registration, token issuance, and domain allowlists |
+| **Internal Resolver** | `/api/internal/agents/` | Fast internal agent credential resolution |
+| **Telemetry** | `/telemetry/` | CLI telemetry sync (`/sync/`) and platform metrics (`/metrics/`) |
+
+---
+
+## Testing
+
+Run the full automated test suite:
 ```bash
-git clone https://github.com/yourusername/SecretsAPI.git
-cd SecretsAPI
+python manage.py test apps.common apps.accounts apps.secrets_app apps.workspaces apps.telemetry -v 2
 ```
 
-2. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Copy the environment file and configure:
-```bash
-cp .env.example .env
-# Edit .env with your configuration
-```
-
-5. Run migrations:
-```bash
-python manage.py migrate
-```
-
-6. Start the development server:
-```bash
-python manage.py runserver
-```
-
-## API Documentation
-
-Access the interactive API documentation at:
-- **Swagger UI**: `https://secrets-api-orpin.vercel.app/api/`
-- **OpenAPI Schema**: `https://secrets-api-orpin.vercel.app/api/schema`
-
-## API Reference
-
-### Authentication
-
-All protected endpoints require a Bearer token in the Authorization header:
-
-```bash
-Authorization: Bearer <access_token>
-```
-
-
-### Token Lifetime
-
-- **Access Token:** 6 hours
-- **Refresh Token:** Standard JWT refresh lifetime
-
-### Best Practices
-
-1. **Never share your access tokens**
-2. **Rotate secrets regularly**
-3. **Use environment-specific projects** (e.g., `myapp-prod`, `myapp-staging`)
-4. **Back up secrets before deleting projects**
-
-## Development
-
-### Running Tests
-
-```bash
-python manage.py test
-```
-
-### Code Style
-
-This project follows PEP 8 style guidelines.
+---
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Related Projects
-
-- [SecretsCLI](https://github.com/the-17/SecretsCLI) - Command-line interface for SecretsAPI
