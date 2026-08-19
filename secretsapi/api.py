@@ -7,9 +7,9 @@ from apps.accounts.auth import JWTAuth
 from apps.common.exceptions import RequestError, validation_errors, request_errors
 
 api = NinjaExtraAPI(
-    title="AgentSecrets API",
+    title="AgentSecrets Server API",
     version="1.0.0",
-    description="Secure secrets management API for AgentSecrets",
+    description="Zero-knowledge secrets management and agent credential proxy server",
     auth=JWTAuth(),
 )
 

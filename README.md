@@ -1,8 +1,8 @@
-# SecretsAPI
+# agentsecrets-server
 
-**The Cloud Engine for Zero-Knowledge Credential Infrastructure.**
+**The Open-Source Server for Zero-Knowledge Credential Infrastructure.**
 
-The high-performance, asynchronous REST backend for [AgentSecrets](https://github.com/The-17/agentsecrets) — enabling client secret synchronization, asymmetric team key exchange, microsecond agent verification, and tamper-evident telemetry without ever touching plaintext credentials.
+The high-performance, asynchronous REST backend for [AgentSecrets](https://github.com/The-17/agentsecrets) — enabling multi-device secret synchronization, asymmetric team key exchange, microsecond agent verification, and tamper-evident telemetry without ever touching plaintext credentials.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)]() [![Python Version](https://img.shields.io/badge/Python-3.10+-3776AB)]() [![Framework](https://img.shields.io/badge/Django%20Ninja-Extra-blue)]() [![Architecture](https://img.shields.io/badge/Architecture-5--Layer%20Async-8A2BE2)]()
 
@@ -14,11 +14,11 @@ The high-performance, asynchronous REST backend for [AgentSecrets](https://githu
 
 Traditional secrets managers operate as trusted vaults: the server receives plaintext over TLS, holds decryption keys, decrypts secrets in server memory, and logs access. If the server is compromised or subpoenaed, every secret is exposed.
 
-**SecretsAPI is architecturally blind.** It operates on zero-knowledge cryptographic principles:
+**agentsecrets-server is architecturally blind.** It operates on zero-knowledge cryptographic principles:
 
 ```
 ┌───────────────────────────┐                 ┌───────────────────────────┐
-│     AgentSecrets CLI      │                 │        SecretsAPI         │
+│     AgentSecrets CLI      │                 │    agentsecrets-server    │
 │  (Client Security Boundary)│                 │   (Blind Ciphertext Host) │
 ├───────────────────────────┤                 ├───────────────────────────┤
 │ 1. Generates Project Key  │                 │                           │
@@ -32,13 +32,13 @@ Traditional secrets managers operate as trusted vaults: the server receives plai
 
 1. **Client-Side Encryption**: Secrets are encrypted on the client machine using AES-256-GCM before transmission.
 2. **Asymmetric Team Sharing**: Workspace encryption keys are wrapped using recipients' public keys (X25519 / NaCl SealedBox). The server stores wrapped key envelopes it structurally cannot unlock.
-3. **No Value Storage**: SecretsAPI stores ciphertext blobs and metadata (environment, project, usage policies). The server holds no master decryption keys and has no code path to return plaintext.
+3. **No Value Storage**: `agentsecrets-server` stores ciphertext blobs and metadata (environment, project, usage policies). The server holds no master decryption keys and has no code path to return plaintext.
 
 ---
 
 ## Architectural Principles
 
-SecretsAPI is engineered in Python with a strict **5-Layer Asynchronous Architecture** built on top of Django 5 and Django Ninja Extra:
+`agentsecrets-server` is engineered in Python with a strict **5-Layer Asynchronous Architecture** built on top of Django 5 and Django Ninja Extra:
 
 ```
                   ┌─────────────────────────────────────────┐
@@ -118,43 +118,54 @@ SecretsAPI is engineered in Python with a strict **5-Layer Asynchronous Architec
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.10+
-- PostgreSQL (or SQLite for local exploration)
-- Fernet server-side encryption key
-
-### Installation
+### 1. Clone & Set Up Environment
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/The-17/SecretsAPI.git
-cd SecretsAPI
+git clone https://github.com/The-17/agentsecrets-server.git
+cd agentsecrets-server
 
-# 2. Create and activate a virtual environment
 python3 -m venv env
 source env/bin/activate  # On Windows: env\Scripts\activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
+```
 
-# 4. Configure environment variables
-# SecretsAPI uses standard agentsecrets pull syntax:
-cp .env.example .env
-# Edit .env with your PostgreSQL credentials and settings
+### 2. Configure Credentials via AgentSecrets
 
-# 5. Apply database migrations
-python manage.py migrate
+Manage and govern all database, encryption, and django configuration securely with the `agentsecrets` CLI:
 
-# 6. Start the development server
-python manage.py runserver
+```bash
+# Initialize and link your project
+agentsecrets init
+agentsecrets project create agentsecrets-server
+
+# Store server credentials into your AgentSecrets project
+agentsecrets secrets set SECRET_KEY="your-django-secret-key"
+agentsecrets secrets set ENCRYPTION_KEY="your-fernet-encryption-key"
+agentsecrets secrets set SETTINGS="secretsapi.settings.dev"
+agentsecrets secrets set POSTGRES_DB="agentsecrets"
+agentsecrets secrets set POSTGRES_USER="postgres"
+agentsecrets secrets set POSTGRES_PASSWORD="your-postgres-password"
+agentsecrets secrets set POSTGRES_HOST="localhost"
+agentsecrets secrets set POSTGRES_PORT="5432"
+```
+
+### 3. Run Migrations & Start Server
+
+Run database migrations and start the server with zero-knowledge runtime credential injection:
+
+```bash
+# Apply database migrations via AgentSecrets injection
+agentsecrets env -- python manage.py migrate
+
+# Launch the development server
+agentsecrets env -- python manage.py runserver
 ```
 
 ---
 
 ## API Reference
 
-SecretsAPI exposes two distinct OpenAPI routing trees:
+`agentsecrets-server` exposes two distinct OpenAPI routing trees:
 
 ### Standard Application Endpoints (`/api/`)
 
@@ -209,4 +220,4 @@ Found a vulnerability or security issue? Please see [SECURITY.md](SECURITY.md) f
 
 ## License
 
-SecretsAPI is open-source software licensed under the [MIT License](LICENSE).
+`agentsecrets-server` is open-source software licensed under the [MIT License](LICENSE).

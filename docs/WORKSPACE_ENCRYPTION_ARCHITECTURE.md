@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document explains how SecretsAPI implements zero-knowledge team encryption. The goal is to allow multiple users to share secrets without the server ever seeing the plaintext secrets or keys.
+This document explains how agentsecrets-server implements zero-knowledge team encryption. The goal is to allow multiple users to share secrets without the server ever seeing the plaintext secrets or keys.
 
 ---
 
