@@ -54,7 +54,7 @@ Received by Server ────────────────────�
 
 1. **Client Layer (Zero-Knowledge Boundary)**: The `agentsecrets` CLI encrypts raw values using AES-256-GCM on your local machine. The payload sent across the wire is **already opaque ciphertext**.
 2. **Server Layer (At-Rest Database Protection)**: When `agentsecrets-server` writes to the database, it wraps the **already-encrypted client blob** in an additional Fernet layer (`ENCRYPTION_KEY`).
-3. **Cryptographic Guarantee**: The server is simply **encrypting an encrypted blob**. Even if a rogue actor gains direct access to PostgreSQL and obtains the server's `ENCRYPTION_KEY`, decrypting the database layer only yields the client-side AES-256-GCM ciphertext. The underlying credential values remain structurally unreadable.
+3. **Cryptographic Guarantee**: The server is simply **encrypting an encrypted blob**. Even if a rogue actor gains direct access to PostgreSQL and obtains the server's `ENCRYPTION_KEY`, decrypting the database layer only yields the client-side AES-256-GCM ciphertext. The underlying credential values remain structurally unreadable. This is just a step added by me(steppacodes) because i can lol.
 
 ---
 
