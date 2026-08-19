@@ -11,7 +11,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 
-logger = logging.getLogger("apps.common.auth")
+logger = logging.getLogger("apps.accounts.auth")
 
 
 class JWTAuth(HttpBearer):
@@ -33,13 +33,11 @@ class JWTAuth(HttpBearer):
             validated_token = jwt_auth.get_validated_token(token)
             user = jwt_auth.get_user(validated_token)
             request.user = user
-            logger.info(f"JWTAuth: Successfully authenticated user {user.email}")
             return user
-        except (InvalidToken, TokenError) as e:
-            logger.warning(f"JWTAuth: Token validation failed — {type(e).__name__}: {e}")
+        except (InvalidToken, TokenError):
             return None
         except Exception as e:
-            logger.error(f"JWTAuth: Unexpected error during authentication — {type(e).__name__}: {e}")
+            logger.error(f"JWTAuth: Unexpected error during authentication: {type(e).__name__}")
             return None
 
 
@@ -49,14 +47,11 @@ class ResolverServiceKeyAuth(HttpBearer):
     
     Validates the Bearer token against the RESOLVER_SERVICE_KEY
     environment variable using constant-time comparison.
-    
-    Resolver endpoints must NEVER be accessible via user session auth.
     """
 
     def authenticate(self, request, token):
         expected = getattr(settings, "RESOLVER_SERVICE_KEY", None)
         if not expected:
-            logger.warning("RESOLVER_SERVICE_KEY not configured — rejecting all internal requests")
             return None
         # Constant-time comparison to prevent timing attacks
         if hmac.compare_digest(token, expected):
@@ -67,7 +62,7 @@ class ResolverServiceKeyAuth(HttpBearer):
 class InternalOrUserAuth(HttpBearer):
     """
     Combined auth class that allows BOTH ResolverServiceKeyAuth and JWTAuth.
-    Manually checks both to avoid framework bugs with lists of authenticators.
+    Checks Resolver Service Key first, falls back to User JWT.
     """
 
     def __call__(self, request):
@@ -76,19 +71,10 @@ class InternalOrUserAuth(HttpBearer):
         return super().__call__(request)
 
     def authenticate(self, request, token):
-        logger.info(f"InternalOrUserAuth: Received token (first 20 chars): {token[:20]}...")
-
         # Try Resolver Service Key first
         res = ResolverServiceKeyAuth().authenticate(request, token)
         if res is not None:
-            logger.info("InternalOrUserAuth: Authenticated via ResolverServiceKey")
             return res
 
-        # Try User JWT
-        res = JWTAuth().authenticate(request, token)
-        if res is not None:
-            logger.info(f"InternalOrUserAuth: Authenticated via JWT as {res}")
-            return res
-
-        logger.warning("InternalOrUserAuth: Both ResolverServiceKey and JWT failed")
-        return None
+        # Fall back to User JWT
+        return JWTAuth().authenticate(request, token)

@@ -3,7 +3,7 @@ from ninja_extra import NinjaExtraAPI
 from ninja.errors import ValidationError
 
 # Local
-from apps.common.auth import JWTAuth
+from apps.accounts.auth import JWTAuth
 from apps.common.exceptions import RequestError, validation_errors, request_errors
 
 api = NinjaExtraAPI(

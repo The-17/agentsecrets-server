@@ -149,7 +149,7 @@ class TelemetryEndpointTests(TestCase):
         self.assertTrue(data["cached"])
         self.assertEqual(data["platform"]["total_users"], 100)
 
-    @patch("apps.telemetry.views.call_command")
+    @patch("apps.telemetry.services.call_command")
     def test_compute_metrics_cron_auth_and_trigger(self, mock_call_command):
         """Verify cron endpoint triggers metrics calculation with valid secret."""
         # 1. Unauthenticated request

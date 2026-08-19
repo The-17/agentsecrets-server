@@ -249,17 +249,27 @@ LOGGING = {
         },
         'apps.accounts': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'INFO',
             'propagate': False,
         },
         'apps.workspaces': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'INFO',
             'propagate': False,
         },
         'apps.secrets_app': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.telemetry': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.common': {
+            'handlers': ['console'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

@@ -2,7 +2,7 @@ import logging
 from typing import Any
 from ninja_extra import api_controller, route
 
-from apps.common.auth import JWTAuth
+from .auth import JWTAuth
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from .schemas import (

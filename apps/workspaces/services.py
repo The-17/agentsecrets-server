@@ -67,7 +67,7 @@ class WorkspaceService:
                 return ws
 
         workspace = await _create()
-        logger.info(f"WORKSPACE_CREATED: Workspace '{workspace.name}' (ID: {workspace.id}) created by user {user.email}")
+        logger.info(f"WORKSPACE_CREATED: Workspace '{workspace.name}' (ID: {workspace.id}) created")
         return {
             "id": str(workspace.id),
             "name": workspace.name,
@@ -96,7 +96,7 @@ class WorkspaceService:
             raise AuthorizationError("Personal workspaces cannot be deleted")
         name = ws.name
         await ws.adelete()
-        logger.warning(f"WORKSPACE_DELETED: Workspace '{name}' (ID: {workspace_id}) deleted by user {user.email}")
+        logger.warning(f"WORKSPACE_DELETED: Workspace '{name}' (ID: {workspace_id}) deleted")
         return name
 
 
@@ -138,14 +138,15 @@ class MemberService:
                     encrypted_workspace_key=invite.encrypted_workspace_key,
                 )
                 logger.info(
-                    f"MEMBER_INVITED: User {invite.email} invited to workspace "
-                    f"{workspace_id} with role {invite.role} by user {user.email}"
+                    f"MEMBER_INVITED: User invited to workspace {workspace_id} with role {invite.role}"
                 )
                 results.append({"email": invite.email, "error": ""})
                 any_created = True
 
             except Exception as e:
-                logger.error(f"MEMBER_INVITE_FAILED: Error inviting {invite.email} to workspace {workspace_id}: {e}")
+                logger.error(
+                    f"MEMBER_INVITE_FAILED: Error inviting to workspace {workspace_id}: {type(e).__name__}"
+                )
                 results.append({"email": invite.email, "error": str(e)})
 
         return results, any_created
@@ -159,18 +160,21 @@ class MemberService:
         role: str,
     ) -> dict[str, Any]:
         um = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
+        if um.role not in [MembershipRole.ADMIN, MembershipRole.OWNER]:
+            raise AuthorizationError("Only admins/owners can update member roles.")
         tm = await Membership.objects.filter(
             user_id=target_user_id, workspace_id=workspace_id
         ).select_related("user").afirst()
         if not tm:
-            raise NotFoundError("Member not found in this workspace")
-        if um.role != MembershipRole.OWNER:
-            raise AuthorizationError("Only the workspace owner can change member roles")
+            raise NotFoundError("User is not a member of this workspace.")
         if tm.role == MembershipRole.OWNER:
-            raise AuthorizationError("Cannot change the owner's role")
+            raise AuthorizationError("Cannot change role of the workspace owner.")
+        if role == MembershipRole.OWNER:
+            raise AuthorizationError("Cannot promote member to OWNER. Transfer ownership instead.")
+
         tm.role = role
         await tm.asave(update_fields=["role", "updated_at"])
-        return {"user_id": str(tm.user.id), "email": tm.user.email, "role": tm.role}
+        return {"user_id": str(target_user_id), "email": tm.user.email, "role": tm.role}
 
     @staticmethod
     async def remove_member(
@@ -193,7 +197,7 @@ class MemberService:
             raise AuthorizationError("You don't have permission to remove members")
         email = tm.user.email
         await tm.adelete()
-        logger.warning(f"MEMBER_REMOVED: User {email} removed from workspace {workspace_id} by user {user.email}")
+        logger.warning(f"MEMBER_REMOVED: Member removed from workspace {workspace_id}")
         return email
 
     @staticmethod

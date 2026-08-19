@@ -8,7 +8,7 @@ from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
 
 from apps.accounts.models import User
-from apps.common.auth import JWTAuth, InternalOrUserAuth
+from apps.accounts.auth import JWTAuth, InternalOrUserAuth
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from apps.common.exceptions import BodyValidationError

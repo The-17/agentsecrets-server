@@ -109,7 +109,7 @@ class AccountService:
                         sealed = SealedBox(PublicKey(pk_bytes))
                         ewk = base64.b64encode(sealed.encrypt(workspace_key)).decode("utf-8")
                     except Exception as e:
-                        logger.error(f"Failed to encrypt workspace key: {e}")
+                        logger.error("Failed to encrypt workspace key: %s", type(e).__name__)
                         ewk = base64.b64encode(workspace_key).decode("utf-8")
 
                     Membership.objects.create(
@@ -258,7 +258,7 @@ class AccountService:
                     user = await User.objects.aget(id=user_id)
                     await AccountService.stamp_user_activity(user=user)
                 except Exception as e:
-                    logger.error(f"Refresh: Failed to stamp user activity: {e}")
+                    logger.warning("Refresh: Failed to stamp user activity: %s", type(e).__name__)
 
             response_data: dict[str, Any] = {
                 "access": new_access,

@@ -58,7 +58,7 @@ class ProjectService:
         project.workspace = membership.workspace
         logger.info(
             f"PROJECT_CREATED: Project '{project.name}' (ID: {project.id}) "
-            f"created in workspace '{project.workspace.name}' by user {user.email}"
+            f"created in workspace '{project.workspace.name}'"
         )
         return ProjectSelector.project_data(project)
 
@@ -98,7 +98,7 @@ class ProjectService:
         count = await project.secrets.acount()
         await project.adelete()
         logger.warning(
-            f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted by user {user.email}"
+            f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted"
         )
         return name, count
 
@@ -232,7 +232,7 @@ class SecretService:
 
         logger.info(
             f"SECRETS_BULK_UPSERT: Project '{project.name}' ({project.id}) env '{env}' - "
-            f"Created: {len(to_create)}, Updated: {len(to_update)} by user {user.email}"
+            f"Created: {len(to_create)}, Updated: {len(to_update)}"
         )
         return {
             "created": len(to_create),
@@ -293,7 +293,7 @@ class SecretService:
         await secret.adelete()
         logger.warning(
             f"SECRET_DELETED: Secret '{key.upper()}' deleted from project "
-            f"'{project.name}' ({project.id}) env '{environment}' by user {user.email}"
+            f"'{project.name}' ({project.id}) env '{environment}'"
         )
         return key.upper(), project.name, project.id
 
