@@ -1,31 +1,118 @@
 # SecretsAPI
 
-The high-performance, asynchronous REST backend for **AgentSecrets** — zero-knowledge secrets management and agent credential proxying.
+**The Cloud Engine for Zero-Knowledge Credential Infrastructure.**
+
+The high-performance, asynchronous REST backend for [AgentSecrets](https://github.com/The-17/agentsecrets) — enabling client secret synchronization, asymmetric team key exchange, microsecond agent verification, and tamper-evident telemetry without ever touching plaintext credentials.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green)]() [![Python Version](https://img.shields.io/badge/Python-3.10+-3776AB)]() [![Framework](https://img.shields.io/badge/Django%20Ninja-Extra-blue)]() [![Architecture](https://img.shields.io/badge/Architecture-5--Layer%20Async-8A2BE2)]()
+
+**[Website](https://agentsecrets.theseventeen.co) · [Documentation](https://agentsecrets.theseventeen.co/docs) · [CLI Repository](https://github.com/The-17/agentsecrets) · [Engineering Publication](https://engineering.theseventeen.co/series/building-agentsecrets)**
 
 ---
 
-## Overview
+## The Zero-Knowledge Server Guarantee
 
-SecretsAPI powers client secret synchronization, asymmetric workspace sharing, real-time agent verification, and telemetry aggregation. It is engineered with a strict **5-Layer Django Ninja Architecture** designed for high throughput, minimal database overhead, and open-source transparency.
+Traditional secrets managers operate as trusted vaults: the server receives plaintext over TLS, holds decryption keys, decrypts secrets in server memory, and logs access. If the server is compromised or subpoenaed, every secret is exposed.
 
-### Architecture Highlights
+**SecretsAPI is architecturally blind.** It operates on zero-knowledge cryptographic principles:
 
-- **5-Layer Architecture**: Controllers (Thin HTTP Adapters) &rarr; Domain Services (Mutations & Atomic Transactions) &rarr; Query Selectors (Read-Only DB Queries) &rarr; Pydantic Schemas (Strict Validation) &rarr; Django Models.
-- **Asymmetric Zero-Knowledge Sharing**: Workspace encryption keys are encrypted on the client using recipients' public keys (RSA-OAEP / AES-GCM). The server never possesses plaintext workspace keys.
-- **Microsecond Agent Verification**: Constant-time hashed token authentication (`AgentToken`) and fast internal resolver endpoints for runtime credential injection.
-- **Async First**: Fully asynchronous endpoint handlers utilizing `asgiref` and Django 5+ async ORM methods (`afirst()`, `acount()`, `asave()`, `adelete()`).
-- **Telemetry & Metrics**: Batched sync ingestion, deduplication, and daily aggregate rollups.
-- **Clean Audit Logs**: Strict logging policy with zero PII, zero tokens, and zero plain secrets in console or file logs.
+```
+┌───────────────────────────┐                 ┌───────────────────────────┐
+│     AgentSecrets CLI      │                 │        SecretsAPI         │
+│  (Client Security Boundary)│                 │   (Blind Ciphertext Host) │
+├───────────────────────────┤                 ├───────────────────────────┤
+│ 1. Generates Project Key  │                 │                           │
+│ 2. Encrypts Secret (GCM)  │  Ciphertext     │ 3. Stores Ciphertext      │
+│ 3. Encrypts Key w/ PubKey │ ──────────────> │    Server CANNOT decrypt  │
+│                           │  (X25519/NaCl)  │    No master key on disk  │
+│ 4. Decrypts locally with  │                 │    Zero plaintext in memory│
+│    user private key       │ <────────────── │ 4. Serves encrypted blobs │
+└───────────────────────────┘                 └───────────────────────────┘
+```
+
+1. **Client-Side Encryption**: Secrets are encrypted on the client machine using AES-256-GCM before transmission.
+2. **Asymmetric Team Sharing**: Workspace encryption keys are wrapped using recipients' public keys (X25519 / NaCl SealedBox). The server stores wrapped key envelopes it structurally cannot unlock.
+3. **No Value Storage**: SecretsAPI stores ciphertext blobs and metadata (environment, project, usage policies). The server holds no master decryption keys and has no code path to return plaintext.
+
+---
+
+## Architectural Principles
+
+SecretsAPI is engineered in Python with a strict **5-Layer Asynchronous Architecture** built on top of Django 5 and Django Ninja Extra:
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │          HTTP Request (TLS)             │
+                  └────────────────────┬────────────────────┘
+                                       │
+                                       ▼
+                  ┌─────────────────────────────────────────┐
+                  │       1. Thin API Controllers           │
+                  │   (Route parsing, Auth, HTTP mapping)   │
+                  └────────────────────┬────────────────────┘
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                     ▼
+        ┌───────────────────────┐             ┌───────────────────────┐
+        │   2. Query Selectors  │             │   3. Domain Services  │
+        │ (Pure Reads, Caching) │             │ (Mutations & Atomicity)│
+        └───────────┬───────────┘             └───────────┬───────────┘
+                    │                                     │
+                    └──────────────────┬──────────────────┘
+                                       │
+                                       ▼
+                  ┌─────────────────────────────────────────┐
+                  │       4. Strict Pydantic Schemas        │
+                  │    (Input validation, extra="forbid")   │
+                  └────────────────────┬────────────────────┘
+                                       │
+                                       ▼
+                  ┌─────────────────────────────────────────┐
+                  │           5. Django ORM Models          │
+                  │    (PostgreSQL / Temporal Pinning)      │
+                  └─────────────────────────────────────────┘
+```
+
+| Layer | Responsibility | Invariant |
+|---|---|---|
+| **Controllers** (`views.py`) | Route handlers, request/response serialization, status code mapping. | **Thin**: Maximum 25 LOC per route. Zero database queries. |
+| **Selectors** (`selectors.py`) | Read-only database queries, joins, prefetching, and query caching. | **Pure reads**: Zero state mutations. Idempotent and concurrency-safe. |
+| **Services** (`services.py`) | Business logic, state transitions, cryptographic derivation, multi-step flows. | **Atomic**: Wrapped in transactions. All external side effects managed here. |
+| **Schemas** (`schemas.py`) | Type definitions, payload validation, response envelopes (`DataResponse[T]`). | **Strict**: `extra="forbid"` on inputs. Rejects unvalidated fields. |
+| **Models** (`models.py`) | Database schemas, indexing, and temporal constraints. | **Explicit**: UUID primary keys, composite indices, strict foreign keys. |
+
+---
+
+## Core Capabilities
+
+### 1. Zero-Knowledge Sharing & Workspaces
+- **Personal & Shared Boundaries**: Workspaces form the administrative boundary for access control and allowlists.
+- **Asymmetric Envelopes**: Member invitations exchange workspace encryption keys encrypted with recipient public keys.
+- **Role-Based Access Control**: Strict Owner, Admin, Member, and Read-Only privilege separation.
+
+### 2. High-Throughput Agent Verification
+- **Internal Resolver Endpoint**: Microsecond constant-time SHA-256 token verification (`AgentToken`) for runtime proxy validation.
+- **Capability Scoping**: Enforces granular HTTP method and domain allowlists per agent registration.
+
+### 3. Forensic Telemetry & Platform Analytics
+- **Batch Sync Ingestion**: Aggregates CLI execution metrics, injection style breakdowns, and shielding blocks over rolling 24-hour windows.
+- **Temporal Pinning**: `calculate_metrics` computes historically accurate platform aggregates, DAU/WAU/MAU trends, and unique user adoption rates.
+- **Zero-Leakage Sanitization**: Real-time command classification and regex sanitization strip filesystem artifacts, ensuring zero developer paths or usernames leak into logs.
+
+### 4. Production Security & Sanitized Logging
+- **Zero PII**: No email addresses, tokens, secrets, or client IP addresses are emitted in stdout or file logs.
+- **Unified Error Handling**: Structured error responses with unique error codes (`ErrorCode.FORBIDDEN`, `ErrorCode.INVALID_ENTRY`).
 
 ---
 
 ## Tech Stack
 
-- **Framework**: Django 5.x + [Django Ninja Extra](https://eadwincode.github.io/django-ninja-extra/)
+- **Runtime**: Python 3.10+ / ASGI Async
+- **Framework**: [Django 5.x](https://www.djangoproject.com/) + [Django Ninja Extra](https://eadwincode.github.io/django-ninja-extra/)
 - **Authentication**: `SimpleJWT` + HMAC-SHA256 Service Tokens + Asymmetric Public Keys
 - **Admin UI**: [Django Unfold](https://github.com/unfoldadmin/django-unfold)
 - **Database**: PostgreSQL (Production) / SQLite (Testing)
-- **Caching**: Django Cache Framework
+- **Validation**: Pydantic v2
 
 ---
 
@@ -34,76 +121,92 @@ SecretsAPI powers client secret synchronization, asymmetric workspace sharing, r
 ### Prerequisites
 
 - Python 3.10+
-- PostgreSQL database (or SQLite for local dev)
-- Fernet encryption key
+- PostgreSQL (or SQLite for local exploration)
+- Fernet server-side encryption key
 
-### Setup
+### Installation
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/agentsecrets/SecretsAPI.git
-   cd SecretsAPI
-   ```
+```bash
+# 1. Clone the repository
+git clone https://github.com/The-17/SecretsAPI.git
+cd SecretsAPI
 
-2. **Create and activate a virtual environment**:
-   ```bash
-   python3 -m venv env
-   source env/bin/activate  # On Windows: env\Scripts\activate
-   ```
+# 2. Create and activate a virtual environment
+python3 -m venv env
+source env/bin/activate  # On Windows: env\Scripts\activate
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+# 3. Install dependencies
+pip install -r requirements.txt
 
-4. **Configure environment variables**:
-   ```bash
-   cp .env.example .env
-   # Update .env with your PostgreSQL credentials and ENCRYPTION_KEY
-   ```
+# 4. Configure environment variables
+# SecretsAPI uses standard agentsecrets pull syntax:
+cp .env.example .env
+# Edit .env with your PostgreSQL credentials and settings
 
-5. **Generate a Fernet Encryption Key** (if you don't have one):
-   ```bash
-   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
+# 5. Apply database migrations
+python manage.py migrate
 
-6. **Apply migrations**:
-   ```bash
-   python manage.py migrate
-   ```
-
-7. **Run the development server**:
-   ```bash
-   python manage.py runserver
-   ```
+# 6. Start the development server
+python manage.py runserver
+```
 
 ---
 
-## API Endpoints
+## API Reference
 
-| Area | Prefix | Description |
-|---|---|---|
-| **System Status** | `/api/status/` | System diagnostic & health check (`/`, `/health/`) |
-| **Authentication** | `/api/auth/` | User registration, login, token refresh, recovery |
-| **Users** | `/api/users/` | Profile management and public key lookup |
-| **Workspaces** | `/api/workspaces/` | Workspace management, memberships, and role management |
-| **Projects** | `/api/projects/` | Project grouping inside workspaces |
-| **Secrets** | `/api/secrets/` | Encrypted secret bulk upsert, diffing, listing, and deletion |
-| **Agents & Allowlist** | `/api/workspaces/{id}/agents/` | Agent registration, token issuance, and domain allowlists |
-| **Internal Resolver** | `/api/internal/agents/` | Fast internal agent credential resolution |
-| **Telemetry** | `/telemetry/` | CLI telemetry sync (`/sync/`) and platform metrics (`/metrics/`) |
+SecretsAPI exposes two distinct OpenAPI routing trees:
+
+### Standard Application Endpoints (`/api/`)
+
+| Domain | Endpoint | Methods | Description |
+|---|---|---|---|
+| **System** | `/api/status/` | `GET` | Health check & diagnostic pipeline (`/`, `/health/`) |
+| **Auth** | `/api/auth/register/` | `POST` | User registration with key-pair provisioning |
+| | `/api/auth/login/` | `POST` | Authenticate and obtain JWT access & refresh tokens |
+| | `/api/auth/refresh/` | `POST` | Refresh access token with activity stamping |
+| **Users** | `/api/users/{email}/public-key/` | `GET` | Retrieve user public key for asymmetric key exchange |
+| **Workspaces** | `/api/workspaces/` | `GET`, `POST` | List and create workspaces |
+| | `/api/workspaces/{id}/members/` | `GET`, `POST` | Manage workspace memberships and role assignments |
+| | `/api/workspaces/{id}/allowlist/` | `GET`, `POST`, `DELETE` | Domain allowlists for agent proxy enforcement |
+| **Projects** | `/api/projects/` | `GET`, `POST` | List, create, and link projects within workspaces |
+| **Secrets** | `/api/secrets/` | `POST` | Atomic bulk upsert of client-encrypted secrets |
+| | `/api/secrets/{project_id}/` | `GET` | List encrypted secret keys and metadata |
+| | `/api/secrets/{project_id}/{key}/` | `GET`, `DELETE` | Retrieve ciphertext or delete a secret |
+| **Agents** | `/api/workspaces/{id}/agents/` | `GET`, `POST` | Register AI agents and issue cryptographic tokens |
+| **Resolver** | `/api/internal/agents/verify/` | `POST` | Microsecond agent token verification for the proxy |
+
+### Telemetry & Platform Metrics (`/telemetry/`)
+
+| Endpoint | Methods | Auth | Description |
+|---|---|---|---|
+| `/telemetry/sync/` | `POST` | Anonymous / JWT | Ingest batched client telemetry snapshots |
+| `/telemetry/metrics/` | `GET` | Public | Comprehensive platform analytics, growth, and adoption metrics |
+| `/telemetry/internal/compute-metrics/` | `GET`, `POST` | `CRON_SECRET` | Scheduled trigger for temporal metrics rollup |
 
 ---
 
-## Testing
+## Testing & Quality Assurance
 
-Run the full automated test suite:
+Run the automated test suite across all applications:
+
 ```bash
 python manage.py test apps.common apps.accounts apps.secrets_app apps.workspaces apps.telemetry -v 2
 ```
+
+Run historical metrics calculation backfills:
+
+```bash
+python manage.py calculate_metrics --days 30
+```
+
+---
+
+## Security & Disclosure
+
+Found a vulnerability or security issue? Please see [SECURITY.md](SECURITY.md) for responsible disclosure guidelines. Do not open public issues for security vulnerabilities.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+SecretsAPI is open-source software licensed under the [MIT License](LICENSE).
