@@ -50,7 +50,7 @@ class AuditLogMiddleware:
 
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from apps.accounts.models import User
-from apps.accounts.utils import stamp_user_activity_async, stamp_user_activity_sync
+from apps.accounts.services import AccountService
 
 def get_user_from_request(request):
     user = None
@@ -77,7 +77,7 @@ class ActivityTrackingMiddleware:
         if response.status_code < 400:
             user = get_user_from_request(request)
             if user:
-                await stamp_user_activity_async(user)
+                await AccountService.stamp_user_activity(user=user)
         return response
 
     def __call__(self, request):
@@ -85,5 +85,5 @@ class ActivityTrackingMiddleware:
         if response.status_code < 400:
             user = get_user_from_request(request)
             if user:
-                stamp_user_activity_sync(user)
+                AccountService.stamp_user_activity_sync(user=user)
         return response

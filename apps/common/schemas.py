@@ -1,9 +1,7 @@
-# Standard library
-from typing import Literal, Optional, Any
-
-# Third-party
+from typing import Literal, Optional, Any, Generic, TypeVar
 from ninja import Schema
 
+T = TypeVar("T")
 
 # ==========================================
 # SHARED TYPES
@@ -26,7 +24,7 @@ class ErrorResponse(Schema):
     message: str
 
 
-class DataResponse(Schema):
+class DataResponse(Schema, Generic[T]):
     status: str = "success"
     message: str
-    data: Any = None
+    data: Optional[T] = None

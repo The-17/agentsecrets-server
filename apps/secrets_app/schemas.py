@@ -1,61 +1,65 @@
-# Standard library
 import re
 import uuid
-from typing import Optional, Dict, List, Literal
-
-# Third-party
+from typing import Optional, Dict, List, Literal, Any
 from ninja import Schema
-from pydantic import field_validator, EmailStr
+from pydantic import ConfigDict, field_validator, EmailStr
 
-# Local
 from apps.common.schemas import EnvironmentType
 
 
 # ==========================================
-# PROJECT SCHEMAS
+# REQUEST SCHEMAS
 # ==========================================
 
 class ProjectCreateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     description: Optional[str] = None
     workspace_id: uuid.UUID
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v):
+    def validate_name(cls, v: str) -> str:
         v = v.strip().lower()
         if len(v) < 2:
             raise ValueError("Project name must be at least 2 characters")
-        if not re.match(r'^[a-z0-9_-]+$', v):
+        if not re.match(r"^[a-z0-9_-]+$", v):
             raise ValueError("Project name can only contain letters, numbers, hyphens, and underscores")
         return v
 
 
 class ProjectUpdateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     description: Optional[str] = None
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v):
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
         v = v.strip().lower()
         if len(v) < 2:
             raise ValueError("Project name must be at least 2 characters")
-        if not re.match(r'^[a-z0-9_-]+$', v):
+        if not re.match(r"^[a-z0-9_-]+$", v):
             raise ValueError("Project name can only contain letters, numbers, hyphens, and underscores")
         return v
 
 
 class SecretItemSchema(Schema):
     """Used in project invite for re-encrypted secrets."""
+    model_config = ConfigDict(extra="forbid")
+
     environment: EnvironmentType = "development"
     key: str
     value: str
 
 
 class ProjectInviteSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     role: Literal["admin", "member", "read_only"] = "member"
     encrypted_workspace_key_invitee: str
@@ -63,18 +67,16 @@ class ProjectInviteSchema(Schema):
     secrets: List[SecretItemSchema] = []
 
 
-# ==========================================
-# SECRET SCHEMAS
-# ==========================================
-
 class SecretBulkUpsertSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
     project_id: uuid.UUID
     environment: EnvironmentType = "development"
     secrets: Dict[str, str]
 
     @field_validator("secrets")
     @classmethod
-    def validate_secrets(cls, v):
+    def validate_secrets(cls, v: Dict[str, str]) -> Dict[str, str]:
         if not v:
             raise ValueError("Secrets dictionary cannot be empty")
         if len(v) > 100:
@@ -83,7 +85,7 @@ class SecretBulkUpsertSchema(Schema):
             key_upper = key.strip().upper()
             if not key_upper:
                 raise ValueError("Key cannot be empty")
-            if not re.match(r'^[A-Z][A-Z0-9_]*$', key_upper):
+            if not re.match(r"^[A-Z][A-Z0-9_]*$", key_upper):
                 raise ValueError(
                     f"Invalid key '{key_upper}': Must start with a letter and contain only uppercase letters, numbers, and underscores"
                 )
@@ -91,4 +93,73 @@ class SecretBulkUpsertSchema(Schema):
 
 
 class SecretUpdateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
     value: str
+
+
+# ==========================================
+# RESPONSE SCHEMAS
+# ==========================================
+
+class ProjectResponseDataSchema(Schema):
+    id: str
+    workspace_id: str
+    workspace_name: str
+    name: str
+    description: str = ""
+
+
+class ProjectInviteResponseDataSchema(Schema):
+    workspace_id: str
+    workspace_name: str
+    workspace_type: str
+    invitee_email: str
+    invitee_role: str
+    migrated_from_personal: bool
+
+
+class EnvironmentCountItemSchema(Schema):
+    secret_count: int
+
+
+class ProjectEnvironmentsResponseDataSchema(Schema):
+    project_id: str
+    environments: Dict[str, EnvironmentCountItemSchema]
+
+
+class SecretCoverageItemSchema(Schema):
+    key_name: str
+    development: bool
+    staging: bool
+    production: bool
+
+
+class ProjectSecretsCoverageResponseDataSchema(Schema):
+    project_id: str
+    keys: List[SecretCoverageItemSchema]
+
+
+class SecretsDiffResponseDataSchema(Schema):
+    in_from_only: List[str]
+    in_to_only: List[str]
+    in_both: List[str]
+
+
+class SecretBulkUpsertResponseDataSchema(Schema):
+    created: int
+    updated: int
+    total: int
+    environment: str
+
+
+class SecretRecordSchema(Schema):
+    id: str
+    key: str
+    value: str
+    policy: Dict[str, Any] = {}
+
+
+class SecretListResponseDataSchema(Schema):
+    project_id: str
+    secrets: List[SecretRecordSchema]

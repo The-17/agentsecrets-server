@@ -1,1 +1,0 @@
-# Serializers replaced by schemas.py — Pydantic schemas via Django Ninja
