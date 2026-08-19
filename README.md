@@ -131,17 +131,18 @@ pip install -r requirements.txt
 
 ### 2. Configure Credentials via AgentSecrets
 
-Manage and govern all database, encryption, and django configuration securely with the `agentsecrets` CLI:
+Manage and govern all database, encryption, and Django configuration securely with the `agentsecrets` CLI:
 
 ```bash
 # Initialize and link your project
 agentsecrets init
 agentsecrets project create agentsecrets-server
 
-# Store server credentials into your AgentSecrets project
+# Set all required server credentials
 agentsecrets secrets set SECRET_KEY="your-django-secret-key"
 agentsecrets secrets set ENCRYPTION_KEY="your-fernet-encryption-key"
 agentsecrets secrets set SETTINGS="secretsapi.settings.dev"
+agentsecrets secrets set ALLOWED_HOSTS="localhost,127.0.0.1"
 agentsecrets secrets set POSTGRES_DB="agentsecrets"
 agentsecrets secrets set POSTGRES_USER="postgres"
 agentsecrets secrets set POSTGRES_PASSWORD="your-postgres-password"
@@ -160,6 +161,19 @@ agentsecrets env -- python manage.py migrate
 # Launch the development server
 agentsecrets env -- python manage.py runserver
 ```
+
+---
+
+## Documentation
+
+Comprehensive technical guides and specifications are available in the [`docs/`](docs/) directory:
+
+| Guide | Description |
+|---|---|
+| [**System Architecture**](docs/ARCHITECTURE.md) | Technical overview of the 5-layer architecture, concurrency model, and cryptographic invariants |
+| [**Workspace Encryption Model**](docs/WORKSPACE_ENCRYPTION_ARCHITECTURE.md) | Zero-knowledge asymmetric key exchange, X25519 envelopes, and team sharing mechanics |
+| [**Self-Hosting & Operations**](docs/DEPLOYMENT.md) | Production setup, Docker Compose, Gunicorn/Uvicorn ASGI workers, and cron configuration |
+| [**API Overview & Protocols**](docs/API_OVERVIEW.md) | Request/response envelopes, error codes, and complete endpoint catalog |
 
 ---
 
