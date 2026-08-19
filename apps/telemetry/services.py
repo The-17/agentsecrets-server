@@ -18,6 +18,7 @@ from apps.secrets_app.models import Secret
 from apps.workspaces.models import Membership, MembershipStatus
 from .models import TelemetrySnapshot
 from .schemas import TelemetrySyncSchema
+from .commands import process_command_executions
 
 logger = logging.getLogger("apps.telemetry")
 _sync_list_adapter = TypeAdapter(List[TelemetrySyncSchema])
@@ -133,13 +134,18 @@ class TelemetryService:
             item_email = item.user_email or batch_user_email
             snapshot_user = user or email_to_user.get(item_email)
 
+            # Sanitize and normalize command executions and typos
+            raw_cmds = item.command_executions or {}
+            _, _, item_typos = process_command_executions(raw_cmds)
+            merged_typos = {**(item.typos or {}), **item_typos}
+
             snapshots.append(
                 TelemetrySnapshot(
                     user=snapshot_user,
                     cli_version=item.cli_version or batch_cli_version,
                     os=item.os or batch_os,
                     arch=item.arch or batch_arch,
-                    command_executions=item.command_executions or {},
+                    command_executions=raw_cmds,
                     active_environment=item.active_environment,
                     workspace_type=item.workspace_type,
                     workspace_member_count=ws_counts.get(ws_id, item.workspace_member_count or 0),
@@ -170,7 +176,7 @@ class TelemetryService:
                     tampering_detected=item.tampering_detected,
                     is_headless_node=item.is_headless_node,
                     keychain_initialized=item.keychain_initialized,
-                    typos=item.typos or {},
+                    typos=merged_typos,
                     identity_anonymous_calls=item.identity_anonymous_calls,
                     identity_declared_calls=item.identity_declared_calls,
                     identity_issued_calls=item.identity_issued_calls,
@@ -195,6 +201,15 @@ class TelemetryService:
                 existing = await TelemetrySnapshot.objects.filter(
                     user=snap.user,
                     client_timestamp__date=ts_date,
+                ).afirst()
+            elif ts_date:
+                existing = await TelemetrySnapshot.objects.filter(
+                    user__isnull=True,
+                    client_timestamp__date=ts_date,
+                    os=snap.os,
+                    arch=snap.arch,
+                    cli_version=snap.cli_version,
+                    active_environment=snap.active_environment,
                 ).afirst()
 
             if existing:

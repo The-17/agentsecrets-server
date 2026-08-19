@@ -1,10 +1,11 @@
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set
+from collections import Counter
 
 from django.core.cache import cache
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, Sum, Avg, Q
 from django.utils import timezone
 from asgiref.sync import sync_to_async
 
@@ -18,6 +19,7 @@ from apps.workspaces.models import (
     AgentRegistration,
 )
 from .models import TelemetrySnapshot, DailyMetricsAggregate
+from .commands import process_command_executions
 
 logger = logging.getLogger("apps.telemetry")
 
@@ -95,6 +97,7 @@ class TelemetrySelector:
 
         (
             active_counts,
+            snap_users_today,
             new_signups,
             new_projects,
             new_secrets,
@@ -104,12 +107,17 @@ class TelemetrySelector:
                 active_weekly=Count("id", filter=Q(last_active_at__gte=rolling_weekly)),
                 active_monthly=Count("id", filter=Q(last_active_at__gte=rolling_monthly)),
             ),
+            TelemetrySnapshot.objects.filter(
+                client_timestamp__date=today, user__isnull=False
+            ).values("user").distinct().acount(),
             User.objects.filter(created_at__date=today).acount(),
             Project.objects.filter(created_at__date=today).acount(),
             Secret.objects.filter(created_at__date=today).acount(),
         )
+
+        dau = max(active_counts["active_daily"], snap_users_today)
         return {
-            "active_users_daily": active_counts["active_daily"],
+            "active_users_daily": dau,
             "active_users_weekly": active_counts["active_weekly"],
             "active_users_monthly": active_counts["active_monthly"],
             "new_signups_today": new_signups,
@@ -138,6 +146,7 @@ class TelemetrySelector:
             agg_week_ago,
             agg_month_ago,
             os_dist,
+            users_in_shared_workspaces,
         ) = await asyncio.gather(
             cls.get_live_platform_state(),
             cls.get_live_env_distribution(),
@@ -147,6 +156,9 @@ class TelemetrySelector:
             DailyMetricsAggregate.objects.filter(date__lte=week_ago_date).order_by("-date").afirst(),
             DailyMetricsAggregate.objects.filter(date__lte=month_ago_date).order_by("-date").afirst(),
             cls.get_live_os_distribution(),
+            Membership.objects.filter(
+                workspace__type=WorkspaceType.SHARED, status=MembershipStatus.ACTIVE
+            ).values("user").distinct().acount(),
         )
 
         if latest:
@@ -154,10 +166,19 @@ class TelemetrySelector:
             mau = today_metrics["active_users_monthly"]
             stickiness = f"{round((dau / mau) * 100, 2)}%" if mau > 0 else "0.00%"
 
-            total_ws = platform_state["total_workspaces"]
-            team_collab = (
-                f"{round((platform_state['team_workspaces'] / total_ws) * 100, 2)}%"
-                if total_ws > 0
+            # Collaboration rates
+            shared_ws = platform_state["shared_workspaces"]
+            team_ws = platform_state["team_workspaces"]
+            team_collab_rate = (
+                f"{round((team_ws / shared_ws) * 100, 2)}%"
+                if shared_ws > 0
+                else "0.00%"
+            )
+
+            total_users = platform_state["total_users"]
+            user_collab_rate = (
+                f"{round((users_in_shared_workspaces / total_users) * 100, 2)}%"
+                if total_users > 0
                 else "0.00%"
             )
 
@@ -180,7 +201,7 @@ class TelemetrySelector:
                 else "0.00%"
             )
 
-            total_users = platform_state["total_users"]
+            # Unique user adoption percentages
             integration_adoption = {}
             for integration, count in latest.integration_usage.items():
                 pct = round((count / total_users) * 100, 2) if total_users > 0 else 0.0
@@ -193,19 +214,21 @@ class TelemetrySelector:
                 pct = round((count / total_cmds) * 100, 2) if total_cmds > 0 else 0.0
                 command_share[cmd] = f"{pct}%"
 
+            # Growth helper with proper zero-baseline handling
             def _growth(curr, past_agg, field):
                 if not past_agg:
                     return "0.00%"
                 past_val = getattr(past_agg, field, 0)
                 if past_val == 0:
-                    return "0.00%"
+                    return "+100.00%" if curr > 0 else "0.00%"
                 pct = round(((curr - past_val) / past_val) * 100, 2)
                 prefix = "+" if pct > 0 else ""
                 return f"{prefix}{pct}%"
 
             analytics = {
                 "stickiness_ratio_dau_mau": stickiness,
-                "team_collaboration_index": team_collab,
+                "team_collaboration_index": team_collab_rate,
+                "user_collaboration_rate": user_collab_rate,
                 "production_adoption_rate": prod_adoption,
                 "security_metrics": {
                     "redaction_rate": security_redaction,
@@ -240,7 +263,7 @@ class TelemetrySelector:
                 latest, platform_state, env_dist, today_metrics, today, analytics
             )
         else:
-            data = await cls._build_live(platform_state, env_dist, os_dist)
+            data = await cls._build_live(platform_state, env_dist, os_dist, users_in_shared_workspaces)
 
         await cls.set_cached_metrics(data, timeout=300)
         return data
@@ -290,7 +313,32 @@ class TelemetrySelector:
                     "capability_violations": agg.total_capability_violations_blocked,
                     "process_verifications_failed": agg.total_process_verifications_failed,
                     "process_verifications_passed": agg.total_process_verifications_passed,
+                    "production_write_challenges": agg.total_production_write_challenges,
                 },
+            },
+            "performance": {
+                "avg_keychain_resolution_ms": agg.avg_keychain_resolution_ms,
+                "avg_session_refresh_ms": agg.avg_session_refresh_ms,
+                "total_proxy_duration_ms": agg.total_proxy_duration_ms,
+            },
+            "integrity": {
+                "log_chain_verifications": agg.total_log_verifications,
+                "tampering_alerts": agg.total_tampering_alerts,
+                "active_keychains": agg.total_active_keychains,
+                "headless_nodes": agg.total_headless_nodes,
+            },
+            "friction": {
+                "interactive_prompts_shown": agg.total_interactive_prompts_shown,
+                "interactive_prompts_skipped": agg.total_interactive_prompts_skipped,
+                "drift_diffs_detected": agg.total_drift_diffs_detected,
+            },
+            "errors": {
+                "auth": agg.total_errors_auth,
+                "keychain": agg.total_errors_keychain,
+                "secrets": agg.total_errors_secrets,
+                "network": agg.total_errors_network,
+                "system": agg.total_errors_system,
+                "unknown": agg.total_errors_unknown,
             },
             "feature_adoption": {
                 "environment_distribution": env_dist,
@@ -303,7 +351,9 @@ class TelemetrySelector:
         }
 
     @classmethod
-    async def _build_live(cls, platform_state, env_dist, os_dist) -> Dict[str, Any]:
+    async def _build_live(
+        cls, platform_state, env_dist, os_dist, users_in_shared_workspaces: int
+    ) -> Dict[str, Any]:
         now = timezone.now()
         today = now.date()
         rolling_daily = now - timedelta(hours=24)
@@ -336,6 +386,7 @@ class TelemetrySelector:
                 total_blocked=Sum("proxy_blocked"),
                 total_redacted=Sum("proxy_redacted"),
                 total_secrets_resolved=Sum("secrets_resolved"),
+                total_proxy_duration_ms=Sum("total_proxy_duration_ms"),
                 total_proxy_calls_daemon=Sum("proxy_calls_daemon"),
                 total_proxy_calls_transient=Sum("proxy_calls_transient"),
                 total_proxy_calls_mcp=Sum("proxy_calls_mcp"),
@@ -349,6 +400,22 @@ class TelemetrySelector:
                 total_capability_violations_blocked=Sum("capability_violations_blocked"),
                 total_process_verifications_failed=Sum("process_verifications_failed"),
                 total_process_verifications_passed=Sum("process_verifications_passed"),
+                total_production_write_challenges=Sum("production_write_challenges"),
+                avg_keychain_resolution_ms=Avg("keychain_resolution_ms"),
+                avg_session_refresh_ms=Avg("session_refresh_ms"),
+                total_interactive_prompts_shown=Sum("interactive_prompts_shown"),
+                total_interactive_prompts_skipped=Sum("interactive_prompts_skipped"),
+                total_drift_diffs_detected=Sum("drift_diffs_detected"),
+                total_log_verifications=Sum("log_chain_verifications"),
+                total_tampering_alerts=Sum("tampering_detected"),
+                total_headless_nodes=Count("id", filter=Q(is_headless_node=True)),
+                total_active_keychains=Count("id", filter=Q(keychain_initialized=True)),
+                total_errors_auth=Sum("errors_auth_count"),
+                total_errors_keychain=Sum("errors_keychain_count"),
+                total_errors_secrets=Sum("errors_secrets_count"),
+                total_errors_network=Sum("errors_network_count"),
+                total_errors_system=Sum("errors_system_count"),
+                total_errors_unknown=Sum("errors_unknown_count"),
             ),
         )
 
@@ -372,45 +439,50 @@ class TelemetrySelector:
         else:
             avg_mpw = 0.0
 
-        integration_usage = {}
-        async for snapshot in TelemetrySnapshot.objects.exclude(integrations_active=[]).only(
-            "integrations_active"
-        ):
+        # Unique user integration adoption
+        user_integrations: Dict[str, Set[str]] = {}
+        async for snapshot in TelemetrySnapshot.objects.filter(
+            user__isnull=False
+        ).exclude(integrations_active=[]).only("user_id", "integrations_active"):
+            uid = str(snapshot.user_id)
             for integration in snapshot.integrations_active:
-                integration_usage[integration] = integration_usage.get(integration, 0) + 1
+                if integration not in user_integrations:
+                    user_integrations[integration] = set()
+                user_integrations[integration].add(uid)
 
         total_users = platform_state["total_users"]
+        integration_usage = {k: len(u_set) for k, u_set in user_integrations.items()}
         integration_adoption = {
             k: f"{round((v / total_users) * 100, 2)}%" if total_users > 0 else "0.00%"
             for k, v in integration_usage.items()
         }
 
-        VALID_COMMANDS = {
-            "root", "init", "login", "logout", "status", "workspace", "project",
-            "secrets", "agent", "log", "proxy", "mcp", "call", "environment",
-            "env", "exec", "docs", "-h", "-v", "--help", "--version",
-        }
-        command_usage = {}
-        typos_usage = {}
+        # Live Command Classification
+        raw_cmd_counter = Counter()
         async for snapshot in TelemetrySnapshot.objects.exclude(command_executions={}).only(
             "command_executions"
         ):
             for cmd, count in snapshot.command_executions.items():
-                if cmd in VALID_COMMANDS:
-                    command_usage[cmd] = command_usage.get(cmd, 0) + count
-                else:
-                    typos_usage[cmd] = typos_usage.get(cmd, 0) + count
+                raw_cmd_counter[cmd] += count
 
-        total_cmds = sum(command_usage.values())
+        canonical_usage, _, typos_usage = process_command_executions(raw_cmd_counter)
+
+        total_cmds = sum(canonical_usage.values())
         command_share = {
             k: f"{round((v / total_cmds) * 100, 2)}%" if total_cmds > 0 else "0.00%"
-            for k, v in command_usage.items()
+            for k, v in canonical_usage.items()
         }
 
-        total_ws = platform_state["total_workspaces"]
+        shared_ws = platform_state["shared_workspaces"]
+        team_ws = platform_state["team_workspaces"]
         team_collab = (
-            f"{round((platform_state['team_workspaces'] / total_ws) * 100, 2)}%"
-            if total_ws > 0
+            f"{round((team_ws / shared_ws) * 100, 2)}%"
+            if shared_ws > 0
+            else "0.00%"
+        )
+        user_collab = (
+            f"{round((users_in_shared_workspaces / total_users) * 100, 2)}%"
+            if total_users > 0
             else "0.00%"
         )
 
@@ -423,12 +495,12 @@ class TelemetrySelector:
 
         total_calls = proxy_agg.get("total_calls") or 0
         security_redaction = (
-            f"{round(((proxy_agg.get('total_redacted') or 0) / total_calls) * 100, 2)}%"
+            f"{round(((proxy_agg.get("total_redacted") or 0) / total_calls) * 100, 2)}%"
             if total_calls > 0
             else "0.00%"
         )
         security_block = (
-            f"{round(((proxy_agg.get('total_blocked') or 0) / total_calls) * 100, 2)}%"
+            f"{round(((proxy_agg.get("total_blocked") or 0) / total_calls) * 100, 2)}%"
             if total_calls > 0
             else "0.00%"
         )
@@ -455,6 +527,7 @@ class TelemetrySelector:
                     else "0.00%"
                 ),
                 "team_collaboration_index": team_collab,
+                "user_collaboration_rate": user_collab,
                 "production_adoption_rate": prod_adoption,
                 "security_metrics": {
                     "redaction_rate": security_redaction,
@@ -494,11 +567,36 @@ class TelemetrySelector:
                     "capability_violations": proxy_agg.get("total_capability_violations_blocked") or 0,
                     "process_verifications_failed": proxy_agg.get("total_process_verifications_failed") or 0,
                     "process_verifications_passed": proxy_agg.get("total_process_verifications_passed") or 0,
+                    "production_write_challenges": proxy_agg.get("total_production_write_challenges") or 0,
                 },
+            },
+            "performance": {
+                "avg_keychain_resolution_ms": proxy_agg.get("avg_keychain_resolution_ms") or 0.0,
+                "avg_session_refresh_ms": proxy_agg.get("avg_session_refresh_ms") or 0.0,
+                "total_proxy_duration_ms": proxy_agg.get("total_proxy_duration_ms") or 0,
+            },
+            "integrity": {
+                "log_chain_verifications": proxy_agg.get("total_log_verifications") or 0,
+                "tampering_alerts": proxy_agg.get("total_tampering_alerts") or 0,
+                "active_keychains": proxy_agg.get("total_active_keychains") or 0,
+                "headless_nodes": proxy_agg.get("total_headless_nodes") or 0,
+            },
+            "friction": {
+                "interactive_prompts_shown": proxy_agg.get("total_interactive_prompts_shown") or 0,
+                "interactive_prompts_skipped": proxy_agg.get("total_interactive_prompts_skipped") or 0,
+                "drift_diffs_detected": proxy_agg.get("total_drift_diffs_detected") or 0,
+            },
+            "errors": {
+                "auth": proxy_agg.get("total_errors_auth") or 0,
+                "keychain": proxy_agg.get("total_errors_keychain") or 0,
+                "secrets": proxy_agg.get("total_errors_secrets") or 0,
+                "network": proxy_agg.get("total_errors_network") or 0,
+                "system": proxy_agg.get("total_errors_system") or 0,
+                "unknown": proxy_agg.get("total_errors_unknown") or 0,
             },
             "feature_adoption": {
                 "environment_distribution": env_dist,
-                "command_usage": command_usage,
+                "command_usage": canonical_usage,
                 "integration_usage": integration_usage,
                 "typos_usage": typos_usage,
             },
