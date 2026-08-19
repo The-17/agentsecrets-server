@@ -44,7 +44,13 @@ The primary security invariant of `agentsecrets-server` is **architectural blind
 - **Client Encryption**: AES-256-GCM with authenticated data.
 - **Key Exchange**: X25519 curve point multiplication with libsodium SealedBox (`crypto_box_seal`).
 - **User Key Derivation**: Argon2id on client from user master password + server-stored salt.
-- **Server Internal Protection**: Fernet (AES-128-CBC + HMAC-SHA256) for internal server-scoped diagnostic tokens.
+- **Server-Side At-Rest Protection (Double-Envelope)**: Fernet (AES-128-CBC + HMAC-SHA256) wrapping the client's already-encrypted ciphertext before persisting to database tables.
+
+### Double-Envelope Encryption Mechanics
+When `agentsecrets-server` receives a secret payload, it performs **double envelope encryption**:
+1. The incoming payload is already encrypted ciphertext generated on the client machine via AES-256-GCM.
+2. The server encrypts this opaque blob with its server-level Fernet `ENCRYPTION_KEY` before storing it in PostgreSQL.
+3. Decrypting the database layer only reveals the client ciphertext. The server structurally has no access to the client's private keys or plaintext values.
 
 ---
 

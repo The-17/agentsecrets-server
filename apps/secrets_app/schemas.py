@@ -20,13 +20,13 @@ class ProjectCreateSchema(Schema):
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v: str) -> str:
-        v = v.strip().lower()
-        if len(v) < 2:
+    def validate_name(cls, value: str) -> str:
+        value = value.strip().lower()
+        if len(value) < 2:
             raise ValueError("Project name must be at least 2 characters")
-        if not re.match(r"^[a-z0-9_-]+$", v):
+        if not re.match(r"^[a-z0-9_-]+$", value):
             raise ValueError("Project name can only contain letters, numbers, hyphens, and underscores")
-        return v
+        return value
 
 
 class ProjectUpdateSchema(Schema):
@@ -37,15 +37,15 @@ class ProjectUpdateSchema(Schema):
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip().lower()
-        if len(v) < 2:
+    def validate_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip().lower()
+        if len(value) < 2:
             raise ValueError("Project name must be at least 2 characters")
-        if not re.match(r"^[a-z0-9_-]+$", v):
+        if not re.match(r"^[a-z0-9_-]+$", value):
             raise ValueError("Project name can only contain letters, numbers, hyphens, and underscores")
-        return v
+        return value
 
 
 class SecretItemSchema(Schema):
@@ -76,12 +76,12 @@ class SecretBulkUpsertSchema(Schema):
 
     @field_validator("secrets")
     @classmethod
-    def validate_secrets(cls, v: Dict[str, str]) -> Dict[str, str]:
-        if not v:
+    def validate_secrets(cls, value: Dict[str, str]) -> Dict[str, str]:
+        if not value:
             raise ValueError("Secrets dictionary cannot be empty")
-        if len(v) > 100:
+        if len(value) > 100:
             raise ValueError("Cannot process more than 100 secrets in a single request")
-        for key in v.keys():
+        for key in value.keys():
             key_upper = key.strip().upper()
             if not key_upper:
                 raise ValueError("Key cannot be empty")
@@ -89,7 +89,7 @@ class SecretBulkUpsertSchema(Schema):
                 raise ValueError(
                     f"Invalid key '{key_upper}': Must start with a letter and contain only uppercase letters, numbers, and underscores"
                 )
-        return v
+        return value
 
 
 class SecretUpdateSchema(Schema):

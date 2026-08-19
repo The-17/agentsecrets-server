@@ -34,6 +34,28 @@ Traditional secrets managers operate as trusted vaults: the server receives plai
 2. **Asymmetric Team Sharing**: Workspace encryption keys are wrapped using recipients' public keys (X25519 / NaCl SealedBox). The server stores wrapped key envelopes it structurally cannot unlock.
 3. **No Value Storage**: `agentsecrets-server` stores ciphertext blobs and metadata (environment, project, usage policies). The server holds no master decryption keys and has no code path to return plaintext.
 
+### Double-Envelope Encryption: The Role of `ENCRYPTION_KEY`
+
+If the server cannot decrypt secrets, **why does `agentsecrets-server` require a Fernet `ENCRYPTION_KEY`?**
+
+The answer is **defense-in-depth double-envelope encryption**:
+
+```
+[ Developer Machine ]                      [ agentsecrets-server Database ]
+Plaintext Secret (sk_live_...)             
+       │                                   
+       ▼ (Client AES-256-GCM)              
+Client Ciphertext (Opaque)                 
+       │                                   
+       ▼ (Network Payload)                 
+Received by Server ──────────────────────>  Outer Fernet Layer (ENCRYPTION_KEY)
+                                                └── Inner Client Ciphertext (AES-256-GCM)
+```
+
+1. **Client Layer (Zero-Knowledge Boundary)**: The `agentsecrets` CLI encrypts raw values using AES-256-GCM on your local machine. The payload sent across the wire is **already opaque ciphertext**.
+2. **Server Layer (At-Rest Database Protection)**: When `agentsecrets-server` writes to the database, it wraps the **already-encrypted client blob** in an additional Fernet layer (`ENCRYPTION_KEY`).
+3. **Cryptographic Guarantee**: The server is simply **encrypting an encrypted blob**. Even if a rogue actor gains direct access to PostgreSQL and obtains the server's `ENCRYPTION_KEY`, decrypting the database layer only yields the client-side AES-256-GCM ciphertext. The underlying credential values remain structurally unreadable.
+
 ---
 
 ## Architectural Principles
