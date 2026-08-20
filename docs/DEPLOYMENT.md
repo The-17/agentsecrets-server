@@ -98,27 +98,63 @@ agentsecrets env -- gunicorn core.asgi:application \
 
 ### `Dockerfile`:
 ```dockerfile
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Final runtime stage
+FROM python:3.12-slim-bookworm AS runner
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    PORT=8000
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn uvicorn[standard]
+COPY --from=builder /opt/venv /opt/venv
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-COPY . .
+COPY . /app/
+
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/staticfiles /app/logs && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 
-CMD ["gunicorn", "core.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/api/status/health/ || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+CMD ["gunicorn", "core.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120"]
 ```
 
 ### `docker-compose.yml`:
@@ -128,36 +164,52 @@ version: '3.8'
 services:
   db:
     image: postgres:16-alpine
-    restart: always
+    container_name: agentsecrets_db
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: agentsecrets
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: your-postgres-password
+      POSTGRES_DB: ${POSTGRES_DB:-agentsecrets}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-agentsecrets}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  server:
-    build: .
-    restart: always
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentsecrets_server
+    restart: unless-stopped
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     environment:
-      - SETTINGS=core.settings.prod
-      - ALLOWED_HOSTS=*
-      - POSTGRES_DB=agentsecrets
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=your-postgres-password
+      - SETTINGS=${SETTINGS:-prod}
+      - SECRET_KEY=${SECRET_KEY:-django-insecure-docker-secret-key}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
+      - POSTGRES_DB=${POSTGRES_DB:-agentsecrets}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
-      - SECRET_KEY=your-django-secret-key
-      - ENCRYPTION_KEY=your-fernet-encryption-key
+      - POSTGRES_SSLMODE=disable
+      - RUN_MIGRATIONS=true
+      - COLLECT_STATIC=true
+    volumes:
+      - static_volume:/app/staticfiles
 
 volumes:
   postgres_data:
+  static_volume:
 ```
 
 ---

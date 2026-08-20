@@ -63,3 +63,5 @@ uritemplate==4.2.0
 urllib3==2.6.2
 wcwidth==0.2.14
 whitenoise==6.9.0
+gunicorn==23.0.0
+uvicorn[standard]==0.34.0

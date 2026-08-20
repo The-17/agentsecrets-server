@@ -177,6 +177,12 @@ cython_debug/
 SPEC_COMPLIANCE_REVIEW.md
 specs/
 
+# Editor directories
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
 # AgentSecrets environment files
 .env.development
 .env.staging

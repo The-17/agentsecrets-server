@@ -92,17 +92,20 @@ if 'test' in sys.argv:
 
     MIGRATION_MODULES = DisableMigrations()
 else:
+    db_sslmode = config('POSTGRES_SSLMODE', default='prefer')
+    db_options = {}
+    if db_sslmode and db_sslmode.lower() != 'disable':
+        db_options['sslmode'] = db_sslmode
+
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('POSTGRES_DB'),
-            'USER': config('POSTGRES_USER'),
-            'PASSWORD':config('POSTGRES_PASSWORD'),
-            'HOST': config('POSTGRES_HOST'),
-            'PORT':config('POSTGRES_PORT'),
-            'OPTIONS': {
-                'sslmode':'require'
-            }
+            'NAME': config('POSTGRES_DB', default='agentsecrets'),
+            'USER': config('POSTGRES_USER', default='postgres'),
+            'PASSWORD': config('POSTGRES_PASSWORD', default=''),
+            'HOST': config('POSTGRES_HOST', default='localhost'),
+            'PORT': config('POSTGRES_PORT', default='5432'),
+            'OPTIONS': db_options,
         }
     }
 
@@ -147,8 +150,9 @@ USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, "static/"),
-]
+    os.path.join(BASE_DIR, "static"),
+] if os.path.isdir(os.path.join(BASE_DIR, "static")) else []
+
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "static/media")
 
