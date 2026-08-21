@@ -322,3 +322,55 @@ class AuditLogEntry(models.Model):
             s = f"{self.agent_id} ({self.identity_level}) -> {self.target_domain}"
         return s
 
+
+class CloudDelegationKey(BaseModel):
+    """
+    Stores the Cloud Environment Delegation Key (CEDK) for a workspace.
+    
+    The Cloud Resolver registers its public key (CEDK_pub).
+    The workspace admin's browser re-wraps the workspace DEK for CEDK_pub
+    using NaCl SealedBox and uploads the sealed_workspace_key.
+    The Go Cloud Resolver unseals the DEK directly into locked volatile RAM.
+    """
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='delegation_keys',
+        help_text="Workspace this delegation belongs to"
+    )
+    resolver_name = models.CharField(
+        max_length=100,
+        default='default',
+        help_text="Name or identifier of the cloud resolver cluster"
+    )
+    public_key = models.CharField(
+        max_length=64,
+        help_text="X25519 public key hex string of the cloud resolver (CEDK_pub)"
+    )
+    sealed_workspace_key = models.TextField(
+        null=True, blank=True,
+        help_text="Base64-encoded NaCl SealedBox ciphertext containing the workspace DEK"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this delegation is currently active"
+    )
+    expires_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Optional expiration timestamp for the delegation"
+    )
+    revoked_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Timestamp when delegation was revoked"
+    )
+
+    class Meta:
+        db_table = 'cloud_delegation_keys'
+        indexes = [
+            models.Index(fields=['workspace', 'is_active']),
+            models.Index(fields=['public_key']),
+        ]
+
+    def __str__(self):
+        return f"Delegation for {self.workspace.name} ({self.resolver_name})"
+
