@@ -5,34 +5,34 @@ RUN ?= $(ASRUN)
 act:
 	source env/Scripts/activate
 
-mmig:
+mmig makemigrations:
 	if [ -z "$(app)" ]; then \
 		$(ASRUN) python manage.py makemigrations; \
 	else \
 		$(ASRUN) python manage.py makemigrations "$(app)"; \
 	fi
 
-mig:
+mig migrate:
 	if [ -z "$(app)" ]; then \
 		$(ASRUN) python manage.py migrate; \
 	else \
 		$(ASRUN) python manage.py migrate "$(app)"; \
 	fi
 
-run:
-	$(ASRUN) python manage.py runserver
+run dev:
+	$(ASRUN) python manage.py runserver 0.0.0.0:8000
 
-cpass:
-	$(ASRUN) python manage.py changepassword "$(email)"
+test:
+	$(ASRUN) python manage.py test apps.common apps.accounts apps.secrets_app apps.workspaces apps.telemetry -v 2
 
 shell:
 	$(ASRUN) python manage.py shell
 
-sapp:
-	python manage.py startapp "$(app)"
-
-suser:
+suser createsuperuser:
 	$(ASRUN) python manage.py createsuperuser
+
+cpass:
+	$(ASRUN) python manage.py changepassword "$(email)"
 
 metrics:
 	$(ASRUN) python manage.py calculate_metrics --days 7
@@ -40,8 +40,8 @@ metrics:
 collectstatic:
 	$(ASRUN) python manage.py collectstatic --noinput
 
-test:
-	$(ASRUN) python manage.py test apps.common apps.accounts apps.secrets_app apps.workspaces apps.telemetry -v 2
+sapp:
+	python manage.py startapp "$(app)"
 
 reqm:
 	pip install -r requirements.txt
@@ -60,4 +60,4 @@ down:
 	docker-compose down
 
 show-logs:
-	docker-compose logs
+	docker-compose logs -f
