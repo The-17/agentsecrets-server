@@ -387,3 +387,74 @@ class AuditSelector:
             "by_domain": [{"domain": r["target_domain"], "count": r["count"], "failed": r["failed"]} for r in by_domain],
             "anonymous_call_count": anon_count,
         }
+
+
+class CloudDelegationSelector:
+    """Selector for Cloud Resolver CEDK delegations."""
+
+    @staticmethod
+    async def get_delegation_info(*, user: User, workspace_id: uuid.UUID) -> dict[str, Any]:
+        member = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
+        from .models import CloudDelegationKey
+        delegation = await CloudDelegationKey.objects.filter(workspace_id=workspace_id, is_active=True).afirst()
+
+        return {
+            "workspace_id": str(workspace_id),
+            "resolver_name": delegation.resolver_name if delegation else "default",
+            "public_key": delegation.public_key if delegation else None,
+            "has_sealed_key": bool(delegation and delegation.sealed_workspace_key),
+            "is_active": delegation.is_active if delegation else False,
+            "user_encrypted_workspace_key": member.encrypted_workspace_key,
+        }
+
+
+class WorkloadSelector:
+    """Selector for headless container workload secret deliveries."""
+
+    @staticmethod
+    async def resolve_env_payload(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
+        import hashlib
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+
+        token = await AgentToken.objects.select_related("registration", "registration__workspace").filter(
+            token_hash=token_hash
+        ).afirst()
+
+        if not token:
+            raise AuthorizationError("Invalid or revoked workload token")
+
+        if token.expires_at and token.expires_at < timezone.now():
+            raise AuthorizationError("Workload token has expired")
+
+        registration = token.registration
+        workspace = registration.workspace
+        env_name = env_override or registration.environment or "production"
+
+        # Query secrets for this project & environment
+        from apps.secrets_app.models import Secret
+        secrets_qs = Secret.objects.filter(
+            project_id=registration.project_id,
+            environment=env_name,
+            revoked_at__isnull=True
+        ).values("key", "value")
+
+        secrets_map = {}
+        async for s in secrets_qs:
+            secrets_map[s["key"]] = s["value"]
+
+        # Query active domain allowlist for this workspace
+        allowlist_qs = WorkspaceAllowlist.objects.filter(
+            workspace_id=workspace.id,
+            is_active=True
+        ).values_list("domain", flat=True)
+
+        allowlist = [d async for d in allowlist_qs]
+
+        return {
+            "workspace_id": str(workspace.id),
+            "workspace_name": workspace.name,
+            "agent_name": registration.name,
+            "environment": env_name,
+            "secrets": secrets_map,
+            "allowlist": allowlist,
+        }

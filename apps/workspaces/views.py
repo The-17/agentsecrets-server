@@ -424,3 +424,52 @@ class ResolverController:
 
         created_count, ids = await AgentService.ingest_audit_logs(entries=entries)
         return 201, {"created_count": created_count, "ids": ids}
+
+
+@api_controller("/workloads", tags=["Workloads"])
+class WorkloadController:
+    """
+    Headless container and production workload secret injection endpoint.
+    """
+
+    @route.post("/env/", response={200: DataResponse[dict], 401: ErrorResponse}, auth=None)
+    async def get_workload_env(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+        if not token:
+            return 401, {"detail": "Missing Authorization: Bearer <agent_token>"}
+
+        body = json.loads(request.body) if request.body else {}
+        env_override = body.get("env")
+
+        data = await WorkloadService.deliver_env_secrets(raw_token=token, env_override=env_override)
+        return CustomResponse.success(message="Environment secrets resolved successfully", data=data)
+
+
+@api_controller("/workspaces/{workspace_id}/delegation", tags=["Delegation"], auth=JWTAuth())
+class DelegationController:
+    """
+    Cloud Environment Delegation Key (CEDK) management controllers.
+    """
+
+    @route.get("/", response={200: DataResponse[dict], 404: ErrorResponse})
+    async def get_delegation(self, request, workspace_id: uuid.UUID):
+        data = await CloudDelegationSelector.get_delegation_info(user=request.auth, workspace_id=workspace_id)
+        return CustomResponse.success(message="Delegation info retrieved", data=data)
+
+    @route.post("/", response={200: DataResponse[dict], 403: ErrorResponse})
+    async def save_delegation(self, request, workspace_id: uuid.UUID):
+        body = json.loads(request.body)
+        data = await CloudDelegationService.save_delegation(
+            user=request.auth,
+            workspace_id=workspace_id,
+            resolver_name=body.get("resolver_name", "default"),
+            public_key=body["public_key"],
+            sealed_workspace_key=body["sealed_workspace_key"],
+        )
+        return CustomResponse.success(message="Delegation saved successfully", data=data)
+
+    @route.delete("/", response={200: SuccessResponse, 403: ErrorResponse})
+    async def revoke_delegation(self, request, workspace_id: uuid.UUID):
+        await CloudDelegationService.revoke_delegation(user=request.auth, workspace_id=workspace_id)
+        return CustomResponse.success(message="Delegation revoked successfully")

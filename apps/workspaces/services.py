@@ -572,3 +572,68 @@ class AgentService:
 
         created = await AuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
         return len(created), [str(log.id) for log in created]
+
+
+class CloudDelegationService:
+    """Service for managing Cloud Resolver delegation keys."""
+
+    @staticmethod
+    async def save_delegation(
+        *,
+        user: User,
+        workspace_id: uuid.UUID,
+        resolver_name: str,
+        public_key: str,
+        sealed_workspace_key: str,
+    ) -> dict[str, Any]:
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        from .models import CloudDelegationKey
+
+        delegation, _ = await CloudDelegationKey.objects.aupdate_or_create(
+            workspace_id=workspace_id,
+            resolver_name=resolver_name,
+            defaults={
+                "public_key": public_key,
+                "sealed_workspace_key": sealed_workspace_key,
+                "is_active": True,
+                "revoked_at": None,
+            }
+        )
+
+        return {
+            "id": str(delegation.id),
+            "workspace_id": str(workspace_id),
+            "resolver_name": delegation.resolver_name,
+            "public_key": delegation.public_key,
+            "is_active": delegation.is_active,
+        }
+
+    @staticmethod
+    async def revoke_delegation(*, user: User, workspace_id: uuid.UUID) -> None:
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        from .models import CloudDelegationKey
+        from django.utils import timezone
+
+        await CloudDelegationKey.objects.filter(workspace_id=workspace_id).aupdate(
+            is_active=False,
+            revoked_at=timezone.now(),
+        )
+
+
+class WorkloadService:
+    """Service for headless container runtime delivery."""
+
+    @staticmethod
+    async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
+        data = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        
+        # Async track +1 Workload Startup Event in Billing
+        try:
+            from apps.billing.services import BillingService
+            import uuid
+            ws_id = uuid.UUID(data["workspace_id"])
+            await BillingService.record_usage_event(workspace_id=ws_id, count=1)
+        except Exception:
+            pass
+
+        return data
