@@ -82,3 +82,39 @@ class ActivityTrackingMiddleware:
             if user:
                 AccountService.stamp_user_activity_sync(user=user)
         return response
+
+
+class SecurityHeadersMiddleware:
+    """
+    Injects production security headers on all responses:
+    - HSTS: Forces HTTPS for 1 year with subdomains and preload.
+    - X-Content-Type-Options: Prevents MIME-type sniffing attacks.
+    - X-Frame-Options: Blocks clickjacking via iframe embedding.
+    - Referrer-Policy: Limits referrer leakage to origin only on cross-origin.
+    - Cache-Control: Prevents proxy/CDN caching of sensitive auth responses.
+
+    Auth-sensitive routes (/api/auth/, /auth/) additionally receive
+    no-store directives to prevent token caching in intermediate proxies.
+    """
+
+    # Paths where responses must never be cached (tokens, credentials)
+    SENSITIVE_PREFIXES = ("/api/auth/", "/auth/")
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+
+        response["X-Content-Type-Options"] = "nosniff"
+        response["X-Frame-Options"] = "DENY"
+        response["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains; preload"
+        )
+
+        # Prevent intermediate proxies from caching auth tokens
+        if any(request.path.startswith(p) for p in self.SENSITIVE_PREFIXES):
+            response["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+        return response

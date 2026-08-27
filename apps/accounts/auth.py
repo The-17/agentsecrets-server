@@ -4,23 +4,54 @@ import logging
 
 # Django
 from django.conf import settings
+from django.utils.translation import gettext_lazy as _
 
 # Third-party
 from ninja.security import HttpBearer
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError, AuthenticationFailed
+from rest_framework_simplejwt.settings import api_settings
 
 
 logger = logging.getLogger("apps.accounts.auth")
 
 
+class FastJWTAuthentication(JWTAuthentication):
+    """
+    Optimized JWT authentication that fetches only essential identity columns,
+    avoiding slow SELECTs of large base64 keys and cryptographic salts.
+    """
+
+    def get_user(self, validated_token):
+        try:
+            user_id = validated_token[api_settings.USER_ID_CLAIM]
+        except KeyError:
+            raise InvalidToken(_("Token contained no recognizable user identification"))
+
+        try:
+            user = self.user_model.objects.only(
+                "id", "email", "first_name", "last_name", "is_active", "is_staff", "is_superuser"
+            ).get(**{api_settings.USER_ID_FIELD: user_id})
+        except self.user_model.DoesNotExist:
+            raise AuthenticationFailed(_("User not found"), code="user_not_found")
+
+        if not user.is_active:
+            raise AuthenticationFailed(_("User is inactive"), code="user_inactive")
+
+        return user
+
+
 class JWTAuth(HttpBearer):
     """
-    Django Ninja auth class wrapping SimpleJWT token validation.
+    Django Ninja auth class wrapping optimized JWT token validation.
     
     Extracts the Bearer token from the Authorization header,
-    validates it via SimpleJWT, and sets request.user.
+    validates it via FastJWTAuthentication, and sets request.user.
     """
+
+    def __init__(self):
+        super().__init__()
+        self._jwt_auth = FastJWTAuthentication()
 
     def __call__(self, request):
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
@@ -28,13 +59,12 @@ class JWTAuth(HttpBearer):
         return super().__call__(request)
 
     def authenticate(self, request, token):
-        jwt_auth = JWTAuthentication()
         try:
-            validated_token = jwt_auth.get_validated_token(token)
-            user = jwt_auth.get_user(validated_token)
+            validated_token = self._jwt_auth.get_validated_token(token)
+            user = self._jwt_auth.get_user(validated_token)
             request.user = user
             return user
-        except (InvalidToken, TokenError):
+        except (InvalidToken, TokenError, AuthenticationFailed):
             return None
         except Exception as e:
             logger.error(f"JWTAuth: Unexpected error during authentication: {type(e).__name__}")
@@ -65,6 +95,11 @@ class InternalOrUserAuth(HttpBearer):
     Checks Resolver Service Key first, falls back to User JWT.
     """
 
+    def __init__(self):
+        super().__init__()
+        self._resolver_auth = ResolverServiceKeyAuth()
+        self._jwt_auth = JWTAuth()
+
     def __call__(self, request):
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
             return request.user
@@ -72,9 +107,9 @@ class InternalOrUserAuth(HttpBearer):
 
     def authenticate(self, request, token):
         # Try Resolver Service Key first
-        res = ResolverServiceKeyAuth().authenticate(request, token)
+        res = self._resolver_auth.authenticate(request, token)
         if res is not None:
             return res
 
         # Fall back to User JWT
-        return JWTAuth().authenticate(request, token)
+        return self._jwt_auth.authenticate(request, token)

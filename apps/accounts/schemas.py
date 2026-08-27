@@ -1,6 +1,25 @@
 from typing import Optional, List
+import unicodedata
 from ninja import Schema
 from pydantic import ConfigDict, EmailStr, field_validator
+
+
+def sanitize_and_normalize_password(v: str, *, min_length: int = 0) -> str:
+    """
+    Validates and normalizes password inputs:
+    - Rejects null bytes to prevent C-level string truncation attacks.
+    - Caps length at 4096 characters to prevent memory-allocation DoS.
+    - Normalizes Unicode using NFKC to ensure canonical glyph representation.
+    - Enforces optional minimum length (default 8 chars for write operations).
+    """
+    if "\x00" in v:
+        raise ValueError("Password must not contain null bytes")
+    if len(v) > 4096:
+        raise ValueError("Password exceeds maximum allowed length of 4096 characters")
+    normalized = unicodedata.normalize("NFKC", v)
+    if min_length > 0 and len(normalized) < min_length:
+        raise ValueError(f"Password must be at least {min_length} characters")
+    return normalized
 
 
 # ==========================================
@@ -28,10 +47,8 @@ class RegisterSchema(Schema):
 
     @field_validator("password")
     @classmethod
-    def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
-        return v
+    def validate_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=8)
 
     @field_validator("terms_agreement")
     @classmethod
@@ -46,6 +63,11 @@ class LoginSchema(Schema):
 
     email: EmailStr
     password: str
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=0)
 
 
 class LogoutSchema(Schema):
@@ -83,12 +105,10 @@ class SetNewPasswordSchema(Schema):
     key_salt: Optional[str] = None
     encrypted_private_key: Optional[str] = None
 
-    @field_validator("password")
+    @field_validator("password", "confirm_password")
     @classmethod
-    def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
-        return v
+    def validate_passwords(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=8)
 
 
 class ChangePasswordSchema(Schema):
@@ -99,12 +119,15 @@ class ChangePasswordSchema(Schema):
     key_salt: str
     encrypted_private_key: str
 
+    @field_validator("current_password")
+    @classmethod
+    def validate_current_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=0)
+
     @field_validator("new_password")
     @classmethod
-    def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters")
-        return v
+    def validate_new_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=8)
 
 
 class RefreshTokenSchema(Schema):

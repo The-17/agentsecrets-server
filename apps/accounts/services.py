@@ -43,6 +43,20 @@ class AccountService:
     """
 
     @staticmethod
+    async def stamp_user_activity_by_id(*, user_id: Any) -> None:
+        """
+        Updates the user's last_active_at timestamp atomically by ID.
+        Throttled to once every 15 minutes. Executes a single conditional UPDATE
+        without fetching heavy model fields into memory.
+        """
+        from django.db.models import Q
+        now = timezone.now()
+        threshold = now - timedelta(minutes=15)
+        await User.objects.filter(
+            Q(id=user_id) & (Q(last_active_at__isnull=True) | Q(last_active_at__lt=threshold))
+        ).aupdate(last_active_at=now)
+
+    @staticmethod
     async def stamp_user_activity(*, user: User) -> None:
         """
         Updates the user's last_active_at timestamp.
@@ -234,29 +248,38 @@ class AccountService:
 
     @staticmethod
     async def refresh_token(*, refresh_token_str: str) -> dict[str, Any]:
+        """
+        Refreshes an access token from a refresh token with rotation support.
+        Optimized to process JWT cryptographic operations in a single thread pool hop
+        and stamp user activity without querying the full User model.
+        """
         try:
-            refresh = await sync_to_async(RefreshToken)(refresh_token_str)
+            @sync_to_async
+            def _process_refresh():
+                refresh = RefreshToken(refresh_token_str)
+                new_access = str(refresh.access_token)
+                rotate = settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False)
+                rotated_refresh = None
+                if rotate:
+                    blacklist = settings.SIMPLE_JWT.get("BLACKLIST_AFTER_ROTATION", False)
+                    if blacklist:
+                        try:
+                            refresh.blacklist()
+                        except AttributeError:
+                            pass
+                    refresh.set_jti()
+                    refresh.set_exp()
+                    refresh.set_iat()
+                    rotated_refresh = str(refresh)
+                user_id = refresh.payload.get("user_id")
+                return new_access, rotated_refresh, user_id
+
+            new_access, rotated_refresh, user_id = await _process_refresh()
             expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
 
-            new_access = str(refresh.access_token)
-
-            rotate = settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False)
-            if rotate:
-                blacklist = settings.SIMPLE_JWT.get("BLACKLIST_AFTER_ROTATION", False)
-                if blacklist:
-                    try:
-                        await sync_to_async(refresh.blacklist)()
-                    except AttributeError:
-                        pass
-                refresh.set_jti()
-                refresh.set_exp()
-                refresh.set_iat()
-
-            user_id = refresh.payload.get("user_id")
             if user_id:
                 try:
-                    user = await User.objects.aget(id=user_id)
-                    await AccountService.stamp_user_activity(user=user)
+                    await AccountService.stamp_user_activity_by_id(user_id=user_id)
                 except Exception as e:
                     logger.warning("Refresh: Failed to stamp user activity: %s", type(e).__name__)
 
@@ -264,8 +287,8 @@ class AccountService:
                 "access": new_access,
                 "expires_at": expires_at.isoformat(),
             }
-            if rotate:
-                response_data["refresh"] = str(refresh)
+            if rotated_refresh:
+                response_data["refresh"] = rotated_refresh
 
             return response_data
         except TokenError:
