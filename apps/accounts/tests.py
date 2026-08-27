@@ -198,3 +198,34 @@ class AccountsAPITests(TestCase):
         self.assertIn("access", refresh_data)
         self.assertIn("refresh", refresh_data)
         self.assertIn("expires_at", refresh_data)
+
+    def test_zero_db_ingress_query_count(self):
+        """
+        Verify that validating a JWT with embedded claims executes EXACTLY ZERO database queries.
+        """
+        from apps.accounts.auth import ZeroDBJWTAuthentication
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        user = User.objects.create_user(
+            email="zerodb@example.com",
+            password="ZeroDBPassword123!",
+            first_name="Zero",
+            last_name="DB",
+            public_key=self.public_key_b64,
+        )
+        tokens = user.tokens()
+        access_token = tokens["access"]
+
+        auth_validator = ZeroDBJWTAuthentication()
+        validated_token = auth_validator.get_validated_token(access_token)
+
+        # Assert ZERO database queries are executed when resolving the authenticated principal
+        with CaptureQueriesContext(connection) as queries:
+            principal = auth_validator.get_user(validated_token)
+            self.assertEqual(len(queries), 0, f"Expected 0 database queries, got {len(queries)}: {queries}")
+
+        self.assertEqual(principal.email, "zerodb@example.com")
+        self.assertEqual(principal.first_name, "Zero")
+        self.assertEqual(str(principal.id), str(user.id))
+        self.assertTrue(principal.is_authenticated)

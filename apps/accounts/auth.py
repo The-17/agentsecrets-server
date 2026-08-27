@@ -2,6 +2,8 @@
 import hmac
 import logging
 
+import uuid
+
 # Django
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
@@ -12,14 +14,19 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError, AuthenticationFailed
 from rest_framework_simplejwt.settings import api_settings
 
+from apps.accounts.models import User
+
 
 logger = logging.getLogger("apps.accounts.auth")
 
 
-class FastJWTAuthentication(JWTAuthentication):
+class ZeroDBJWTAuthentication(JWTAuthentication):
     """
-    Optimized JWT authentication that fetches only essential identity columns,
-    avoiding slow SELECTs of large base64 keys and cryptographic salts.
+    True Zero-DB Ingress JWT Authentication.
+    
+    Verifies the cryptographic signature and expiration of the token in CPU memory.
+    Constructs an in-memory User identity directly from token claims.
+    Executes ZERO relational queries to the database on the hot ingress path.
     """
 
     def get_user(self, validated_token):
@@ -28,6 +35,23 @@ class FastJWTAuthentication(JWTAuthentication):
         except KeyError:
             raise InvalidToken(_("Token contained no recognizable user identification"))
 
+        email = validated_token.get("email")
+        if email:
+            # True Zero-DB Ingress: instantiate in-memory User directly from verified claims
+            user = User(
+                id=user_id,
+                email=email,
+                first_name=validated_token.get("first_name", ""),
+                last_name=validated_token.get("last_name", ""),
+                is_active=True,
+                is_staff=validated_token.get("is_staff", False),
+                is_superuser=validated_token.get("is_superuser", False),
+            )
+            user._state.adding = False
+            user._state.db = "default"
+            return user
+
+        # Legacy fallback for tokens minted prior to claims embedding
         try:
             user = self.user_model.objects.only(
                 "id", "email", "first_name", "last_name", "is_active", "is_staff", "is_superuser"
@@ -43,15 +67,15 @@ class FastJWTAuthentication(JWTAuthentication):
 
 class JWTAuth(HttpBearer):
     """
-    Django Ninja auth class wrapping optimized JWT token validation.
+    Django Ninja auth class wrapping Zero-DB JWT token validation.
     
     Extracts the Bearer token from the Authorization header,
-    validates it via FastJWTAuthentication, and sets request.user.
+    validates it via ZeroDBJWTAuthentication, and sets request.user.
     """
 
     def __init__(self):
         super().__init__()
-        self._jwt_auth = FastJWTAuthentication()
+        self._jwt_auth = ZeroDBJWTAuthentication()
 
     def __call__(self, request):
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
