@@ -199,33 +199,33 @@ class AccountsAPITests(TestCase):
         self.assertIn("refresh", refresh_data)
         self.assertIn("expires_at", refresh_data)
 
-    def test_zero_db_ingress_query_count(self):
+    def test_stateless_jwt_auth_no_database_queries(self):
         """
-        Verify that validating a JWT with embedded claims executes EXACTLY ZERO database queries.
+        Verify that validating a JWT with embedded claims executes 0 database queries.
         """
-        from apps.accounts.auth import ZeroDBJWTAuthentication
+        from apps.accounts.auth import StatelessJWTAuthentication
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
         user = User.objects.create_user(
-            email="zerodb@example.com",
-            password="ZeroDBPassword123!",
-            first_name="Zero",
-            last_name="DB",
+            email="stateless@example.com",
+            password="StatelessPassword123!",
+            first_name="Stateless",
+            last_name="User",
             public_key=self.public_key_b64,
         )
         tokens = user.tokens()
         access_token = tokens["access"]
 
-        auth_validator = ZeroDBJWTAuthentication()
+        auth_validator = StatelessJWTAuthentication()
         validated_token = auth_validator.get_validated_token(access_token)
 
-        # Assert ZERO database queries are executed when resolving the authenticated principal
+        # Assert 0 database queries are executed when resolving the authenticated user
         with CaptureQueriesContext(connection) as queries:
             principal = auth_validator.get_user(validated_token)
             self.assertEqual(len(queries), 0, f"Expected 0 database queries, got {len(queries)}: {queries}")
 
-        self.assertEqual(principal.email, "zerodb@example.com")
-        self.assertEqual(principal.first_name, "Zero")
+        self.assertEqual(principal.email, "stateless@example.com")
+        self.assertEqual(principal.first_name, "Stateless")
         self.assertEqual(str(principal.id), str(user.id))
         self.assertTrue(principal.is_authenticated)

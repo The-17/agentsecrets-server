@@ -20,13 +20,11 @@ from apps.accounts.models import User
 logger = logging.getLogger("apps.accounts.auth")
 
 
-class ZeroDBJWTAuthentication(JWTAuthentication):
+class StatelessJWTAuthentication(JWTAuthentication):
     """
-    True Zero-DB Ingress JWT Authentication.
-    
-    Verifies the cryptographic signature and expiration of the token in CPU memory.
-    Constructs an in-memory User identity directly from token claims.
-    Executes ZERO relational queries to the database on the hot ingress path.
+    Validates token signature/expiration in memory and builds the User
+    instance directly from verified claims when present, avoiding a database
+    query on every authenticated request.
     """
 
     def get_user(self, validated_token):
@@ -37,7 +35,6 @@ class ZeroDBJWTAuthentication(JWTAuthentication):
 
         email = validated_token.get("email")
         if email:
-            # True Zero-DB Ingress: instantiate in-memory User directly from verified claims
             user = User(
                 id=user_id,
                 email=email,
@@ -51,7 +48,7 @@ class ZeroDBJWTAuthentication(JWTAuthentication):
             user._state.db = "default"
             return user
 
-        # Legacy fallback for tokens minted prior to claims embedding
+        # Fallback for legacy tokens without embedded profile claims
         try:
             user = self.user_model.objects.only(
                 "id", "email", "first_name", "last_name", "is_active", "is_staff", "is_superuser"
@@ -67,15 +64,13 @@ class ZeroDBJWTAuthentication(JWTAuthentication):
 
 class JWTAuth(HttpBearer):
     """
-    Django Ninja auth class wrapping Zero-DB JWT token validation.
-    
-    Extracts the Bearer token from the Authorization header,
-    validates it via ZeroDBJWTAuthentication, and sets request.user.
+    Django Ninja bearer auth handler using stateless JWT validation.
+    Sets request.user to the authenticated user on success.
     """
 
     def __init__(self):
         super().__init__()
-        self._jwt_auth = ZeroDBJWTAuthentication()
+        self._jwt_auth = StatelessJWTAuthentication()
 
     def __call__(self, request):
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
