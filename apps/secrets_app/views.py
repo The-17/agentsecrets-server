@@ -14,6 +14,7 @@ from .schemas import (
     SecretBulkUpsertSchema,
     SecretUpdateSchema,
     ProjectResponseDataSchema,
+    ProjectContributorItemSchema,
     ProjectInviteResponseDataSchema,
     ProjectEnvironmentsResponseDataSchema,
     ProjectSecretsCoverageResponseDataSchema,
@@ -51,9 +52,11 @@ class ProjectController:
     @route.get("/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 404: ErrorResponse})
     async def get_project(self, request, project_name: str):
         project = await ProjectSelector.resolve_project(user=request.auth, project_name=project_name)
+        counts = await ProjectSelector.get_project_environment_counts(project=project)
+        contributors = await ProjectSelector.get_project_contributors(project=project)
         return CustomResponse.success(
             message="Project retrieved successfully",
-            data=ProjectSelector.project_data(project),
+            data=ProjectSelector.project_data(project, environment_counts=counts, contributors=contributors),
         )
 
     @route.patch("/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 403: ErrorResponse})
@@ -75,9 +78,11 @@ class ProjectController:
         project = await ProjectSelector.resolve_project(
             user=request.auth, project_name=project_name, workspace_id=workspace_id
         )
+        counts = await ProjectSelector.get_project_environment_counts(project=project)
+        contributors = await ProjectSelector.get_project_contributors(project=project)
         return CustomResponse.success(
             message="Project retrieved successfully",
-            data=ProjectSelector.project_data(project),
+            data=ProjectSelector.project_data(project, environment_counts=counts, contributors=contributors),
         )
 
     @route.patch("/{workspace_id}/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 403: ErrorResponse})
@@ -105,6 +110,17 @@ class ProjectController:
             message=f"Successfully invited {result['invitee_email']} to project '{project_name}'",
             data=result,
             status_code=201,
+        )
+
+    @route.get("/{workspace_id}/{project_name}/contributors/", response={200: DataResponse[List[ProjectContributorItemSchema]], 404: ErrorResponse})
+    async def get_project_contributors(self, request, workspace_id: uuid.UUID, project_name: str):
+        project = await ProjectSelector.resolve_project(
+            user=request.auth, project_name=project_name, workspace_id=workspace_id
+        )
+        contributors = await ProjectSelector.get_project_contributors(project=project)
+        return CustomResponse.success(
+            message="Project contributors retrieved successfully",
+            data=contributors,
         )
 
     # --- Environment info ---

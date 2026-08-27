@@ -1,0 +1,23 @@
+﻿services:
+  - type: web
+    name: agentsecrets-server
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/status/health/
+    envVars:
+      - key: SETTINGS
+        value: prod
+      - key: ALLOWED_HOSTS
+        value: "*"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: COLLECT_STATIC
+        value: "true"
+      - key: DATABASE_URL
+        sync: false

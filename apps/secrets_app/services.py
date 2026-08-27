@@ -149,7 +149,11 @@ class ProjectService:
                             project=project,
                             key=si.key,
                             environment=si.environment,
-                            defaults={"value": encryption_service.encrypt(si.value)},
+                            defaults={
+                                "value": encryption_service.encrypt(si.value),
+                                "created_by": user,
+                                "updated_by": user,
+                            },
                         )
 
                     inv_m = Membership.objects.create(
@@ -215,9 +219,18 @@ class SecretService:
             enc = encryption_service.encrypt(value)
             if k in existing:
                 existing[k].value = enc
+                existing[k].updated_by = user
                 to_update.append(existing[k])
             else:
-                to_create.append(Secret(project=project, environment=env, key=k, value=enc, policy={}))
+                to_create.append(Secret(
+                    project=project,
+                    environment=env,
+                    key=k,
+                    value=enc,
+                    policy={},
+                    created_by=user,
+                    updated_by=user,
+                ))
 
         @sync_to_async
         def _save_secrets():
@@ -225,7 +238,7 @@ class SecretService:
                 if to_create:
                     Secret.objects.bulk_create(to_create)
                 if to_update:
-                    Secret.objects.bulk_update(to_update, ["value"])
+                    Secret.objects.bulk_update(to_update, ["value", "updated_by"])
 
         if to_create or to_update:
             await _save_secrets()
@@ -262,7 +275,8 @@ class SecretService:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
 
         secret.value = encryption_service.encrypt(data.value)
-        await secret.asave(update_fields=["value", "updated_at"])
+        secret.updated_by = user
+        await secret.asave(update_fields=["value", "updated_by", "updated_at"])
 
         return {
             "id": str(secret.id),

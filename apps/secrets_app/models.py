@@ -2,6 +2,7 @@
 from django.db import models
 
 # Local
+from apps.accounts.models import User
 from apps.common.models import BaseModel
 from apps.workspaces.models import Workspace
 
@@ -47,6 +48,22 @@ class Secret(BaseModel):
         default=dict, blank=True,
         help_text="Usage policy: allowed domains and HTTP methods"
     )
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_secrets',
+        help_text="User who initially added this secret",
+    )
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_secrets',
+        help_text="User who last updated this secret",
+    )
 
     def __str__(self):
         return f"{self.key} - {self.project.name} ({self.environment})"
@@ -59,4 +76,5 @@ class Secret(BaseModel):
             models.Index(fields=['project', 'environment']),
             models.Index(fields=['project', 'key']),
             models.Index(fields=['project', '-updated_at']),
+            models.Index(fields=['project', 'updated_by']),
         ]

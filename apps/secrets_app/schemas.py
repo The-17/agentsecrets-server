@@ -102,12 +102,23 @@ class SecretUpdateSchema(Schema):
 # RESPONSE SCHEMAS
 # ==========================================
 
+class ProjectContributorItemSchema(Schema):
+    id: str
+    email: str
+    first_name: Optional[str] = ""
+    last_name: Optional[str] = ""
+    contributions_count: int = 1
+
+
 class ProjectResponseDataSchema(Schema):
     id: str
     workspace_id: str
     workspace_name: str
     name: str
     description: str = ""
+    environment_counts: Optional[Dict[str, int]] = None
+    total_secrets: Optional[int] = None
+    contributors: Optional[List[ProjectContributorItemSchema]] = None
 
 
 class ProjectInviteResponseDataSchema(Schema):

@@ -17,14 +17,24 @@ class ProjectSelector:
     """
 
     @staticmethod
-    def project_data(project: Project) -> dict[str, Any]:
-        return {
+    def project_data(
+        project: Project,
+        environment_counts: dict[str, int] | None = None,
+        contributors: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        data = {
             "id": str(project.id),
             "workspace_id": str(project.workspace_id),
             "workspace_name": project.workspace.name,
             "name": project.name,
             "description": project.description or "",
         }
+        if environment_counts is not None:
+            data["environment_counts"] = environment_counts
+            data["total_secrets"] = sum(environment_counts.values())
+        if contributors is not None:
+            data["contributors"] = contributors
+        return data
 
     @staticmethod
     async def resolve_project(
@@ -100,8 +110,20 @@ class ProjectSelector:
             workspace__memberships__user=user,
             workspace__memberships__status=MembershipStatus.ACTIVE,
         ).select_related("workspace"):
-            projects.append(ProjectSelector.project_data(p))
+            counts = {"development": 0, "staging": 0, "production": 0}
+            async for row in Secret.objects.filter(project=p).values("environment").annotate(count=Count("id")):
+                if row["environment"] in counts:
+                    counts[row["environment"]] = row["count"]
+            projects.append(ProjectSelector.project_data(p, environment_counts=counts))
         return projects
+
+    @staticmethod
+    async def get_project_environment_counts(*, project: Project) -> dict[str, int]:
+        counts = {"development": 0, "staging": 0, "production": 0}
+        async for row in Secret.objects.filter(project=project).values("environment").annotate(count=Count("id")):
+            if row["environment"] in counts:
+                counts[row["environment"]] = row["count"]
+        return counts
 
     @staticmethod
     async def get_environment_counts(*, project: Project) -> dict[str, Any]:
@@ -143,6 +165,41 @@ class ProjectSelector:
             "in_to_only": sorted(to_keys - from_keys),
             "in_both": sorted(from_keys & to_keys),
         }
+
+    @staticmethod
+    async def get_project_contributors(*, project: Project) -> list[dict[str, Any]]:
+        """
+        Returns distinct users who have contributed (created or updated) secrets in this project.
+        Falls back to workspace owner/members if no secrets have been stamped yet.
+        """
+        from django.db.models import Q
+        user_ids = set()
+        async for s in Secret.objects.filter(project=project).values_list("updated_by_id", "created_by_id"):
+            if s[0]:
+                user_ids.add(s[0])
+            if s[1]:
+                user_ids.add(s[1])
+
+        # If no secrets or no attribution yet, include the project workspace owner
+        if not user_ids and project.workspace and project.workspace.owner_id:
+            user_ids.add(project.workspace.owner_id)
+
+        contributors: list[dict[str, Any]] = []
+        async for u in User.objects.filter(id__in=user_ids):
+            count = await Secret.objects.filter(
+                Q(created_by=u) | Q(updated_by=u),
+                project=project,
+            ).acount()
+            contributors.append({
+                "id": str(u.id),
+                "email": u.email,
+                "first_name": u.first_name or "",
+                "last_name": u.last_name or "",
+                "contributions_count": count or 1,
+            })
+
+        contributors.sort(key=lambda c: c["contributions_count"], reverse=True)
+        return contributors
 
 
 class SecretSelector:
