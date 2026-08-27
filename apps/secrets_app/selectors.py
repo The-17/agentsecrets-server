@@ -170,7 +170,7 @@ class ProjectSelector:
     async def get_project_contributors(*, project: Project) -> list[dict[str, Any]]:
         """
         Returns distinct users who have contributed (created or updated) secrets in this project.
-        Falls back to workspace owner/members if no secrets have been stamped yet.
+        Falls back to workspace owner if no secrets have been stamped yet.
         """
         from django.db.models import Q
         user_ids = set()
