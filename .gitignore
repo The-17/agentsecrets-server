@@ -189,3 +189,4 @@ specs/
 .env.production
 
 .vercel
+.env*

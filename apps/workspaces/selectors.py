@@ -430,16 +430,25 @@ class WorkloadSelector:
         workspace = registration.workspace
         env_name = env_override or registration.environment or "production"
 
+        # Check token capabilities
+        caps = registration.capabilities or {}
+        if caps.get("can_env_read") is False:
+            raise AuthorizationError("Token capabilities do not permit environment secret retrieval (env mode disabled)")
+
         # Query secrets for this project & environment
         from apps.secrets_app.models import Secret
         secrets_qs = Secret.objects.filter(
             project_id=registration.project_id,
             environment=env_name,
             revoked_at__isnull=True
-        ).values("key", "value")
+        )
+
+        allowed_secrets = caps.get("allowed_secrets")
+        if allowed_secrets and isinstance(allowed_secrets, list):
+            secrets_qs = secrets_qs.filter(key__in=allowed_secrets)
 
         secrets_map = {}
-        async for s in secrets_qs:
+        async for s in secrets_qs.values("key", "value"):
             secrets_map[s["key"]] = s["value"]
 
         # Query active domain allowlist for this workspace
