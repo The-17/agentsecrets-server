@@ -14,6 +14,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.common.models import BaseModel
 from .managers import CustomUserManager
 
+import ulid
+
+def generate_billing_id():
+    return f"bill_{str(ulid.ULID())}"
+
 def slugify_two_fields(self):
     return f"{self.first_name}-{self.last_name}"
 
@@ -24,6 +29,14 @@ AUTH_PROVIDERS = [
 
 class User(AbstractBaseUser, PermissionsMixin):
     id = models.UUIDField(default=uuid.uuid4, unique=True, primary_key=True)
+    billing_id = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        default=generate_billing_id,
+        help_text="Mandatory AgentSecrets Cloud billing & entitlement identifier"
+    )
     first_name = models.CharField(max_length=50)
     last_name = models.CharField(max_length=50)
     email = models.EmailField(_('Email Address'), unique=True)
@@ -71,11 +84,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
 
+    def save(self, *args, **kwargs):
+        if not self.billing_id:
+            self.billing_id = generate_billing_id()
+        super().save(*args, **kwargs)
+
     def tokens(self):
         refresh = RefreshToken.for_user(self)
         refresh["email"] = self.email
         refresh["first_name"] = self.first_name
         refresh["last_name"] = self.last_name
+        refresh["billing_id"] = self.billing_id
         refresh["is_staff"] = self.is_staff
         refresh["is_superuser"] = self.is_superuser
         return {
@@ -88,6 +107,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         verbose_name_plural = _("Users")
         indexes = [
             models.Index(fields=['last_active_at']),
+            models.Index(fields=['billing_id']),
         ]
     
     def __str__(self):
