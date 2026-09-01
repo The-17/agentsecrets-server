@@ -625,15 +625,4 @@ class WorkloadService:
 
     @staticmethod
     async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
-        data = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
-        
-        # Async track +1 Workload Startup Event in Billing
-        try:
-            from apps.billing.services import BillingService
-            import uuid
-            ws_id = uuid.UUID(data["workspace_id"])
-            await BillingService.record_usage_event(workspace_id=ws_id, count=1)
-        except Exception:
-            pass
-
-        return data
+        return await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)

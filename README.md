@@ -6,7 +6,7 @@ The high-performance, asynchronous REST backend for [AgentSecrets](https://githu
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)]() [![Python Version](https://img.shields.io/badge/Python-3.10+-3776AB)]() [![Framework](https://img.shields.io/badge/Django%20Ninja-Extra-blue)]() [![Architecture](https://img.shields.io/badge/Architecture-5--Layer%20Async-8A2BE2)]()
 
-**[Website](https://agentsecrets-website.vercel.app) · [Documentation](https://agentsecrets-website.vercel.app/docs) · [CLI Repository](https://github.com/The-17/agentsecrets) · [Engineering Publication](https://engineering.theseventeen.co/series/building-agentsecrets)**
+**[Website](https://agentsecrets.tech) · [Documentation](https://agentsecrets.tech/docs) · [CLI Repository](https://github.com/The-17/agentsecrets) · [Engineering Publication](https://engineering.theseventeen.co/series/building-agentsecrets)**
 
 ---
 

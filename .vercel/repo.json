@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_qM0PwgvdykcBXwKziJET2sHCPVUS",
+      "name": "secrets-api",
+      "directory": ".",
+      "orgId": "team_Hh8Zi7V55b4P4QYW2wIGAwCW"
+    }
+  ]
+}

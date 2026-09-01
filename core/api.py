@@ -28,6 +28,6 @@ from apps.workspaces.views import (  # noqa: F401, E402
     TokenController, AuditController, ResolverController,
     WorkloadController, DelegationController,
 )
-from apps.billing.views import BillingController  # noqa: F401, E402
+from apps.migration.views import MigrationController  # noqa: F401, E402
 
 api.auto_discover_controllers()
