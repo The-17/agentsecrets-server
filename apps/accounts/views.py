@@ -19,6 +19,7 @@ from .schemas import (
     LoginResponseDataSchema,
     TokenRefreshResponseDataSchema,
     UserPublicKeyResponseSchema,
+    UserSummarySchema,
 )
 from .selectors import AccountSelector
 from .services import AccountService
@@ -116,6 +117,21 @@ class AuthController:
         refresh_token = data.refresh_token if data else None
         await AccountService.logout_user(refresh_token=refresh_token)
         return CustomResponse.success(message="Logged out successfully")
+
+    @route.get("/me/", response={200: DataResponse[UserSummarySchema]}, auth=JWTAuth())
+    async def get_current_user(self, request):
+        user = request.auth
+        return CustomResponse.success(
+            message="User profile retrieved",
+            data={
+                "id": str(user.id),
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "public_key": user.public_key,
+                "billing_id": user.billing_id,
+            },
+        )
 
     @route.post("/refresh/", response={200: DataResponse[TokenRefreshResponseDataSchema], 401: ErrorResponse})
     async def refresh(self, request, data: RefreshTokenSchema):
