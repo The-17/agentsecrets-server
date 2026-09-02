@@ -162,6 +162,11 @@ class AccountService:
         if not user:
             raise AuthenticationError("Invalid Credentials")
 
+        if not user.billing_id:
+            from .models import generate_billing_id
+            user.billing_id = generate_billing_id()
+            await user.asave(update_fields=["billing_id"])
+
         tokens = await sync_to_async(user.tokens)()
         key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
         expires_at = timezone.now() + settings.SIMPLE_JWT.get("ACCESS_TOKEN_LIFETIME", timedelta(hours=6))
