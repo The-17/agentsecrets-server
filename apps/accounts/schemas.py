@@ -154,6 +154,7 @@ class UserSummarySchema(Schema):
     first_name: str
     last_name: str
     public_key: Optional[str] = None
+    billing_id: Optional[str] = None
 
 
 class RegisterResponseDataSchema(Schema):

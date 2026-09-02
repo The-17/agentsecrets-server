@@ -62,6 +62,7 @@ class AuthController:
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "public_key": user.public_key,
+                    "billing_id": user.billing_id,
                 },
                 "workspaces": workspaces,
             },
