@@ -40,6 +40,7 @@ class StatelessJWTAuthentication(JWTAuthentication):
                 email=email,
                 first_name=validated_token.get("first_name", ""),
                 last_name=validated_token.get("last_name", ""),
+                billing_id=validated_token.get("billing_id"),
                 is_active=True,
                 is_staff=validated_token.get("is_staff", False),
                 is_superuser=validated_token.get("is_superuser", False),
@@ -51,7 +52,7 @@ class StatelessJWTAuthentication(JWTAuthentication):
         # Fallback for legacy tokens without embedded profile claims
         try:
             user = self.user_model.objects.only(
-                "id", "email", "first_name", "last_name", "is_active", "is_staff", "is_superuser"
+                "id", "email", "first_name", "last_name", "billing_id", "is_active", "is_staff", "is_superuser"
             ).get(**{api_settings.USER_ID_FIELD: user_id})
         except self.user_model.DoesNotExist:
             raise AuthenticationFailed(_("User not found"), code="user_not_found")

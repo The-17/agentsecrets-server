@@ -121,6 +121,16 @@ class AuthController:
     @route.get("/me/", response={200: DataResponse[UserSummarySchema]}, auth=JWTAuth())
     async def get_current_user(self, request):
         user = request.auth
+        billing_id = getattr(user, "billing_id", None)
+        if not billing_id:
+            from .models import User, generate_billing_id
+            db_user = await User.objects.aget_or_none(id=user.id)
+            if db_user:
+                if not db_user.billing_id:
+                    db_user.billing_id = generate_billing_id()
+                    await db_user.asave(update_fields=["billing_id"])
+                billing_id = db_user.billing_id
+
         return CustomResponse.success(
             message="User profile retrieved",
             data={
@@ -129,7 +139,7 @@ class AuthController:
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "public_key": user.public_key,
-                "billing_id": user.billing_id,
+                "billing_id": billing_id,
             },
         )
 
