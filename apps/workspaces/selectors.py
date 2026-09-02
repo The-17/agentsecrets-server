@@ -416,7 +416,11 @@ class WorkloadSelector:
         import hashlib
         token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
 
-        token = await AgentToken.objects.select_related("registration", "registration__workspace").filter(
+        token = await AgentToken.objects.select_related(
+            "registration",
+            "registration__workspace",
+            "registration__workspace__owner"
+        ).filter(
             token_hash=token_hash
         ).afirst()
 
@@ -429,6 +433,35 @@ class WorkloadSelector:
         registration = token.registration
         workspace = registration.workspace
         env_name = env_override or registration.environment or "production"
+
+        # Metering & Quota Gate: Record resolution usage against Cloud Billing
+        billing_id = getattr(getattr(workspace, "owner", None), "billing_id", None)
+        if billing_id:
+            import asyncio
+            import json
+            import urllib.request
+            import urllib.error
+            from apps.common.exceptions import QuotaExceededError
+
+            def _record_env_resolution_usage():
+                req = urllib.request.Request(
+                    "https://resolver.agentsecrets.tech/v1/billing/record-usage",
+                    data=json.dumps({"billing_id": billing_id, "count": 1}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "X-AS-Billing-ID": billing_id},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        return resp.status
+                except urllib.error.HTTPError as e:
+                    return e.code
+                except Exception:
+                    # In case cloud resolver is temporarily unreachable, allow boot to proceed
+                    return 200
+
+            code = await asyncio.to_thread(_record_env_resolution_usage)
+            if code == 429:
+                raise QuotaExceededError("Monthly cloud resolution quota exhausted for current billing period. Upgrade to Pro for 100,000 resolutions/month.")
 
         # Query secrets for this project & environment
         from apps.secrets_app.models import Secret

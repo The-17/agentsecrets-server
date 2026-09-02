@@ -103,6 +103,11 @@ class ConflictError(RequestError):
         super().__init__(ErrorCode.ALREADY_EXISTS, err_msg, 409)
 
 
+class QuotaExceededError(RequestError):
+    def __init__(self, err_msg: str = "Monthly cloud resolution quota exhausted for current billing period. Upgrade to Pro for 100,000 resolutions/month."):
+        super().__init__("quota_exceeded", err_msg, 429)
+
+
 # ==========================================
 # EXCEPTION HANDLERS
 # ==========================================
