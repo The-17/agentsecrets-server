@@ -225,6 +225,8 @@ class AgentVerifyResponseSchema(Schema):
     environment: Optional[str] = None
     capabilities: Optional[Dict[str, Any]] = None
     token_id: Optional[str] = None
+    billing_id: Optional[str] = None
+    allowlist: Optional[List[str]] = None
 
 
 class AuditLogItemSchema(Schema):

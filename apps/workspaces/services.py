@@ -444,9 +444,17 @@ class AgentService:
         token_hash = hashlib.sha256(data.token.encode()).hexdigest()
 
         if data.token_id:
-            token = await AgentToken.objects.select_related("registration").filter(id=data.token_id).afirst()
+            token = await AgentToken.objects.select_related(
+                "registration",
+                "registration__workspace",
+                "registration__workspace__owner"
+            ).filter(id=data.token_id).afirst()
         else:
-            token = await AgentToken.objects.select_related("registration").filter(token_hash=token_hash).afirst()
+            token = await AgentToken.objects.select_related(
+                "registration",
+                "registration__workspace",
+                "registration__workspace__owner"
+            ).filter(token_hash=token_hash).afirst()
 
         if not token:
             return {"valid": False, "reason": "Not found"}
@@ -471,6 +479,13 @@ class AgentService:
         await token.asave(update_fields=["last_used_at"])
 
         agent = token.registration
+        workspace = getattr(agent, "workspace", None)
+        owner = getattr(workspace, "owner", None) if workspace else None
+        billing_id = getattr(owner, "billing_id", "") if owner else ""
+
+        allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id, is_active=True).values_list("domain", flat=True)
+        allowlist = [d async for d in allowlist_qs]
+
         return {
             "valid": True,
             "agent_id": str(agent.id),
@@ -480,6 +495,8 @@ class AgentService:
             "environment": token.environment,
             "capabilities": agent.capabilities or {},
             "token_id": str(token.id),
+            "billing_id": billing_id,
+            "allowlist": allowlist,
         }
 
     @staticmethod
