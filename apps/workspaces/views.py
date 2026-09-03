@@ -381,7 +381,7 @@ class ResolverController:
     Authenticated via RESOLVER_SERVICE_KEY or user session auth.
     """
 
-    @route.post("/agents/verify/", response={200: AgentVerifyResponseSchema}, auth=InternalOrUserAuth())
+    @route.post("/agents/verify/", response={200: AgentVerifyResponseSchema}, auth=None)
     async def verify_agent(self, request, data: InternalAgentVerifySchema):
         result = await AgentService.verify_agent_token(auth_caller=request.auth, data=data)
         return result
