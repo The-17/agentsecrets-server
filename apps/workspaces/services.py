@@ -483,7 +483,7 @@ class AgentService:
         owner = getattr(workspace, "owner", None) if workspace else None
         billing_id = getattr(owner, "billing_id", "") if owner else ""
 
-        allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id, is_active=True).values_list("domain", flat=True)
+        allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id).values_list("domain", flat=True)
         allowlist = [d async for d in allowlist_qs]
 
         return {

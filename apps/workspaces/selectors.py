@@ -478,7 +478,6 @@ class WorkloadSelector:
         # Query active domain allowlist for this workspace
         allowlist_qs = WorkspaceAllowlist.objects.filter(
             workspace_id=workspace.id,
-            is_active=True
         ).values_list("domain", flat=True)
 
         allowlist = [d async for d in allowlist_qs]
