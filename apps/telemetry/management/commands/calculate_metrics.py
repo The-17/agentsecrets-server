@@ -15,6 +15,7 @@ from apps.workspaces.models import (
     WorkspaceType,
     MembershipStatus,
     AgentRegistration,
+    AuditLogEntry,
 )
 from apps.telemetry.models import TelemetrySnapshot, DailyMetricsAggregate
 from apps.telemetry.commands import process_command_executions
@@ -238,6 +239,33 @@ class Command(BaseCommand):
         )
 
         # ──────────────────────────────────────────────
+        # 5b. CLOUD RESOLUTION AUDIT LOG AGGREGATION
+        # ──────────────────────────────────────────────
+        cloud_audit_qs = AuditLogEntry.objects.filter(
+            Q(timestamp__date__lte=target_date)
+            | Q(timestamp__isnull=True, recorded_at__date__lte=target_date),
+            resolution_path="direct_resolve",
+        )
+        cloud_stats = cloud_audit_qs.aggregate(
+            cloud_total=Count("id"),
+            cloud_redacted=Count("id", filter=Q(redacted=True)),
+            cloud_duration_ms=Sum("proxy_duration_ms"),
+        )
+
+        cli_proxy_calls = proxy_stats["total_calls"] or 0
+        cloud_proxy_calls = cloud_stats["cloud_total"] or 0
+        combined_total_proxy_calls = cli_proxy_calls + cloud_proxy_calls
+
+        cli_redacted = proxy_stats["total_redacted"] or 0
+        cloud_redacted = cloud_stats["cloud_redacted"] or 0
+        combined_redacted = cli_redacted + cloud_redacted
+
+        cli_secrets = proxy_stats["total_secrets_resolved"] or 0
+        cloud_secrets = cloud_stats["cloud_total"] or 0
+        combined_secrets_resolved = cli_secrets + cloud_secrets
+        combined_proxy_duration_ms = (proxy_stats["total_proxy_duration_ms"] or 0) + (cloud_stats["cloud_duration_ms"] or 0)
+
+        # ──────────────────────────────────────────────
         # 6. COMMAND USAGE & INTEGRATION ADOPTION IN LEAN PASS
         # ──────────────────────────────────────────────
         raw_command_accumulator = Counter()
@@ -263,6 +291,11 @@ class Command(BaseCommand):
             raw_command_accumulator
         )
         integration_usage = {k: len(u_set) for k, u_set in user_integrations.items()}
+
+        # Record unique users who have used the Cloud Resolver for integration adoption
+        cloud_unique_users = cloud_audit_qs.values("workspace__owner_id").distinct().count()
+        if cloud_unique_users > 0:
+            integration_usage["cloud"] = cloud_unique_users
 
         # ──────────────────────────────────────────────
         # 7. ENVIRONMENT DISTRIBUTION — PINNED STATE
@@ -301,14 +334,14 @@ class Command(BaseCommand):
                 "avg_secrets_per_project": avg_secrets_per_project,
                 "avg_projects_per_workspace": avg_projects_per_workspace,
                 "total_policies": total_policies,
-                "total_proxy_calls": proxy_stats["total_calls"] or 0,
+                "total_proxy_calls": combined_total_proxy_calls,
                 "total_proxy_blocked": proxy_stats["total_blocked"] or 0,
-                "total_proxy_redacted": proxy_stats["total_redacted"] or 0,
+                "total_proxy_redacted": combined_redacted,
                 "command_usage": canonical_usage,
                 "environment_distribution": env_dist,
                 "integration_usage": integration_usage,
-                "total_secrets_resolved": proxy_stats["total_secrets_resolved"] or 0,
-                "total_proxy_duration_ms": proxy_stats["total_proxy_duration_ms"] or 0,
+                "total_secrets_resolved": combined_secrets_resolved,
+                "total_proxy_duration_ms": combined_proxy_duration_ms,
                 "total_proxy_calls_daemon": proxy_stats["total_proxy_calls_daemon"] or 0,
                 "total_proxy_calls_transient": proxy_stats["total_proxy_calls_transient"] or 0,
                 "total_proxy_calls_mcp": proxy_stats["total_proxy_calls_mcp"] or 0,

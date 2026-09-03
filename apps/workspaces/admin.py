@@ -8,7 +8,8 @@ from unfold.admin import ModelAdmin, TabularInline
 from .models import (
     Workspace, Membership,
     WorkspaceAllowlist, WorkspaceAllowlistLog,
-    AgentRegistration, AgentToken, AuditLogEntry
+    AgentRegistration, AgentToken, AuditLogEntry,
+    WorkspaceActivityLog, ForensicAuditLogEntry
 )
 from apps.secrets_app.models import Project
 
@@ -98,8 +99,27 @@ class AgentTokenAdmin(ModelAdmin):
 
 @admin.register(AuditLogEntry)
 class AuditLogEntryAdmin(ModelAdmin):
-    list_display = ('timestamp', 'workspace', 'project', 'identity_level', 'agent_id', 'credential_ref', 'target_domain', 'method', 'status_code', 'duration_ms')
-    list_filter = ('workspace', 'project', 'identity_level', 'method', 'environment', 'redacted', 'timestamp')
+    list_display = ('timestamp', 'workspace', 'source', 'project', 'identity_level', 'agent_id', 'credential_ref', 'target_domain', 'method', 'status_code', 'duration_ms')
+    list_filter = ('workspace', 'source', 'project', 'identity_level', 'method', 'environment', 'redacted', 'timestamp')
     search_fields = ('agent_id', 'credential_ref', 'target_domain', 'workspace__name', 'project__name')
     readonly_fields = ('id', 'recorded_at')
     date_hierarchy = 'timestamp'
+
+
+@admin.register(WorkspaceActivityLog)
+class WorkspaceActivityLogAdmin(ModelAdmin):
+    list_display = ('created_at', 'workspace', 'action', 'actor_email', 'target_type', 'target_name', 'source')
+    list_filter = ('action', 'target_type', 'source', 'created_at', 'workspace')
+    search_fields = ('action', 'actor_email', 'target_name', 'target_id', 'workspace__name')
+    readonly_fields = ('id', 'created_at')
+    date_hierarchy = 'created_at'
+
+
+@admin.register(ForensicAuditLogEntry)
+class ForensicAuditLogEntryAdmin(ModelAdmin):
+    list_display = ('created_at', 'workspace', 'stream_id', 'stream_seq', 'chain_hash')
+    list_filter = ('created_at', 'workspace', 'stream_id')
+    search_fields = ('id', 'stream_id', 'chain_hash', 'prev_chain_hash', 'workspace__name')
+    readonly_fields = ('id', 'created_at')
+    date_hierarchy = 'created_at'
+

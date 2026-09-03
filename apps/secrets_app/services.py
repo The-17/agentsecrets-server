@@ -20,6 +20,7 @@ from apps.workspaces.models import (
     MembershipRole,
     MembershipStatus,
 )
+from apps.workspaces.services import ActivityLogService
 from .models import Project, Secret
 from .schemas import (
     ProjectCreateSchema,
@@ -56,6 +57,18 @@ class ProjectService:
             description=data.description,
         )
         project.workspace = membership.workspace
+        await ActivityLogService.record(
+            workspace_id=membership.workspace.id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="project.created",
+            target_type="project",
+            target_id=str(project.id),
+            target_name=project.name,
+            metadata={"name": project.name, "description": project.description},
+            source="api",
+        )
         logger.info(
             f"PROJECT_CREATED: Project '{project.name}' (ID: {project.id}) "
             f"created in workspace '{project.workspace.name}'"
@@ -95,8 +108,22 @@ class ProjectService:
         )
         await ProjectSelector.require_admin(user=user, workspace=project.workspace)
         name = project.name
+        proj_id = project.id
+        ws_id = project.workspace_id
         count = await project.secrets.acount()
         await project.adelete()
+        await ActivityLogService.record(
+            workspace_id=ws_id,
+            project_id=proj_id,
+            actor=user,
+            actor_email=user.email,
+            action="project.deleted",
+            target_type="project",
+            target_id=str(proj_id),
+            target_name=name,
+            metadata={"name": name, "secrets_count": count},
+            source="api",
+        )
         logger.warning(
             f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted"
         )
@@ -229,6 +256,35 @@ class SecretService:
 
         if to_create or to_update:
             await _save_secrets()
+            activity_entries = []
+            for s in to_create:
+                activity_entries.append({
+                    "workspace_id": project.workspace_id,
+                    "project_id": project.id,
+                    "actor": user,
+                    "actor_email": user.email,
+                    "action": "secret.created",
+                    "target_type": "secret",
+                    "target_id": str(getattr(s, "id", "")),
+                    "target_name": s.key,
+                    "metadata": {"key": s.key, "environment": env},
+                    "source": "api",
+                })
+            for s in to_update:
+                activity_entries.append({
+                    "workspace_id": project.workspace_id,
+                    "project_id": project.id,
+                    "actor": user,
+                    "actor_email": user.email,
+                    "action": "secret.updated",
+                    "target_type": "secret",
+                    "target_id": str(s.id),
+                    "target_name": s.key,
+                    "metadata": {"key": s.key, "environment": env},
+                    "source": "api",
+                })
+            if activity_entries:
+                await ActivityLogService.record_batch(entries=activity_entries)
 
         logger.info(
             f"SECRETS_BULK_UPSERT: Project '{project.name}' ({project.id}) env '{env}' - "
@@ -264,6 +320,19 @@ class SecretService:
         secret.value = encryption_service.encrypt(data.value)
         await secret.asave(update_fields=["value", "updated_at"])
 
+        await ActivityLogService.record(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="secret.updated",
+            target_type="secret",
+            target_id=str(secret.id),
+            target_name=secret.key,
+            metadata={"key": secret.key, "environment": environment},
+            source="api",
+        )
+
         return {
             "id": str(secret.id),
             "key": secret.key,
@@ -290,7 +359,21 @@ class SecretService:
         if not secret:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
 
+        secret_id = str(secret.id)
+        secret_key = secret.key
         await secret.adelete()
+        await ActivityLogService.record(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="secret.deleted",
+            target_type="secret",
+            target_id=secret_id,
+            target_name=secret_key,
+            metadata={"key": secret_key, "environment": environment},
+            source="api",
+        )
         logger.warning(
             f"SECRET_DELETED: Secret '{key.upper()}' deleted from project "
             f"'{project.name}' ({project.id}) env '{environment}'"

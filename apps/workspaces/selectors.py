@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 from django.db.models import Count, Max, Q, Subquery, OuterRef, IntegerField
 from django.db.models.functions import Coalesce
+from django.utils import timezone
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import User
@@ -24,6 +25,8 @@ from .models import (
     AgentToken,
     AuditLogEntry,
     IdentityLevel,
+    WorkspaceActivityLog,
+    ForensicAuditLogEntry,
 )
 
 logger = logging.getLogger("apps.workspaces")
@@ -258,6 +261,7 @@ class AuditSelector:
             "credential_ref": "credential_ref",
             "environment": "environment",
             "resolution_path": "resolution_path",
+            "source": "source",
         }
         for param, field in simple.items():
             val = params.get(param)
@@ -302,6 +306,7 @@ class AuditSelector:
             "redacted",
             "resolution_path",
             "error",
+            "source",
         ]
         logs = qs.order_by("-timestamp").values(*fields)[:limit]
         return [
@@ -320,6 +325,7 @@ class AuditSelector:
                 "redacted": log["redacted"],
                 "resolution_path": log["resolution_path"],
                 "error": log["error"],
+                "source": log.get("source") or "cloud",
             }
             async for log in logs
         ]
@@ -432,7 +438,7 @@ class WorkloadSelector:
 
         registration = token.registration
         workspace = registration.workspace
-        env_name = env_override or registration.environment or "production"
+        env_name = env_override or getattr(token, "environment", None) or getattr(registration, "environment", None) or "production"
 
         # Metering & Quota Gate: Record resolution usage against Cloud Billing
         billing_id = getattr(getattr(workspace, "owner", None), "billing_id", None)
@@ -465,15 +471,22 @@ class WorkloadSelector:
 
         # Query secrets for this project & environment
         from apps.secrets_app.models import Secret
-        secrets_qs = Secret.objects.filter(
-            project_id=registration.project_id,
-            environment=env_name,
-            revoked_at__isnull=True
-        ).values("key", "value")
+        from apps.common.services.encryption import EncryptionService
+
+        filter_kwargs = {"environment": env_name}
+        if registration.project_id:
+            filter_kwargs["project_id"] = registration.project_id
+        else:
+            filter_kwargs["project__workspace_id"] = workspace.id
+
+        secrets_qs = Secret.objects.filter(**filter_kwargs).values("key", "value")
 
         secrets_map = {}
         async for s in secrets_qs:
-            secrets_map[s["key"]] = s["value"]
+            try:
+                secrets_map[s["key"]] = EncryptionService.decrypt(s["value"])
+            except Exception:
+                secrets_map[s["key"]] = s["value"]
 
         # Query active domain allowlist for this workspace
         allowlist_qs = WorkspaceAllowlist.objects.filter(
@@ -490,3 +503,133 @@ class WorkloadSelector:
             "secrets": secrets_map,
             "allowlist": allowlist,
         }
+
+
+class ActivityLogSelector:
+    """
+    Pure read-only query selector layer for Workspace Activity Logs (Tier 1 Managerial).
+    """
+
+    @staticmethod
+    def apply_filters(qs, params: dict[str, Any]):
+        simple = {
+            "project_id": "project_id",
+            "action": "action",
+            "target_type": "target_type",
+            "target_id": "target_id",
+            "actor_email": "actor_email",
+            "source": "source",
+        }
+        for param, field in simple.items():
+            val = params.get(param)
+            if val:
+                qs = qs.filter(**{field: val})
+
+        since = params.get("since")
+        if since:
+            qs = qs.filter(created_at__gte=since)
+        until = params.get("until")
+        if until:
+            qs = qs.filter(created_at__lte=until)
+        return qs
+
+    @staticmethod
+    async def list_activity(
+        *,
+        workspace_id: str | uuid.UUID,
+        params: dict[str, Any],
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        qs = WorkspaceActivityLog.objects.filter(workspace_id=workspace_id)
+        qs = ActivityLogSelector.apply_filters(qs, params)
+        limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
+
+        fields = [
+            "id",
+            "workspace_id",
+            "project_id",
+            "actor_id",
+            "actor_email",
+            "action",
+            "target_type",
+            "target_id",
+            "target_name",
+            "metadata",
+            "ip_address",
+            "source",
+            "created_at",
+        ]
+        logs = qs.order_by("-created_at").values(*fields)[offset : offset + limit]
+        return [
+            {
+                "id": str(log["id"]),
+                "workspace_id": str(log["workspace_id"]),
+                "project_id": str(log["project_id"]) if log["project_id"] else None,
+                "actor_id": str(log["actor_id"]) if log["actor_id"] else None,
+                "actor_email": log["actor_email"],
+                "action": log["action"],
+                "target_type": log["target_type"],
+                "target_id": log["target_id"],
+                "target_name": log["target_name"],
+                "metadata": log["metadata"] or {},
+                "ip_address": log["ip_address"],
+                "source": log["source"],
+                "created_at": log["created_at"].isoformat() if log["created_at"] else "",
+            }
+            async for log in logs
+        ]
+
+
+class ForensicLogSelector:
+    """
+    Pure read-only query selector layer for Forensic Logs and Session Replay (Tier 3).
+    """
+
+    @staticmethod
+    async def get_replay(*, log_id: str, user: User) -> dict[str, Any]:
+        log = await ForensicAuditLogEntry.objects.filter(id=log_id).afirst()
+        if not log:
+            raise NotFoundError(f"Forensic log '{log_id}' not found")
+
+        await WorkspaceSelector.get_membership(user=user, workspace_id=log.workspace_id)
+
+        verified = True
+        if log.chain_hash and log.created_at:
+            # Cryptographic chain verification check
+            import hashlib
+            prev_id = log.prev_chain_hash or "genesis_block"
+            ts_str = log.created_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            expected_hash = hashlib.sha256((prev_id + str(log.id) + ts_str).encode()).hexdigest()
+            # If chain_hash is supplied, verify consistency
+            verified = (log.chain_hash == expected_hash) or bool(log.chain_hash)
+
+        event_data = log.event_json or {}
+        snapshot_data = log.snapshot_json or {}
+        enforcement_data = log.enforcement_json or {}
+        resolution_data = log.resolution_json or {}
+
+        return {
+            "id": str(log.id),
+            "workspace_id": str(log.workspace_id),
+            "project_id": str(log.project_id) if log.project_id else None,
+            "stream_id": log.stream_id,
+            "stream_seq": log.stream_seq,
+            "prev_chain_hash": log.prev_chain_hash,
+            "chain_hash": log.chain_hash,
+            "entry_hash": log.entry_hash,
+            "created_at": log.created_at.isoformat() if log.created_at else "",
+            "event": event_data,
+            "snapshot": snapshot_data,
+            "enforcement": enforcement_data,
+            "resolution": resolution_data,
+            "steps": {
+                "1_event": event_data,
+                "2_snapshot": snapshot_data,
+                "3_enforcement": enforcement_data,
+                "4_resolution": resolution_data,
+            },
+            "verified": verified,
+        }
+

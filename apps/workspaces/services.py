@@ -30,6 +30,8 @@ from .models import (
     AgentToken,
     AuditLogEntry,
     IdentityLevel,
+    WorkspaceActivityLog,
+    ForensicAuditLogEntry,
 )
 from .schemas import (
     WorkspaceCreateSchema,
@@ -39,7 +41,7 @@ from .schemas import (
     AgentTokenCreateSchema,
     InternalAgentVerifySchema,
 )
-from .selectors import WorkspaceSelector, AgentSelector
+from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector
 
 logger = logging.getLogger("apps.workspaces")
 
@@ -503,7 +505,11 @@ class AgentService:
     async def ingest_audit_logs(*, entries: list[dict[str, Any]]) -> tuple[int, list[str]]:
         ws_ids = {e.get("workspace_id") for e in entries if e.get("workspace_id")}
         prj_ids = {e.get("project_id") for e in entries if e.get("project_id")}
-        token_ids = {e.get("token_id") for e in entries if e.get("token_id")}
+        token_ids = {
+            e.get("token_id") or e.get("agent_token_id")
+            for e in entries
+            if e.get("token_id") or e.get("agent_token_id")
+        }
 
         existing_ws = set()
         if ws_ids:
@@ -534,6 +540,7 @@ class AgentService:
             "caller_role": 50,
             "session_id": 255,
             "policy_snapshot_id": 255,
+            "source": 20,
         }
 
         direct_fields = [
@@ -543,7 +550,7 @@ class AgentService:
             "redacted", "redaction_reason", "resolution_path",
             "allowlist_snapshot", "caller_role", "session_id",
             "policy_snapshot_id", "error", "credential_ref", "injection_style",
-            "target_domain",
+            "target_domain", "source",
         ]
 
         model_entries: list[AuditLogEntry] = []
@@ -556,6 +563,15 @@ class AgentService:
             if "domain" in e and "target_domain" not in mapped:
                 mapped["target_domain"] = e["domain"]
 
+            if not mapped.get("timestamp"):
+                mapped["timestamp"] = timezone.now()
+
+            if "source" not in mapped:
+                if mapped.get("resolution_path") in ("local proxy", "cli"):
+                    mapped["source"] = "cli"
+                else:
+                    mapped["source"] = "cloud"
+
             ws_val = str(e.get("workspace_id")) if e.get("workspace_id") else None
             if ws_val and ws_val in existing_ws:
                 mapped["workspace_id"] = ws_val
@@ -565,7 +581,8 @@ class AgentService:
             prj_val = str(e.get("project_id")) if e.get("project_id") else None
             mapped["project_id"] = prj_val if prj_val in existing_prj else None
 
-            tok_val = str(e.get("token_id")) if e.get("token_id") else None
+            raw_tok = e.get("token_id") or e.get("agent_token_id")
+            tok_val = str(raw_tok) if raw_tok else None
             mapped["agent_token_id"] = tok_val if tok_val in existing_tokens else None
 
             mapped["credential_ref"] = mapped.get("credential_ref") or ""
@@ -643,3 +660,170 @@ class WorkloadService:
     @staticmethod
     async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
         return await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+
+
+class ActivityLogService:
+    """
+    Domain service layer for Workspace Activity Logs (Tier 1 Managerial).
+    Records high-level audit logs for managerial and security visibility.
+    """
+
+    @staticmethod
+    async def record(
+        *,
+        workspace_id: uuid.UUID | str,
+        action: str,
+        actor: User | None = None,
+        actor_email: str = "",
+        project_id: uuid.UUID | str | None = None,
+        target_type: str = "",
+        target_id: str = "",
+        target_name: str = "",
+        metadata: dict[str, Any] | None = None,
+        ip_address: str | None = None,
+        source: str = "api",
+    ) -> WorkspaceActivityLog | None:
+        try:
+            email = actor_email
+            if not email and actor:
+                email = getattr(actor, "email", "")
+
+            # Ensure safe metadata (no sensitive secret values)
+            safe_meta = dict(metadata or {})
+
+            log_entry = await WorkspaceActivityLog.objects.acreate(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                actor=actor,
+                actor_email=email,
+                action=action,
+                target_type=target_type,
+                target_id=str(target_id) if target_id else "",
+                target_name=target_name or "",
+                metadata=safe_meta,
+                ip_address=ip_address,
+                source=source,
+            )
+            return log_entry
+        except Exception as e:
+            logger.error(f"Failed to record activity log {action}: {e}", exc_info=True)
+            return None
+
+    @staticmethod
+    async def record_batch(
+        *,
+        entries: list[dict[str, Any]],
+    ) -> list[WorkspaceActivityLog]:
+        """
+        Record multiple activity logs in a single batch (bulk creation).
+        """
+        if not entries:
+            return []
+
+        model_entries = []
+        for e in entries:
+            actor = e.get("actor")
+            actor_email = e.get("actor_email") or (getattr(actor, "email", "") if actor else "")
+            model_entries.append(
+                WorkspaceActivityLog(
+                    workspace_id=e.get("workspace_id"),
+                    project_id=e.get("project_id"),
+                    actor=actor,
+                    actor_email=actor_email,
+                    action=e.get("action", "unknown"),
+                    target_type=e.get("target_type", ""),
+                    target_id=str(e.get("target_id") or ""),
+                    target_name=e.get("target_name", ""),
+                    metadata=e.get("metadata") or {},
+                    ip_address=e.get("ip_address"),
+                    source=e.get("source", "api"),
+                )
+            )
+
+        try:
+            return await WorkspaceActivityLog.objects.abulk_create(model_entries)
+        except Exception as err:
+            logger.error(f"Failed to record batch activity logs: {err}", exc_info=True)
+            return []
+
+
+class ForensicLogService:
+    """
+    Domain service layer for Forensic Logs (Tier 3 Forensic & Replay).
+    """
+
+    @staticmethod
+    async def ingest_forensic_logs(*, entries: list[dict[str, Any]]) -> tuple[int, list[str]]:
+        if not entries:
+            return 0, []
+
+        ws_ids = {str(e.get("workspace_id")) for e in entries if e.get("workspace_id")}
+        prj_ids = {str(e.get("project_id")) for e in entries if e.get("project_id")}
+
+        existing_ws = set()
+        if ws_ids:
+            async for w_id in Workspace.objects.filter(id__in=ws_ids).values_list("id", flat=True):
+                existing_ws.add(str(w_id))
+
+        existing_prj = set()
+        if prj_ids:
+            async for p_id in Project.objects.filter(id__in=prj_ids).values_list("id", flat=True):
+                existing_prj.add(str(p_id))
+
+        model_entries: list[ForensicAuditLogEntry] = []
+        for e in entries:
+            ws_val = str(e.get("workspace_id")) if e.get("workspace_id") else None
+            if not ws_val or ws_val not in existing_ws:
+                continue
+
+            prj_val = str(e.get("project_id")) if e.get("project_id") else None
+            project_id = prj_val if prj_val in existing_prj else None
+
+            event_data = e.get("event_json") or e.get("event") or {}
+            snapshot_data = e.get("snapshot_json") or e.get("snapshot") or {}
+            enforcement_data = e.get("enforcement_json") or e.get("enforcement") or {}
+            resolution_data = e.get("resolution_json") or e.get("resolution") or {}
+
+            stream_id = str(e.get("stream_id") or e.get("session_id") or "default")
+            stream_seq = int(e.get("stream_seq") or 0)
+
+            chain_hash = str(e.get("chain_hash") or "")
+            prev_chain_hash = str(e.get("prev_chain_hash") or "")
+            entry_hash = str(e.get("entry_hash") or "")
+
+            entry_kwargs: dict[str, Any] = {
+                "workspace_id": ws_val,
+                "project_id": project_id,
+                "stream_id": stream_id[:64],
+                "stream_seq": stream_seq,
+                "prev_chain_hash": prev_chain_hash[:64],
+                "chain_hash": chain_hash[:64],
+                "entry_hash": entry_hash[:64],
+                "event_json": event_data,
+                "snapshot_json": snapshot_data,
+                "enforcement_json": enforcement_data,
+                "resolution_json": resolution_data,
+            }
+
+            if e.get("id"):
+                entry_kwargs["id"] = str(e["id"])[:64]
+
+            ts = e.get("created_at") or e.get("timestamp")
+            if ts:
+                from dateutil import parser
+                try:
+                    if isinstance(ts, str):
+                        entry_kwargs["created_at"] = parser.isoparse(ts)
+                    elif hasattr(ts, "isoformat"):
+                        entry_kwargs["created_at"] = ts
+                except Exception:
+                    pass
+
+            model_entries.append(ForensicAuditLogEntry(**entry_kwargs))
+
+        if not model_entries:
+            return 0, []
+
+        created = await ForensicAuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
+        return len(created), [str(log.id) for log in created]
+

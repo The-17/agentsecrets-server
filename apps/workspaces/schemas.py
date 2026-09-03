@@ -244,6 +244,7 @@ class AuditLogItemSchema(Schema):
     redacted: Optional[bool] = None
     resolution_path: Optional[str] = None
     error: Optional[str] = None
+    source: Optional[str] = "cloud"
 
 
 class AuditSummaryResponseSchema(Schema):
@@ -253,3 +254,38 @@ class AuditSummaryResponseSchema(Schema):
     by_credential: List[Dict[str, Any]]
     by_domain: List[Dict[str, Any]]
     anonymous_call_count: int
+
+
+class WorkspaceActivityItemSchema(Schema):
+    id: str
+    workspace_id: str
+    project_id: Optional[str] = None
+    actor_id: Optional[str] = None
+    actor_email: Optional[str] = None
+    action: str
+    target_type: str
+    target_id: Optional[str] = None
+    target_name: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+    ip_address: Optional[str] = None
+    source: str = "api"
+    created_at: str
+
+
+class ForensicDecisionReplaySchema(Schema):
+    id: str
+    workspace_id: str
+    project_id: Optional[str] = None
+    stream_id: str
+    stream_seq: int
+    prev_chain_hash: Optional[str] = None
+    chain_hash: Optional[str] = None
+    entry_hash: Optional[str] = None
+    created_at: str
+    event: Dict[str, Any] = {}
+    snapshot: Dict[str, Any] = {}
+    enforcement: Dict[str, Any] = {}
+    resolution: Dict[str, Any] = {}
+    steps: Dict[str, Any] = {}
+    verified: bool = True
+

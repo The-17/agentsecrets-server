@@ -39,18 +39,25 @@ from .schemas import (
     AgentVerifyResponseSchema,
     AuditLogItemSchema,
     AuditSummaryResponseSchema,
+    WorkspaceActivityItemSchema,
+    ForensicDecisionReplaySchema,
 )
 from .selectors import (
     WorkspaceSelector,
     AllowlistSelector,
     AgentSelector,
     AuditSelector,
+    ActivityLogSelector,
+    ForensicLogSelector,
 )
 from .services import (
     WorkspaceService,
     MemberService,
     AllowlistService,
     AgentService,
+    WorkloadService,
+    ActivityLogService,
+    ForensicLogService,
 )
 
 logger = logging.getLogger("apps.workspaces")
@@ -100,6 +107,18 @@ class WorkspaceController:
     async def delete_workspace(self, request, workspace_id: uuid.UUID):
         name = await WorkspaceService.delete_workspace(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message=f"Workspace '{name}' deleted successfully")
+
+    @route.get("/{workspace_id}/activity/", response={200: DataResponse[List[WorkspaceActivityItemSchema]], 403: ErrorResponse, 404: ErrorResponse})
+    async def list_activity(self, request, workspace_id: uuid.UUID, limit: int = 100, offset: int = 0):
+        await WorkspaceSelector.get_membership(user=request.auth, workspace_id=workspace_id)
+        params = request.GET.dict()
+        data = await ActivityLogSelector.list_activity(
+            workspace_id=workspace_id,
+            params=params,
+            limit=limit,
+            offset=offset,
+        )
+        return CustomResponse.success(message="Workspace activity logs retrieved successfully", data=data)
 
     # --- Members ---
 
@@ -381,53 +400,126 @@ class ResolverController:
     Authenticated via RESOLVER_SERVICE_KEY or user session auth.
     """
 
-    @route.post("/agents/verify/", response={200: AgentVerifyResponseSchema}, auth=None)
+    @route.post("/agents/verify/", response={200: AgentVerifyResponseSchema, 401: ErrorResponse}, auth=None)
     async def verify_agent(self, request):
-        import json
-        body = json.loads(request.body) if request.body else {}
-        token = body.get("token") or (body.get("data", {}).get("token") if isinstance(body.get("data"), dict) else None) or ""
-        token_id = body.get("token_id") or (body.get("data", {}).get("token_id") if isinstance(body.get("data"), dict) else None)
-        data = InternalAgentVerifySchema(token=token, token_id=token_id)
-        result = await AgentService.verify_agent_token(auth_caller=request.auth, data=data)
+        try:
+            body = json.loads(request.body) if request.body else {}
+        except Exception:
+            body = {}
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        token_val = body.get("token") or bearer_token or ""
+        token_id = body.get("token_id")
+
+        payload = InternalAgentVerifySchema(
+            token=token_val,
+            token_id=token_id,
+        )
+        auth_caller = getattr(request, "auth", None)
+        result = await AgentService.verify_agent_token(auth_caller=auth_caller, data=payload)
         return result
 
     @route.post("/audit/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
     async def create_audit_logs(self, request):
         ip = request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "unknown")).split(",")[0].strip()
 
-        # 1. Strict rate limit for unauthenticated/failed auth attempts
-        unauth_key = f"rl_unauth_audit_{ip}"
-        unauth_count = cache.get(unauth_key, 0)
-        if unauth_count >= 50:
-            return 429, {"detail": "Rate limit exceeded (Max 50/day for unauthenticated requests)"}
-
-        # 2. Extract and check authentication
+        # 1. Extract and check authentication
         auth_header = request.META.get("HTTP_AUTHORIZATION", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
 
         user = None
+        agent_token_auth = None
+
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
             user = request.user
         elif token:
             user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token)
+            if not user:
+                # Workload Token Delegation: check if Bearer token is an active AgentToken
+                import hashlib
+                from .models import AgentToken
+                token_hash = hashlib.sha256(token.encode()).hexdigest()
+                agent_token_auth = await AgentToken.objects.select_related("workspace").filter(
+                    token_hash=token_hash,
+                    revoked_at__isnull=True
+                ).afirst()
 
-        if not user:
+        if not user and not agent_token_auth:
+            unauth_key = f"rl_unauth_audit_{ip}"
+            unauth_count = cache.get(unauth_key, 0)
             cache.set(unauth_key, unauth_count + 1, timeout=86400)
-            return 401, {"detail": "Unauthorized"}
+            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
 
-        request.auth = user
+        request.auth = user or agent_token_auth
 
-        # 3. Rate limit for authenticated successful requests
+        # 2. Rate limit for authenticated requests (up to 50,000 logs/day per IP)
         key = f"rl_audit_{ip}"
         count = cache.get(key, 0)
-        if count >= 3000:
-            return 429, {"detail": "Rate limit exceeded (Max 3000/day)"}
+        if count >= 50000:
+            return 429, {"detail": "Rate limit exceeded"}
         cache.set(key, count + 1, timeout=86400)
 
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
 
+        # If authenticated via agent_token, enforce that entries belong to that workspace
+        if agent_token_auth:
+            auth_ws_id = str(agent_token_auth.workspace_id)
+            entries = [e for e in entries if str(e.get("workspace_id")) == auth_ws_id]
+
         created_count, ids = await AgentService.ingest_audit_logs(entries=entries)
+        return 201, {"created_count": created_count, "ids": ids}
+
+    @route.post("/forensic/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
+    async def create_forensic_logs(self, request):
+        ip = request.META.get("HTTP_X_FORWARDED_FOR", request.META.get("REMOTE_ADDR", "unknown")).split(",")[0].strip()
+
+        # 1. Extract and check authentication
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        user = None
+        agent_token_auth = None
+
+        if hasattr(request, "user") and request.user and request.user.is_authenticated:
+            user = request.user
+        elif token:
+            user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token)
+            if not user:
+                import hashlib
+                from .models import AgentToken
+                token_hash = hashlib.sha256(token.encode()).hexdigest()
+                agent_token_auth = await AgentToken.objects.select_related("workspace").filter(
+                    token_hash=token_hash,
+                    revoked_at__isnull=True
+                ).afirst()
+
+        if not user and not agent_token_auth:
+            unauth_key = f"rl_unauth_forensic_{ip}"
+            unauth_count = cache.get(unauth_key, 0)
+            cache.set(unauth_key, unauth_count + 1, timeout=86400)
+            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
+
+        request.auth = user or agent_token_auth
+
+        # 2. Rate limit for authenticated requests (up to 50,000 logs/day per IP)
+        key = f"rl_forensic_{ip}"
+        count = cache.get(key, 0)
+        if count >= 50000:
+            return 429, {"detail": "Rate limit exceeded"}
+        cache.set(key, count + 1, timeout=86400)
+
+        body = json.loads(request.body)
+        entries = body if isinstance(body, list) else [body]
+
+        # If authenticated via agent_token, enforce that entries belong to that workspace
+        if agent_token_auth:
+            auth_ws_id = str(agent_token_auth.workspace_id)
+            entries = [e for e in entries if str(e.get("workspace_id")) == auth_ws_id]
+
+        created_count, ids = await ForensicLogService.ingest_forensic_logs(entries=entries)
         return 201, {"created_count": created_count, "ids": ids}
 
 
@@ -478,3 +570,16 @@ class DelegationController:
     async def revoke_delegation(self, request, workspace_id: uuid.UUID):
         await CloudDelegationService.revoke_delegation(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Delegation revoked successfully")
+
+
+@api_controller("/forensic", tags=["Forensic"], auth=JWTAuth())
+class ForensicController:
+    """
+    Forensic log querying and cryptographic session replay controllers (Tier 3).
+    """
+
+    @route.get("/logs/{log_id}/replay/", response={200: DataResponse[ForensicDecisionReplaySchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def replay_log(self, request, log_id: str):
+        data = await ForensicLogSelector.get_replay(log_id=log_id, user=request.auth)
+        return CustomResponse.success(message="Forensic decision replay retrieved successfully", data=data)
+

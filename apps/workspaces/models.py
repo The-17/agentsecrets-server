@@ -6,6 +6,7 @@ import base62
 
 # Django
 from django.db import models
+from django.utils import timezone
 
 # Local
 from apps.accounts.models import User
@@ -175,6 +176,14 @@ def generate_log_id():
     return f"log_{str(ulid.ULID())}"
 
 
+def generate_act_id():
+    return f"act_{str(ulid.ULID())}"
+
+
+def generate_forensic_id():
+    return f"flog_{str(ulid.ULID())}"
+
+
 class AgentRegistration(models.Model):
     id = models.CharField(primary_key=True, max_length=31, default=generate_areg_id, editable=False)
     workspace = models.ForeignKey(
@@ -264,6 +273,12 @@ class AuditLogEntry(models.Model):
     
     timestamp = models.DateTimeField()
     recorded_at = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(
+        max_length=20,
+        default='cloud',
+        choices=[('cloud', 'Cloud Resolver'), ('cli', 'CLI Local Proxy')],
+        help_text="Source of the audit entry (Cloud Resolver or CLI Local Proxy)"
+    )
     
     environment = models.CharField(max_length=20, default='development', null=True, blank=True)
     workspace = models.ForeignKey(
@@ -314,6 +329,7 @@ class AuditLogEntry(models.Model):
             models.Index(fields=['workspace', '-timestamp']),
             models.Index(fields=['agent_token', '-timestamp']),
             models.Index(fields=['target_domain', '-timestamp']),
+            models.Index(fields=['source', '-timestamp']),
         ]
 
     def __str__(self):
@@ -373,4 +389,182 @@ class CloudDelegationKey(BaseModel):
 
     def __str__(self):
         return f"Delegation for {self.workspace.name} ({self.resolver_name})"
+
+
+class WorkspaceActivityLog(models.Model):
+    """
+    Tier 1 Managerial Audit Log.
+    Tracks human and administrative workspace operations:
+    secret created/updated/deleted, project created/deleted, member invited/removed, etc.
+    """
+    id = models.CharField(primary_key=True, max_length=64, default=generate_act_id, editable=False)
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='activity_logs',
+        help_text="Workspace this activity belongs to"
+    )
+    project = models.ForeignKey(
+        'secrets_app.Project',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='activity_logs',
+        help_text="Project associated with this activity, if project-scoped"
+    )
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='workspace_activities',
+        help_text="User who initiated this action, if human"
+    )
+    actor_email = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Email of the actor at the time of the action"
+    )
+    action = models.CharField(
+        max_length=100,
+        db_index=True,
+        help_text="Type of action (e.g. secret.created, secret.deleted, project.created)"
+    )
+    target_type = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        help_text="Target entity type (e.g. secret, project, member)"
+    )
+    target_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Target entity identifier"
+    )
+    target_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Target human-readable name (e.g. secret key or project name)"
+    )
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Safe metadata describing the change (NEVER raw secret values)"
+    )
+    ip_address = models.CharField(
+        max_length=45,
+        blank=True,
+        null=True,
+        help_text="IP address of the caller"
+    )
+    source = models.CharField(
+        max_length=20,
+        default="api",
+        help_text="Action source: web, cli, or api"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'workspace_activity_logs'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workspace', '-created_at']),
+            models.Index(fields=['workspace', 'action', '-created_at']),
+            models.Index(fields=['target_type', 'target_id']),
+        ]
+
+    def __str__(self):
+        return f"[{self.action}] {self.target_name} by {self.actor_email or 'system'} in {self.workspace.name}"
+
+
+class ForensicAuditLogEntry(models.Model):
+    """
+    Tier 3 Forensic Audit Log.
+    Cryptographically chained, tamper-evident log of security-sensitive execution events
+    including the 4-step decision state (event, snapshot, enforcement, resolution).
+    """
+    id = models.CharField(primary_key=True, max_length=64, default=generate_forensic_id, editable=False)
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='forensic_logs',
+        help_text="Workspace this forensic record belongs to"
+    )
+    project = models.ForeignKey(
+        'secrets_app.Project',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='forensic_logs',
+        help_text="Project this forensic record belongs to"
+    )
+    stream_id = models.CharField(
+        max_length=64,
+        db_index=True,
+        default="default",
+        help_text="Forensic log stream / session identifier"
+    )
+    stream_seq = models.BigIntegerField(
+        default=0,
+        help_text="Monotonically increasing sequence number in the stream"
+    )
+    prev_chain_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="SHA-256 hash of the previous record in the stream"
+    )
+    chain_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="SHA-256 hash linking this record into the cryptographic chain"
+    )
+    entry_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="SHA-256 hash of the current record contents"
+    )
+    event_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Step 1: Event block (call type, key name, target domain, method, outcome, latency)"
+    )
+    snapshot_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Step 2: Snapshot block (workspace allowlist, project, capabilities at evaluation time)"
+    )
+    enforcement_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Step 3: Enforcement block (decision, decided_by, layers evaluated, failure reasons)"
+    )
+    resolution_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Step 4: Resolution block (injection style, redaction triggers, SSRF checks, status code)"
+    )
+    created_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True,
+        help_text="Timestamp when the event occurred"
+    )
+
+    class Meta:
+        db_table = 'forensic_audit_logs'
+        ordering = ['stream_id', 'stream_seq', '-created_at']
+        indexes = [
+            models.Index(fields=['workspace', '-created_at']),
+            models.Index(fields=['stream_id', 'stream_seq']),
+        ]
+
+    def __str__(self):
+        return f"ForensicLog {self.id} (stream: {self.stream_id}#{self.stream_seq})"
+
 

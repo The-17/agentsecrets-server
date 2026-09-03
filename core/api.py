@@ -26,7 +26,7 @@ from apps.secrets_app.views import ProjectController, SecretsController  # noqa:
 from apps.workspaces.views import (  # noqa: F401, E402
     WorkspaceController, AllowlistController, AgentController,
     TokenController, AuditController, ResolverController,
-    WorkloadController, DelegationController,
+    WorkloadController, DelegationController, ForensicController,
 )
 from apps.migration.views import MigrationController  # noqa: F401, E402
 

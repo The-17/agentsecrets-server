@@ -293,6 +293,14 @@ class TelemetrySelector:
                 "total_proxy_blocked": agg.total_proxy_blocked,
                 "total_proxy_redacted": agg.total_proxy_redacted,
                 "total_secrets_resolved": agg.total_secrets_resolved,
+                "breakdown": {
+                    "cli": {
+                        "proxy_calls": agg.integration_usage.get("cli_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
+                    },
+                    "cloud": {
+                        "resolver_calls": agg.integration_usage.get("cloud_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
+                    },
+                },
             },
             "agent_infrastructure": {
                 "execution_paths": {
@@ -301,6 +309,7 @@ class TelemetrySelector:
                     "mcp": agg.total_proxy_calls_mcp,
                     "direct": agg.total_proxy_calls_direct,
                     "developer": agg.total_developer_commands,
+                    "cloud_resolver": agg.integration_usage.get("cloud_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
                 },
                 "identity_levels": {
                     "anonymous": agg.total_identity_anonymous_calls,
