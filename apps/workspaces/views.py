@@ -382,7 +382,12 @@ class ResolverController:
     """
 
     @route.post("/agents/verify/", response={200: AgentVerifyResponseSchema}, auth=None)
-    async def verify_agent(self, request, data: InternalAgentVerifySchema):
+    async def verify_agent(self, request):
+        import json
+        body = json.loads(request.body) if request.body else {}
+        token = body.get("token") or (body.get("data", {}).get("token") if isinstance(body.get("data"), dict) else None) or ""
+        token_id = body.get("token_id") or (body.get("data", {}).get("token_id") if isinstance(body.get("data"), dict) else None)
+        data = InternalAgentVerifySchema(token=token, token_id=token_id)
         result = await AgentService.verify_agent_token(auth_caller=request.auth, data=data)
         return result
 
