@@ -63,6 +63,7 @@ class WorkspaceSelector:
             "workspace__id",
             "workspace__name",
             "workspace__type",
+            "workspace__billing_id",
             "workspace__created_at",
         )
         return [
@@ -71,6 +72,7 @@ class WorkspaceSelector:
                 "name": m["workspace__name"],
                 "type": m["workspace__type"],
                 "role": m["role"],
+                "billing_id": m["workspace__billing_id"],
                 "encrypted_workspace_key": m["encrypted_workspace_key"],
                 "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
             }
@@ -441,7 +443,7 @@ class WorkloadSelector:
         env_name = env_override or getattr(token, "environment", None) or getattr(registration, "environment", None) or "production"
 
         # Metering & Quota Gate: Record resolution usage against Cloud Billing
-        billing_id = getattr(getattr(workspace, "owner", None), "billing_id", None)
+        billing_id = getattr(workspace, "effective_billing_id", None) if workspace else None
         if billing_id:
             import asyncio
             import json

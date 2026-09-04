@@ -55,6 +55,21 @@ class Workspace(BaseModel):
         default=WorkspaceType.SHARED,
         help_text="personal = auto-created on signup, shared = team/project sharing"
     )
+    billing_id = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Dedicated billing ID for paid/detached workspace. If null, draws from owner.billing_id (free tier)."
+    )
+
+    @property
+    def effective_billing_id(self) -> str:
+        if self.billing_id:
+            return self.billing_id
+        if self.owner and getattr(self.owner, 'billing_id', None):
+            return self.owner.billing_id
+        return f"free_ws_{self.id}"
 
     def __str__(self):
         return f"{self.name} ({self.type})"
@@ -65,6 +80,7 @@ class Workspace(BaseModel):
         indexes = [
             models.Index(fields=['owner', '-created_at']),
             models.Index(fields=['type']),
+            models.Index(fields=['billing_id']),
         ]
 
 

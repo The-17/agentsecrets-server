@@ -128,6 +128,7 @@ class WorkspaceItemSchema(Schema):
     name: str
     type: str
     role: str
+    billing_id: Optional[str] = None
     encrypted_workspace_key: str
     created_at: Optional[str] = None
 
@@ -137,6 +138,7 @@ class WorkspaceDetailSchema(Schema):
     name: str
     type: str
     role: str
+    billing_id: Optional[str] = None
     encrypted_workspace_key: str
     created_at: str
     updated_at: str

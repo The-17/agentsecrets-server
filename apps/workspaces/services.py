@@ -101,6 +101,18 @@ class WorkspaceService:
         logger.warning(f"WORKSPACE_DELETED: Workspace '{name}' (ID: {workspace_id}) deleted")
         return name
 
+    @staticmethod
+    async def initialize_workspace_billing(*, user: User, workspace_id: uuid.UUID) -> str:
+        m = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
+        if m.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            raise AuthorizationError("Only workspace admins can manage billing")
+        ws = m.workspace
+        if not ws.billing_id:
+            import ulid
+            ws.billing_id = f"ws_bill_{str(ulid.ULID())}"
+            await ws.asave(update_fields=["billing_id"])
+        return ws.billing_id
+
 
 class MemberService:
     """
@@ -482,8 +494,7 @@ class AgentService:
 
         agent = token.registration
         workspace = getattr(agent, "workspace", None)
-        owner = getattr(workspace, "owner", None) if workspace else None
-        billing_id = getattr(owner, "billing_id", "") if owner else ""
+        billing_id = workspace.effective_billing_id if workspace else ""
 
         allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id).values_list("domain", flat=True)
         allowlist = [d async for d in allowlist_qs]
