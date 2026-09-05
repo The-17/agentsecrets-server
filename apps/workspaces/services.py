@@ -148,8 +148,8 @@ class MemberService:
                     user=invitee,
                     workspace_id=workspace_id,
                     role=invite.role,
-                    status=MembershipStatus.ACTIVE,
-                    encrypted_workspace_key=invite.encrypted_workspace_key,
+                    status=MembershipStatus.ACTIVE if invite.encrypted_workspace_key else MembershipStatus.INVITED,
+                    encrypted_workspace_key=invite.encrypted_workspace_key or "",
                 )
                 logger.info(
                     f"MEMBER_INVITED: User invited to workspace {workspace_id} with role {invite.role}"

@@ -45,11 +45,25 @@ class MemberInviteSchema(Schema):
 
 
 class InviteEntrySchema(Schema):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     email: EmailStr
-    role: Literal["admin", "member", "read_only"] = "member"
-    encrypted_workspace_key: str
+    role: str = "member"
+    encrypted_workspace_key: Optional[str] = ""
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role(cls, v: str) -> str:
+        if not v:
+            return "member"
+        v_clean = str(v).strip().lower()
+        if v_clean in ["developer", "member"]:
+            return "member"
+        if v_clean in ["admin", "administrator"]:
+            return "admin"
+        if v_clean in ["viewer", "read_only", "readonly"]:
+            return "read_only"
+        return "member"
 
 
 class BatchInviteSchema(Schema):

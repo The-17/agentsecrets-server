@@ -134,15 +134,21 @@ class WorkspaceController:
         members = await WorkspaceSelector.list_workspace_members(workspace_id=workspace_id)
         return CustomResponse.success(message="Members retrieved successfully", data=members)
 
-    @route.post("/{workspace_id}/members/", response={201: DataResponse[List[InviteResultItemSchema]], 200: DataResponse[List[InviteResultItemSchema]], 403: ErrorResponse, 404: ErrorResponse})
+    @route.post("/{workspace_id}/members/", response={201: DataResponse[List[InviteResultItemSchema]], 200: DataResponse[List[InviteResultItemSchema]], 403: ErrorResponse, 404: ErrorResponse, 422: ErrorResponse})
     async def invite_member(self, request, workspace_id: uuid.UUID, data: dict = None):
-        body = json.loads(request.body)
-        if "invites" in body:
-            parsed = BatchInviteSchema(**body)
-            entries = parsed.invites
-        else:
-            entry = InviteEntrySchema(**body)
-            entries = [entry]
+        try:
+            body = json.loads(request.body)
+            if "invites" in body:
+                parsed = BatchInviteSchema(**body)
+                entries = parsed.invites
+            else:
+                entry = InviteEntrySchema(**body)
+                entries = [entry]
+        except Exception as e:
+            return CustomResponse.error(
+                message=f"Invalid invite request: {str(e)}",
+                status_code=422,
+            )
 
         results, any_created = await MemberService.process_member_invites(
             user=request.auth, workspace_id=workspace_id, entries=entries
