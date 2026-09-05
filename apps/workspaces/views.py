@@ -452,9 +452,10 @@ class ResolverController:
                 # Workload Token Delegation: check if Bearer token is an active AgentToken
                 import hashlib
                 from .models import AgentToken
+                from django.db.models import Q
                 token_hash = hashlib.sha256(token.encode()).hexdigest()
                 agent_token_auth = await AgentToken.objects.select_related("workspace").filter(
-                    token_hash=token_hash,
+                    Q(token_hash=token_hash) | Q(id=token),
                     revoked_at__isnull=True
                 ).afirst()
 
@@ -502,9 +503,10 @@ class ResolverController:
             if not user:
                 import hashlib
                 from .models import AgentToken
+                from django.db.models import Q
                 token_hash = hashlib.sha256(token.encode()).hexdigest()
                 agent_token_auth = await AgentToken.objects.select_related("workspace").filter(
-                    token_hash=token_hash,
+                    Q(token_hash=token_hash) | Q(id=token),
                     revoked_at__isnull=True
                 ).afirst()
 

@@ -7,7 +7,8 @@ import logging
 import secrets as secrets_module
 import uuid
 from typing import Any
-from django.db import transaction
+from django.db import transaction, models
+from django.db.models import Q
 from django.utils import timezone
 from asgiref.sync import sync_to_async
 
@@ -468,7 +469,7 @@ class AgentService:
                 "registration",
                 "registration__workspace",
                 "registration__workspace__owner"
-            ).filter(token_hash=token_hash).afirst()
+            ).filter(Q(token_hash=token_hash) | Q(id=data.token)).afirst()
 
         if not token:
             return {"valid": False, "reason": "Not found"}
@@ -480,7 +481,9 @@ class AgentService:
             if not has_access:
                 return {"valid": False, "reason": "Unauthorized workspace access"}
 
-        if not hmac_module.compare_digest(token_hash, token.token_hash):
+        is_hash_match = hmac_module.compare_digest(token_hash, token.token_hash)
+        is_id_match = hmac_module.compare_digest(data.token, token.id)
+        if not (is_hash_match or is_id_match):
             return {"valid": False, "reason": "Invalid token"}
 
         if token.revoked_at:
