@@ -71,6 +71,12 @@ class Workspace(BaseModel):
             return self.owner.billing_id
         return f"free_ws_{self.id}"
 
+    def save(self, *args, **kwargs):
+        if not self.billing_id:
+            import ulid
+            self.billing_id = f"bill_{str(ulid.ULID())}"
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.name} ({self.type})"
     
