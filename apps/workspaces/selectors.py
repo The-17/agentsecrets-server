@@ -64,6 +64,7 @@ class WorkspaceSelector:
             "workspace__name",
             "workspace__type",
             "workspace__billing_id",
+            "workspace__owner__billing_id",
             "workspace__created_at",
         )
         return [
@@ -72,7 +73,7 @@ class WorkspaceSelector:
                 "name": m["workspace__name"],
                 "type": m["workspace__type"],
                 "role": m["role"],
-                "billing_id": m["workspace__billing_id"],
+                "billing_id": m["workspace__billing_id"] or m["workspace__owner__billing_id"],
                 "encrypted_workspace_key": m["encrypted_workspace_key"],
                 "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
             }

@@ -90,7 +90,7 @@ class WorkspaceController:
                 "name": ws.name,
                 "type": ws.type,
                 "role": m.role,
-                "billing_id": ws.billing_id,
+                "billing_id": ws.effective_billing_id,
                 "encrypted_workspace_key": m.encrypted_workspace_key,
                 "created_at": ws.created_at.isoformat(),
                 "updated_at": ws.updated_at.isoformat(),
