@@ -335,6 +335,8 @@ class Command(BaseCommand):
                 "avg_projects_per_workspace": avg_projects_per_workspace,
                 "total_policies": total_policies,
                 "total_proxy_calls": combined_total_proxy_calls,
+                "total_proxy_calls_cli": cli_proxy_calls,
+                "total_proxy_calls_cloud": cloud_proxy_calls,
                 "total_proxy_blocked": proxy_stats["total_blocked"] or 0,
                 "total_proxy_redacted": combined_redacted,
                 "command_usage": canonical_usage,

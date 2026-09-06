@@ -193,8 +193,16 @@ class DailyMetricsAggregate(models.Model):
     # policies (AgentRegistration.capabilities != {}), pinned to the aggregate date.
     total_policies = models.IntegerField(default=0)
 
-    # Proxy & security metrics (aggregated from telemetry snapshots)
+    # Proxy & security metrics (aggregated from telemetry snapshots and cloud resolver audit logs)
     total_proxy_calls = models.IntegerField(default=0)
+    total_proxy_calls_cli = models.IntegerField(
+        default=0,
+        help_text="Total proxy calls originating from CLI instances"
+    )
+    total_proxy_calls_cloud = models.IntegerField(
+        default=0,
+        help_text="Total direct resolve calls handled by Cloud Resolver"
+    )
     total_proxy_blocked = models.IntegerField(default=0)
     total_proxy_redacted = models.IntegerField(default=0)
 

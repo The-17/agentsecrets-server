@@ -94,7 +94,9 @@ if 'test' in sys.argv:
 
     MIGRATION_MODULES = DisableMigrations()
 else:
-    db_sslmode = config('POSTGRES_SSLMODE', default='prefer')
+    db_host = config('POSTGRES_HOST', default='localhost')
+    default_ssl = 'require' if 'neon.tech' in db_host else 'prefer'
+    db_sslmode = config('POSTGRES_SSLMODE', default=default_ssl)
     db_options = {}
     if db_sslmode and db_sslmode.lower() != 'disable':
         db_options['sslmode'] = db_sslmode

@@ -137,6 +137,34 @@ class TelemetryEndpointTests(TestCase):
         self.assertEqual(data["security"]["total_proxy_blocked"], 2)
         self.assertEqual(data["security"]["total_proxy_redacted"], 1)
         self.assertEqual(data["security"]["total_secrets_resolved"], 12)
+        self.assertEqual(data["security"]["breakdown"]["cli"]["proxy_calls"], 15)
+        self.assertEqual(data["security"]["breakdown"]["cloud"]["resolver_calls"], 0)
+        self.assertEqual(data["agent_infrastructure"]["execution_paths"]["cloud_resolver"], 0)
+
+    def test_metrics_aggregate_breakdown(self):
+        """Verify metrics endpoint correctly pulls CLI/Cloud breakdown from aggregate."""
+        DailyMetricsAggregate.objects.create(
+            date=timezone.now().date(),
+            total_users=10,
+            total_proxy_calls=150,
+            total_proxy_calls_cli=100,
+            total_proxy_calls_cloud=50,
+            total_proxy_blocked=5,
+            total_proxy_redacted=2,
+            total_secrets_resolved=120,
+            command_usage={"exec": 50},
+            integration_usage={"env": 5},
+            environment_distribution={"production": 10},
+        )
+
+        response = self.client.get("/telemetry/metrics/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+
+        self.assertEqual(data["security"]["total_proxy_calls"], 150)
+        self.assertEqual(data["security"]["breakdown"]["cli"]["proxy_calls"], 100)
+        self.assertEqual(data["security"]["breakdown"]["cloud"]["resolver_calls"], 50)
+        self.assertEqual(data["agent_infrastructure"]["execution_paths"]["cloud_resolver"], 50)
 
     def test_metrics_cache_hit(self):
         """Verify metrics endpoint returns cached data directly if present."""

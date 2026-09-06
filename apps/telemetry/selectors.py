@@ -17,6 +17,7 @@ from apps.workspaces.models import (
     WorkspaceType,
     MembershipStatus,
     AgentRegistration,
+    AuditLogEntry,
 )
 from .models import TelemetrySnapshot, DailyMetricsAggregate
 from .commands import process_command_executions
@@ -272,6 +273,19 @@ class TelemetrySelector:
     def _build_from_aggregate(
         cls, agg, platform_state, env_dist, today_metrics, today, analytics
     ) -> Dict[str, Any]:
+        cli_calls = getattr(agg, "total_proxy_calls_cli", 0)
+        cloud_calls = getattr(agg, "total_proxy_calls_cloud", 0)
+
+        # Resilient fallback if aggregate record was computed before explicit columns
+        if not cli_calls and not cloud_calls and agg.total_proxy_calls > 0:
+            cli_calls = (
+                (agg.total_proxy_calls_daemon or 0)
+                + (agg.total_proxy_calls_transient or 0)
+                + (agg.total_proxy_calls_mcp or 0)
+                + (agg.total_proxy_calls_direct or 0)
+            )
+            cloud_calls = max(0, agg.total_proxy_calls - cli_calls)
+
         return {
             "platform": platform_state,
             "engagement": {
@@ -295,10 +309,10 @@ class TelemetrySelector:
                 "total_secrets_resolved": agg.total_secrets_resolved,
                 "breakdown": {
                     "cli": {
-                        "proxy_calls": agg.integration_usage.get("cli_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
+                        "proxy_calls": cli_calls,
                     },
                     "cloud": {
-                        "resolver_calls": agg.integration_usage.get("cloud_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
+                        "resolver_calls": cloud_calls,
                     },
                 },
             },
@@ -309,7 +323,7 @@ class TelemetrySelector:
                     "mcp": agg.total_proxy_calls_mcp,
                     "direct": agg.total_proxy_calls_direct,
                     "developer": agg.total_developer_commands,
-                    "cloud_resolver": agg.integration_usage.get("cloud_proxy", 0) if isinstance(agg.integration_usage, dict) else 0,
+                    "cloud_resolver": cloud_calls,
                 },
                 "identity_levels": {
                     "anonymous": agg.total_identity_anonymous_calls,
@@ -377,6 +391,7 @@ class TelemetrySelector:
             new_projects,
             new_secrets,
             proxy_agg,
+            cloud_agg,
         ) = await asyncio.gather(
             User.objects.aaggregate(
                 active_daily=Count("id", filter=Q(last_active_at__gte=rolling_daily)),
@@ -426,7 +441,20 @@ class TelemetrySelector:
                 total_errors_system=Sum("errors_system_count"),
                 total_errors_unknown=Sum("errors_unknown_count"),
             ),
+            AuditLogEntry.objects.filter(
+                resolution_path="direct_resolve"
+            ).aaggregate(
+                cloud_total=Count("id"),
+                cloud_redacted=Count("id", filter=Q(redacted=True)),
+                cloud_duration_ms=Sum("proxy_duration_ms"),
+            ),
         )
+
+        cli_calls = proxy_agg.get("total_calls") or 0
+        cloud_calls = cloud_agg.get("cloud_total") or 0
+        total_calls = cli_calls + cloud_calls
+        total_redacted = (proxy_agg.get("total_redacted") or 0) + (cloud_agg.get("cloud_redacted") or 0)
+        total_secrets = (proxy_agg.get("total_secrets_resolved") or 0) + cloud_calls
 
         active_daily = active_counts["active_daily"]
         active_weekly = active_counts["active_weekly"]
@@ -502,14 +530,13 @@ class TelemetrySelector:
             else "0.00%"
         )
 
-        total_calls = proxy_agg.get("total_calls") or 0
         security_redaction = (
-            f"{round(((proxy_agg.get("total_redacted") or 0) / total_calls) * 100, 2)}%"
+            f"{round((total_redacted / total_calls) * 100, 2)}%"
             if total_calls > 0
             else "0.00%"
         )
         security_block = (
-            f"{round(((proxy_agg.get("total_blocked") or 0) / total_calls) * 100, 2)}%"
+            f"{round(((proxy_agg.get('total_blocked') or 0) / total_calls) * 100, 2)}%"
             if total_calls > 0
             else "0.00%"
         )
@@ -554,8 +581,16 @@ class TelemetrySelector:
             "security": {
                 "total_proxy_calls": total_calls,
                 "total_proxy_blocked": proxy_agg.get("total_blocked") or 0,
-                "total_proxy_redacted": proxy_agg.get("total_redacted") or 0,
-                "total_secrets_resolved": proxy_agg.get("total_secrets_resolved") or 0,
+                "total_proxy_redacted": total_redacted,
+                "total_secrets_resolved": total_secrets,
+                "breakdown": {
+                    "cli": {
+                        "proxy_calls": cli_calls,
+                    },
+                    "cloud": {
+                        "resolver_calls": cloud_calls,
+                    },
+                },
             },
             "agent_infrastructure": {
                 "execution_paths": {
@@ -564,6 +599,7 @@ class TelemetrySelector:
                     "mcp": proxy_agg.get("total_proxy_calls_mcp") or 0,
                     "direct": proxy_agg.get("total_proxy_calls_direct") or 0,
                     "developer": proxy_agg.get("total_developer_commands") or 0,
+                    "cloud_resolver": cloud_calls,
                 },
                 "identity_levels": {
                     "anonymous": proxy_agg.get("total_identity_anonymous_calls") or 0,
