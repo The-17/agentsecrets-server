@@ -114,6 +114,46 @@ class WorkspaceService:
             await ws.asave(update_fields=["billing_id"])
         return ws.billing_id
 
+    @staticmethod
+    async def upgrade_workspace_to_pro(*, user: User, workspace_id: uuid.UUID) -> dict[str, Any]:
+        m = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
+        if m.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            raise AuthorizationError("Only workspace admins can manage billing")
+        ws = await Workspace.objects.select_related("owner").aget(id=workspace_id)
+
+        # 1. Detach workspace by giving it a dedicated billing_id if it doesn't have one
+        if not ws.billing_id:
+            import ulid
+            ws.billing_id = f"ws_bill_{str(ulid.ULID())}"
+            await ws.asave(update_fields=["billing_id"])
+
+        owner_billing_id = ws.owner.billing_id if ws.owner else user.billing_id
+
+        # 2. Call cloud resolver /v1/billing/upgrade to activate 100k quota and reset owner's free pool to 0
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(
+                    "https://resolver.agentsecrets.tech/v1/billing/upgrade",
+                    json={
+                        "billing_id": ws.billing_id,
+                        "owner_billing_id": owner_billing_id,
+                        "workspace_name": ws.name,
+                    }
+                )
+                logger.info(f"Upgraded workspace {ws.name} ({ws.billing_id}) to Pro. Resolver response: {res.status_code}")
+        except Exception as e:
+            logger.error(f"Failed to notify cloud resolver of workspace upgrade: {e}")
+
+        return {
+            "billing_id": ws.billing_id,
+            "owner_billing_id": owner_billing_id,
+            "status": "upgraded",
+            "plan": "pro",
+            "monthly_quota": 100000,
+            "monthly_used": 0,
+        }
+
 
 class MemberService:
     """
@@ -141,7 +181,20 @@ class MemberService:
                     results.append({"email": invite.email, "error": "User not found"})
                     continue
 
-                if await Membership.objects.filter(user=invitee, workspace_id=workspace_id).aexists():
+                existing_m = await Membership.objects.filter(user=invitee, workspace_id=workspace_id).afirst()
+                if existing_m:
+                    if invite.encrypted_workspace_key and (not existing_m.encrypted_workspace_key or existing_m.status == MembershipStatus.INVITED):
+                        existing_m.encrypted_workspace_key = invite.encrypted_workspace_key
+                        existing_m.status = MembershipStatus.ACTIVE
+                        existing_m.role = invite.role
+                        await existing_m.asave(update_fields=["encrypted_workspace_key", "status", "role", "updated_at"])
+                        logger.info(
+                            f"MEMBER_KEY_UPDATED: Updated encrypted key and activated workspace {workspace_id} for user {invite.email}"
+                        )
+                        results.append({"email": invite.email, "error": ""})
+                        any_created = True
+                        continue
+
                     results.append({"email": invite.email, "error": "Already a member"})
                     continue
 

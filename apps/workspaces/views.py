@@ -102,6 +102,11 @@ class WorkspaceController:
         billing_id = await WorkspaceService.initialize_workspace_billing(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Workspace billing initialized successfully", data={"billing_id": billing_id})
 
+    @route.post("/{workspace_id}/billing/upgrade/", response={200: DataResponse[Dict[str, Any]], 403: ErrorResponse})
+    async def upgrade_workspace(self, request, workspace_id: uuid.UUID):
+        result = await WorkspaceService.upgrade_workspace_to_pro(user=request.auth, workspace_id=workspace_id)
+        return CustomResponse.success(message="Workspace upgraded to Pro successfully", data=result)
+
     @route.patch("/{workspace_id}/", response={200: DataResponse[WorkspaceSimpleSchema], 403: ErrorResponse})
     async def update_workspace(self, request, workspace_id: uuid.UUID, data: WorkspaceUpdateSchema):
         result = await WorkspaceService.update_workspace(
