@@ -456,7 +456,7 @@ class WorkloadSelector:
                 req = urllib.request.Request(
                     "https://resolver.agentsecrets.tech/v1/billing/record-usage",
                     data=json.dumps({"billing_id": billing_id, "count": 1}).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "X-AS-Billing-ID": billing_id},
+                    headers={"Content-Type": "application/json", "X-AS-Billing-ID": billing_id, "X-AS-Agent-Token": str(token.id)},
                     method="POST",
                 )
                 try:
