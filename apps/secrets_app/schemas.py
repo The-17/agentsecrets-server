@@ -163,3 +163,24 @@ class SecretRecordSchema(Schema):
 class SecretListResponseDataSchema(Schema):
     project_id: str
     secrets: List[SecretRecordSchema]
+
+class SecretReencryptedItemSchema(Schema):
+    id: uuid.UUID
+    value: str
+
+
+class ProjectTransferSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    target_workspace_id: uuid.UUID
+    secrets: List[SecretReencryptedItemSchema] = []
+
+
+class ProjectTransferResponseDataSchema(Schema):
+    project_id: str
+    project_name: str
+    source_workspace_id: str
+    source_workspace_name: str
+    target_workspace_id: str
+    target_workspace_name: str
+    secrets_transferred: int

@@ -10,6 +10,8 @@ from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from .schemas import (
     ProjectCreateSchema,
     ProjectUpdateSchema,
+    ProjectTransferSchema,
+    ProjectTransferResponseDataSchema,
     ProjectInviteSchema,
     SecretBulkUpsertSchema,
     SecretUpdateSchema,
@@ -67,6 +69,44 @@ class ProjectController:
     async def delete_project(self, request, project_name: str):
         name, count = await ProjectService.delete_project(user=request.auth, project_name=project_name)
         return CustomResponse.success(message=f"Project '{name}' and {count} secrets deleted successfully")
+
+    @route.post("/{project_name}/transfer/", response={200: DataResponse[ProjectTransferResponseDataSchema], 400: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse})
+    async def transfer_project(
+        self,
+        request,
+        project_name: str,
+        data: ProjectTransferSchema,
+        source_workspace_id: uuid.UUID | None = None,
+    ):
+        result = await ProjectService.transfer_project(
+            user=request.auth,
+            project_name=project_name,
+            workspace_id=source_workspace_id,
+            data=data,
+        )
+        return CustomResponse.success(
+            message=f"Project '{project_name}' successfully transferred to '{result['target_workspace_name']}'!",
+            data=result,
+        )
+
+    @route.post("/{workspace_id}/{project_name}/transfer/", response={200: DataResponse[ProjectTransferResponseDataSchema], 400: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse})
+    async def transfer_project_ws(
+        self,
+        request,
+        workspace_id: uuid.UUID,
+        project_name: str,
+        data: ProjectTransferSchema,
+    ):
+        result = await ProjectService.transfer_project(
+            user=request.auth,
+            project_name=project_name,
+            workspace_id=workspace_id,
+            data=data,
+        )
+        return CustomResponse.success(
+            message=f"Project '{project_name}' successfully transferred to '{result['target_workspace_name']}'!",
+            data=result,
+        )
 
     # --- Workspace-scoped project endpoints ---
 

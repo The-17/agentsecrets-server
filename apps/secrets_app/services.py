@@ -11,6 +11,7 @@ from apps.common.exceptions import (
     NotFoundError,
     AuthorizationError,
     BodyValidationError,
+    ConflictError,
 )
 from apps.common.services.encryption import EncryptionService as encryption_service
 from apps.workspaces.models import (
@@ -19,12 +20,14 @@ from apps.workspaces.models import (
     WorkspaceType,
     MembershipRole,
     MembershipStatus,
+    AgentRegistration,
 )
 from apps.workspaces.services import ActivityLogService
 from .models import Project, Secret
 from .schemas import (
     ProjectCreateSchema,
     ProjectUpdateSchema,
+    ProjectTransferSchema,
     ProjectInviteSchema,
     SecretBulkUpsertSchema,
     SecretUpdateSchema,
@@ -128,6 +131,115 @@ class ProjectService:
             f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted"
         )
         return name, count
+
+
+    @staticmethod
+    async def transfer_project(
+        *,
+        user: User,
+        project_name: str,
+        workspace_id: uuid.UUID | None,
+        data: ProjectTransferSchema,
+    ) -> dict[str, Any]:
+        project = await ProjectSelector.resolve_project(
+            user=user, project_name=project_name, workspace_id=workspace_id
+        )
+        source_ws = project.workspace
+        await ProjectSelector.require_admin(user=user, workspace=source_ws)
+
+        target_ws_id = data.target_workspace_id
+        if target_ws_id == source_ws.id:
+            raise BodyValidationError("target_workspace_id", "Project is already in this workspace")
+
+        target_ws = await Workspace.objects.filter(id=target_ws_id).afirst()
+        if not target_ws:
+            raise NotFoundError("Target workspace not found")
+
+        await ProjectSelector.require_admin(user=user, workspace=target_ws)
+
+        # Check for project name collision in target workspace
+        if await Project.objects.filter(workspace=target_ws, name=project.name).aexists():
+            raise ConflictError(
+                f"A project named '{project.name}' already exists in workspace '{target_ws.name}'. "
+                "Please rename the project before transferring."
+            )
+
+        # Map re-encrypted secrets for fast O(1) lookup
+        reenc_map = {str(item.id): item.value for item in data.secrets}
+
+        @sync_to_async
+        def _execute_transfer():
+            with transaction.atomic():
+                # 1. Update project workspace pointer
+                project.workspace = target_ws
+                project.save(update_fields=["workspace", "updated_at"])
+
+                # 2. Bulk-update secrets with re-encrypted ciphertexts wrapped in server envelope
+                secrets_to_update = []
+                for s in Secret.objects.filter(project=project):
+                    s_id_str = str(s.id)
+                    if s_id_str in reenc_map:
+                        s.value = encryption_service.encrypt(reenc_map[s_id_str])
+                        secrets_to_update.append(s)
+
+                if secrets_to_update:
+                    Secret.objects.bulk_update(secrets_to_update, ["value"])
+
+                # 3. Update any project-scoped agent registrations
+                AgentRegistration.objects.filter(project=project).update(workspace=target_ws)
+
+                return len(secrets_to_update)
+
+        secrets_updated = await _execute_transfer()
+
+        # 4. Dual Activity Logs
+        await ActivityLogService.record(
+            workspace_id=source_ws.id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="project.transferred_out",
+            target_type="project",
+            target_id=str(project.id),
+            target_name=project.name,
+            metadata={
+                "target_workspace_id": str(target_ws.id),
+                "target_workspace_name": target_ws.name,
+                "secrets_count": secrets_updated,
+            },
+            source="api",
+        )
+
+        await ActivityLogService.record(
+            workspace_id=target_ws.id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="project.transferred_in",
+            target_type="project",
+            target_id=str(project.id),
+            target_name=project.name,
+            metadata={
+                "source_workspace_id": str(source_ws.id),
+                "source_workspace_name": source_ws.name,
+                "secrets_count": secrets_updated,
+            },
+            source="api",
+        )
+
+        logger.info(
+            f"PROJECT_TRANSFERRED: '{project.name}' moved from '{source_ws.name}' to '{target_ws.name}' ({secrets_updated} secrets re-encrypted)"
+        )
+
+        return {
+            "project_id": str(project.id),
+            "project_name": project.name,
+            "source_workspace_id": str(source_ws.id),
+            "source_workspace_name": source_ws.name,
+            "target_workspace_id": str(target_ws.id),
+            "target_workspace_name": target_ws.name,
+            "secrets_transferred": secrets_updated,
+        }
 
     @staticmethod
     async def invite_to_project(
