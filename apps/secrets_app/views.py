@@ -196,7 +196,12 @@ class SecretsController:
         secrets = await SecretSelector.list_project_secrets(project=project, environment=environment)
         return CustomResponse.success(
             message="Secrets retrieved successfully",
-            data={"project_id": str(project_id), "secrets": secrets},
+            data={
+                "project_id": str(project_id),
+                "workspace_id": str(project.workspace_id),
+                "workspace_name": project.workspace.name,
+                "secrets": secrets,
+            },
         )
 
     @route.get("/{project_id}/{key}/", response={200: DataResponse[SecretRecordSchema], 404: ErrorResponse})

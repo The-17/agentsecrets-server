@@ -162,6 +162,8 @@ class SecretRecordSchema(Schema):
 
 class SecretListResponseDataSchema(Schema):
     project_id: str
+    workspace_id: Optional[str] = None
+    workspace_name: Optional[str] = None
     secrets: List[SecretRecordSchema]
 
 class SecretReencryptedItemSchema(Schema):
