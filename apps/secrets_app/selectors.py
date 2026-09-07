@@ -94,12 +94,15 @@ class ProjectSelector:
             raise AuthorizationError("Only workspace owners and admins can perform this action")
 
     @staticmethod
-    async def list_user_projects(*, user: User) -> list[dict[str, Any]]:
-        projects: list[dict[str, Any]] = []
-        async for p in Project.objects.filter(
+    async def list_user_projects(*, user: User, workspace_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        qs = Project.objects.filter(
             workspace__memberships__user=user,
             workspace__memberships__status=MembershipStatus.ACTIVE,
-        ).select_related("workspace"):
+        )
+        if workspace_id:
+            qs = qs.filter(workspace_id=workspace_id)
+        projects: list[dict[str, Any]] = []
+        async for p in qs.select_related("workspace"):
             projects.append(ProjectSelector.project_data(p))
         return projects
 

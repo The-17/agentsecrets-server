@@ -35,8 +35,8 @@ class ProjectController:
     """
 
     @route.get("/", response={200: DataResponse[List[ProjectResponseDataSchema]]})
-    async def list_projects(self, request):
-        projects = await ProjectSelector.list_user_projects(user=request.auth)
+    async def list_projects(self, request, workspace_id: uuid.UUID | None = None):
+        projects = await ProjectSelector.list_user_projects(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Projects retrieved successfully!", data=projects)
 
     @route.post("/", response={201: DataResponse[ProjectResponseDataSchema], 400: ErrorResponse, 403: ErrorResponse})
