@@ -35,12 +35,14 @@ class AccountSelector:
         workspaces_data: list[dict[str, Any]] = []
         async for m in Membership.objects.filter(
             user=user, status=MembershipStatus.ACTIVE
-        ).select_related("workspace"):
+        ).select_related("workspace", "workspace__owner"):
             workspaces_data.append({
                 "id": str(m.workspace.id),
                 "name": m.workspace.name,
                 "type": m.workspace.type,
+                "tier": getattr(m.workspace, "tier", "free"),
                 "role": m.role,
+                "billing_id": m.workspace.effective_billing_id,
                 "encrypted_workspace_key": m.encrypted_workspace_key,
             })
         return workspaces_data

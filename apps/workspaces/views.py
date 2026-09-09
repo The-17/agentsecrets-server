@@ -63,6 +63,30 @@ from .services import (
 logger = logging.getLogger("apps.workspaces")
 
 
+async def _ingest_workspace_scope(*, user, agent_token_auth) -> set[str] | None:
+    """Return the set of workspace ids the ingest caller may write to.
+
+    - Agent-token caller: only its own workspace.
+    - User (JWT/session) caller: only workspaces it is an active member of.
+    - Operator-configured RESOLVER_SERVICE_KEY string: trusted internal channel,
+      allowed to write any workspace (None == unrestricted). Default is unset.
+    Returns None only for the trusted service-key path.
+    """
+    if agent_token_auth is not None:
+        return {str(agent_token_auth.workspace_id)}
+    if isinstance(user, User):
+        from .models import Membership, MembershipStatus
+        ids = {
+            str(m.workspace_id)
+            async for m in Membership.objects.filter(
+                user=user, status=MembershipStatus.ACTIVE
+            ).only("workspace_id")
+        }
+        return ids
+    # Service-key string identity (RESOLVER_SERVICE_KEY configured by the operator).
+    return None
+
+
 @api_controller("/workspaces", tags=["Workspaces"], auth=JWTAuth())
 class WorkspaceController:
     """
@@ -89,6 +113,7 @@ class WorkspaceController:
                 "id": str(ws.id),
                 "name": ws.name,
                 "type": ws.type,
+                "tier": getattr(ws, "tier", "free"),
                 "role": m.role,
                 "billing_id": ws.effective_billing_id,
                 "encrypted_workspace_key": m.encrypted_workspace_key,
@@ -102,10 +127,10 @@ class WorkspaceController:
         billing_id = await WorkspaceService.initialize_workspace_billing(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Workspace billing initialized successfully", data={"billing_id": billing_id})
 
-    @route.post("/{workspace_id}/billing/upgrade/", response={200: DataResponse[Dict[str, Any]], 403: ErrorResponse})
-    async def upgrade_workspace(self, request, workspace_id: uuid.UUID):
-        result = await WorkspaceService.upgrade_workspace_to_pro(user=request.auth, workspace_id=workspace_id)
-        return CustomResponse.success(message="Workspace upgraded to Pro successfully", data=result)
+    @route.post("/{workspace_id}/billing/reconcile/", response={200: DataResponse[Dict[str, Any]], 403: ErrorResponse})
+    async def reconcile_workspace_billing(self, request, workspace_id: uuid.UUID):
+        result = await WorkspaceService.reconcile_workspace_billing(user=request.auth, workspace_id=workspace_id)
+        return CustomResponse.success(message="Workspace billing reconciled", data=result)
 
     @route.patch("/{workspace_id}/", response={200: DataResponse[WorkspaceSimpleSchema], 403: ErrorResponse})
     async def update_workspace(self, request, workspace_id: uuid.UUID, data: WorkspaceUpdateSchema):
@@ -387,23 +412,60 @@ class AuditController:
             raise BodyValidationError("format", "Unsupported format. Only 'jsonl' is supported.")
 
         from .models import AuditLogEntry, IdentityLevel
+
+        # Explicit field list, not reflection: deterministic, no N+1 on _meta.
+        EXPORT_FIELDS = [
+            "id", "schema_version", "timestamp", "recorded_at", "source",
+            "environment", "workspace_id", "project_id", "agent_id",
+            "agent_token_id", "identity_level", "credential_ref",
+            "injection_style", "target_domain", "target_url", "target_path",
+            "method", "status_code", "duration_ms", "proxy_duration_ms",
+            "redacted", "redaction_reason", "resolution_path",
+            "allowlist_snapshot", "caller_role", "session_id",
+            "policy_snapshot_id", "error",
+        ]
+        # Keyset cursor columns; (timestamp, id) is unique so pagination is stable.
+        ORDER_FIELDS = ["-timestamp", "-id"]
+        PAGE_SIZE = 5000
+        MAX_ROWS = 100000
+
         qs = AuditSelector.apply_filters(
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             request.GET.dict(),
         )
 
+        def serialize_row(row):
+            out = {}
+            for f in EXPORT_FIELDS:
+                val = row.get(f)
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                elif not isinstance(val, (str, int, float, bool, type(None))):
+                    val = json.dumps(val, default=str)
+                out[f] = val
+            return out
+
         def generate_jsonl():
-            for log in qs.order_by("-timestamp"):
-                fields = {}
-                for f in log._meta.get_fields():
-                    if hasattr(f, "attname"):
-                        val = getattr(log, f.attname)
-                        if hasattr(val, "isoformat"):
-                            val = val.isoformat()
-                        elif not isinstance(val, (str, int, float, bool, type(None))):
-                            val = str(val)
-                        fields[f.attname] = val
-                yield json.dumps(fields) + "\n"
+            emitted = 0
+            cursor = None  # (timestamp, id) of the last emitted row
+            while emitted < MAX_ROWS:
+                page_qs = qs.order_by(*ORDER_FIELDS).values(*EXPORT_FIELDS)
+                if cursor is not None:
+                    ts, cid = cursor
+                    page_qs = page_qs.filter(timestamp__lt=ts) | page_qs.filter(
+                        timestamp=ts, id__lt=cid
+                    )
+                page = list(page_qs[:PAGE_SIZE])
+                if not page:
+                    break
+                for row in page:
+                    yield json.dumps(serialize_row(row)) + "\n"
+                    emitted += 1
+                    if emitted >= MAX_ROWS:
+                        break
+                if len(page) < PAGE_SIZE or emitted >= MAX_ROWS:
+                    break
+                cursor = (page[-1]["timestamp"], page[-1]["id"])
 
         response = StreamingHttpResponse(generate_jsonl(), content_type="application/x-ndjson")
         response["Content-Disposition"] = f'attachment; filename="audit_log_export_{workspace_id}.jsonl"'
@@ -482,10 +544,20 @@ class ResolverController:
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
 
-        # If authenticated via agent_token, enforce that entries belong to that workspace
-        if agent_token_auth:
-            auth_ws_id = str(agent_token_auth.workspace_id)
-            entries = [e for e in entries if str(e.get("workspace_id")) == auth_ws_id]
+        # Bind every entry to a workspace the caller may write. Agent-token
+        # callers are scoped to their own workspace; user-JWT/session callers to
+        # their active memberships; only an operator-configured RESOLVER_SERVICE_KEY
+        # is unrestricted. Foreign entries are refused loudly, never persisted.
+        scope = await _ingest_workspace_scope(user=user, agent_token_auth=agent_token_auth)
+        if scope is not None:
+            before = len(entries)
+            entries = [e for e in entries if str(e.get("workspace_id")) in scope]
+            dropped = before - len(entries)
+            if dropped:
+                logger.warning(
+                    f"AUDIT_INGEST_SCOPE: dropped {dropped}/{before} audit entries from caller "
+                    f"outside its workspace scope (workspaces: {sorted(scope)})"
+                )
 
         created_count, ids = await AgentService.ingest_audit_logs(entries=entries)
         return 201, {"created_count": created_count, "ids": ids}
@@ -533,10 +605,17 @@ class ResolverController:
         body = json.loads(request.body)
         entries = body if isinstance(body, list) else [body]
 
-        # If authenticated via agent_token, enforce that entries belong to that workspace
-        if agent_token_auth:
-            auth_ws_id = str(agent_token_auth.workspace_id)
-            entries = [e for e in entries if str(e.get("workspace_id")) == auth_ws_id]
+        # Bind every entry to a workspace the caller may write (see audit ingest).
+        scope = await _ingest_workspace_scope(user=user, agent_token_auth=agent_token_auth)
+        if scope is not None:
+            before = len(entries)
+            entries = [e for e in entries if str(e.get("workspace_id")) in scope]
+            dropped = before - len(entries)
+            if dropped:
+                logger.warning(
+                    f"FORENSIC_INGEST_SCOPE: dropped {dropped}/{before} forensic entries from caller "
+                    f"outside its workspace scope (workspaces: {sorted(scope)})"
+                )
 
         created_count, ids = await ForensicLogService.ingest_forensic_logs(entries=entries)
         return 201, {"created_count": created_count, "ids": ids}

@@ -33,6 +33,12 @@ class MembershipStatus(models.TextChoices):
     INVITED = 'invited', 'Invited'
 
 
+class WorkspaceTier(models.TextChoices):
+    """Subscription tier of workspace"""
+    FREE = 'free', 'Free'
+    PRO = 'pro', 'Pro'
+
+
 class Workspace(BaseModel):
     """
     Workspace is the security boundary for secrets.
@@ -62,13 +68,27 @@ class Workspace(BaseModel):
         blank=True,
         help_text="Dedicated billing ID for paid/detached workspace. If null, draws from owner.billing_id (free tier)."
     )
+    tier = models.CharField(
+        max_length=20,
+        choices=WorkspaceTier.choices,
+        default=WorkspaceTier.FREE,
+        help_text="free = draws from owner quota; pro = dedicated 100k quota"
+    )
 
     @property
     def effective_billing_id(self) -> str:
-        if self.billing_id:
+        if getattr(self, "tier", "free") == WorkspaceTier.PRO and self.billing_id:
             return self.billing_id
-        if self.owner and getattr(self.owner, 'billing_id', None):
-            return self.owner.billing_id
+        owner_obj = getattr(self, '_state', None)
+        if owner_obj and hasattr(owner_obj, 'fields_cache'):
+            cached_owner = owner_obj.fields_cache.get('owner')
+            if cached_owner and getattr(cached_owner, 'billing_id', None):
+                return cached_owner.billing_id
+        try:
+            if self.owner and getattr(self.owner, 'billing_id', None):
+                return self.owner.billing_id
+        except Exception:
+            pass
         return f"free_ws_{self.id}"
 
 

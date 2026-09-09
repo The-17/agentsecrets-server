@@ -7,6 +7,7 @@ import logging
 import secrets as secrets_module
 import uuid
 from typing import Any
+from django.conf import settings
 from django.db import transaction, models
 from django.db.models import Q
 from django.utils import timezone
@@ -21,6 +22,7 @@ from apps.common.exceptions import (
 from apps.secrets_app.models import Project
 from .models import (
     Workspace,
+    WorkspaceTier,
     Membership,
     WorkspaceType,
     MembershipRole,
@@ -108,51 +110,72 @@ class WorkspaceService:
         if m.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace admins can manage billing")
         ws = m.workspace
+
+        if getattr(ws, "tier", "free") == WorkspaceTier.PRO and ws.billing_id:
+            return ws.billing_id
+
+        # Reserve a stable detached billing id for this workspace WITHOUT detaching
+        # it. tier stays "free", so effective_billing_id still resolves to the
+        # owner pool; the reserved ws_bill_* id only becomes the workspace's own
+        # account once reconcile_workspace_billing confirms the resolver activated
+        # it (Polar webhook). Persisting it here is what lets a later reconcile
+        # match the id the Polar checkout used back to this workspace.
         if not ws.billing_id:
             import ulid
             ws.billing_id = f"ws_bill_{str(ulid.ULID())}"
-            await ws.asave(update_fields=["billing_id"])
+            await ws.asave(update_fields=["billing_id", "updated_at"])
         return ws.billing_id
 
     @staticmethod
-    async def upgrade_workspace_to_pro(*, user: User, workspace_id: uuid.UUID) -> dict[str, Any]:
+    async def reconcile_workspace_billing(*, user: User, workspace_id: uuid.UUID) -> dict[str, Any]:
+        """Mirror the resolver's subscription status onto the local workspace.
+
+        The server never asserts Pro on its own: it reads the workspace's reserved
+        ws_bill_* account from the cloud resolver's billing store and only flips
+        the local tier to "pro" when that store reports an active Pro plan (i.e.
+        the Polar webhook already activated it). A self-hosted or forged server
+        gains nothing by editing its own tier — the resolver ignores it and gates
+        on its own store.
+        """
         m = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
         if m.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace admins can manage billing")
-        ws = await Workspace.objects.select_related("owner").aget(id=workspace_id)
+        ws = m.workspace
 
-        # 1. Detach workspace by giving it a dedicated billing_id if it doesn't have one
         if not ws.billing_id:
-            import ulid
-            ws.billing_id = f"ws_bill_{str(ulid.ULID())}"
-            await ws.asave(update_fields=["billing_id"])
+            return {"tier": "free", "billing_id": None, "status": "no_account"}
 
-        owner_billing_id = ws.owner.billing_id if ws.owner else user.billing_id
+        import json
+        import urllib.error
+        import urllib.parse
+        import urllib.request
 
-        # 2. Call cloud resolver /v1/billing/upgrade to activate 100k quota and reset owner's free pool to 0
-        import httpx
+        resolver_url = getattr(settings, "RESOLVER_URL", "https://resolver.agentsecrets.tech").rstrip("/")
+        remote_tier = "free"
+        remote_status = ""
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                res = await client.post(
-                    "https://resolver.agentsecrets.tech/v1/billing/upgrade",
-                    json={
-                        "billing_id": ws.billing_id,
-                        "owner_billing_id": owner_billing_id,
-                        "workspace_name": ws.name,
-                    }
-                )
-                logger.info(f"Upgraded workspace {ws.name} ({ws.billing_id}) to Pro. Resolver response: {res.status_code}")
-        except Exception as e:
-            logger.error(f"Failed to notify cloud resolver of workspace upgrade: {e}")
+            qs = urllib.parse.urlencode({"billing_id": ws.billing_id})
+            req = urllib.request.Request(f"{resolver_url}/v1/billing/subscription?{qs}", method="GET")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            remote_tier = (data.get("plan") or "free").lower()
+            remote_status = (data.get("status") or "").lower()
+        except Exception as exc:
+            logger.error(f"BILLING_RECONCILE_FAILED: could not reach resolver for workspace {workspace_id}: {exc}")
+            return {"tier": getattr(ws, "tier", "free"), "billing_id": ws.billing_id, "status": "resolver_unreachable"}
 
-        return {
-            "billing_id": ws.billing_id,
-            "owner_billing_id": owner_billing_id,
-            "status": "upgraded",
-            "plan": "pro",
-            "monthly_quota": 100000,
-            "monthly_used": 0,
-        }
+        # Mirror only a resolver-confirmed active Pro account. Anything else
+        # (free, cancelled, past_due, unreachable) leaves the workspace free so it
+        # keeps drawing the owner pool rather than claiming quota it doesn't have.
+        if remote_tier == "pro" and remote_status == "active":
+            if getattr(ws, "tier", "free") != WorkspaceTier.PRO:
+                ws.tier = WorkspaceTier.PRO
+                await ws.asave(update_fields=["tier", "updated_at"])
+            return {"tier": "pro", "billing_id": ws.billing_id, "status": "active"}
+        if getattr(ws, "tier", "free") != WorkspaceTier.FREE:
+            ws.tier = WorkspaceTier.FREE
+            await ws.asave(update_fields=["tier", "updated_at"])
+        return {"tier": "free", "billing_id": ws.billing_id, "status": remote_status or "inactive"}
 
 
 class MemberService:
@@ -231,7 +254,8 @@ class MemberService:
         if um.role not in [MembershipRole.ADMIN, MembershipRole.OWNER]:
             raise AuthorizationError("Only admins/owners can update member roles.")
         tm = await Membership.objects.filter(
-            user_id=target_user_id, workspace_id=workspace_id
+            Q(user_id=target_user_id) | Q(id=target_user_id),
+            workspace_id=workspace_id
         ).select_related("user").afirst()
         if not tm:
             raise NotFoundError("User is not a member of this workspace.")
@@ -253,7 +277,8 @@ class MemberService:
     ) -> str:
         um = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
         tm = await Membership.objects.filter(
-            user_id=target_user_id, workspace_id=workspace_id
+            Q(user_id=target_user_id) | Q(id=target_user_id),
+            workspace_id=workspace_id
         ).select_related("user").afirst()
         if not tm:
             raise NotFoundError("Member not found in this workspace")
@@ -280,7 +305,8 @@ class MemberService:
         if um.role not in [MembershipRole.ADMIN, MembershipRole.OWNER]:
             raise AuthorizationError("Only admins/owners can change member roles.")
         tm = await Membership.objects.filter(
-            user_id=target_user_id, workspace_id=workspace_id
+            Q(user_id=target_user_id) | Q(id=target_user_id),
+            workspace_id=workspace_id
         ).select_related("user").afirst()
         if not tm:
             raise NotFoundError("User is not a member of this workspace.")
@@ -854,9 +880,40 @@ class ForensicLogService:
             stream_id = str(e.get("stream_id") or e.get("session_id") or "default")
             stream_seq = int(e.get("stream_seq") or 0)
 
-            chain_hash = str(e.get("chain_hash") or "")
+            # The id participates in the chain hash, so it must be resolved before
+            # hashing. If the client omitted it, generate the same id the model
+            # would, and store that exact value.
+            entry_id = str(e.get("id"))[:64] if e.get("id") else ""
+            if not entry_id:
+                from .models import generate_forensic_id
+                entry_id = generate_forensic_id()
             prev_chain_hash = str(e.get("prev_chain_hash") or "")
-            entry_hash = str(e.get("entry_hash") or "")
+
+            # Server-authoritative hashing: recompute both hashes from the content
+            # and linkage fields this server is about to persist, instead of
+            # trusting client-supplied values. This makes tamper-evidence real:
+            # any later edit to the JSON blocks or the linkage breaks verification.
+            from .forensic_chain import compute_chain_hash, compute_entry_hash
+
+            # created_at must be resolved before chain hashing (it is part of the
+            # linkage input), so parse it first.
+            created_at_val = None
+            ts = e.get("created_at") or e.get("timestamp")
+            if ts:
+                from dateutil import parser
+                try:
+                    if isinstance(ts, str):
+                        created_at_val = parser.isoparse(ts)
+                    elif hasattr(ts, "isoformat"):
+                        created_at_val = ts
+                except Exception:
+                    logger.warning("FORENSIC_TS_PARSE: invalid created_at on forensic entry %s", entry_id, exc_info=True)
+
+            if created_at_val is None:
+                created_at_val = timezone.now()
+
+            entry_hash = compute_entry_hash(event_data, snapshot_data, enforcement_data, resolution_data)
+            chain_hash = compute_chain_hash(prev_chain_hash, entry_id or "", created_at_val)
 
             entry_kwargs: dict[str, Any] = {
                 "workspace_id": ws_val,
@@ -872,19 +929,10 @@ class ForensicLogService:
                 "resolution_json": resolution_data,
             }
 
-            if e.get("id"):
-                entry_kwargs["id"] = str(e["id"])[:64]
+            if entry_id:
+                entry_kwargs["id"] = entry_id
 
-            ts = e.get("created_at") or e.get("timestamp")
-            if ts:
-                from dateutil import parser
-                try:
-                    if isinstance(ts, str):
-                        entry_kwargs["created_at"] = parser.isoparse(ts)
-                    elif hasattr(ts, "isoformat"):
-                        entry_kwargs["created_at"] = ts
-                except Exception:
-                    pass
+            entry_kwargs["created_at"] = created_at_val
 
             model_entries.append(ForensicAuditLogEntry(**entry_kwargs))
 

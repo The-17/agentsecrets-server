@@ -96,3 +96,11 @@ class SecretsAPITests(TestCase):
         )
         self.assertEqual(del_res.status_code, 200)
         self.assertEqual(Secret.objects.filter(project_id=project_id, key="DATABASE_URL").count(), 0)
+
+        # 7. Clean Environment
+        clean_res = self.client.delete(
+            f"/api/projects/{project_id}/environments/development/clean/",
+            **self.auth_headers,
+        )
+        self.assertEqual(clean_res.status_code, 200)
+        self.assertEqual(Secret.objects.filter(project_id=project_id, environment="development").count(), 0)

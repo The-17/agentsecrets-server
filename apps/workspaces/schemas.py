@@ -141,6 +141,7 @@ class WorkspaceItemSchema(Schema):
     id: str
     name: str
     type: str
+    tier: Optional[str] = "free"
     role: str
     billing_id: Optional[str] = None
     encrypted_workspace_key: str
@@ -151,6 +152,7 @@ class WorkspaceDetailSchema(Schema):
     id: str
     name: str
     type: str
+    tier: Optional[str] = "free"
     role: str
     billing_id: Optional[str] = None
     encrypted_workspace_key: str
@@ -162,6 +164,7 @@ class WorkspaceSimpleSchema(Schema):
     id: str
     name: str
     type: str
+    tier: Optional[str] = "free"
     role: Optional[str] = None
 
 

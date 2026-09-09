@@ -136,7 +136,7 @@ class TelemetryService:
 
             # Sanitize and normalize command executions and typos
             raw_cmds = item.command_executions or {}
-            _, _, item_typos = process_command_executions(raw_cmds)
+            _, _, item_typos, _ = process_command_executions(raw_cmds)
             merged_typos = {**(item.typos or {}), **item_typos}
 
             snapshots.append(

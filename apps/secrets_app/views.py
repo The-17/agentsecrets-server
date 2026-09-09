@@ -172,6 +172,13 @@ class ProjectController:
         result = await ProjectSelector.get_secrets_diff(project=project, from_env=from_env, to_env=to_env)
         return CustomResponse.success(message="Cross-environment diff retrieved", data=result)
 
+    @route.delete("/{project_id}/environments/{environment}/clean/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
+    async def clean_environment(self, request, project_id: uuid.UUID, environment: str):
+        count = await SecretService.clean_environment(
+            user=request.auth, project_id=project_id, environment=environment
+        )
+        return CustomResponse.success(message=f"Cleaned {count} secrets from environment '{environment}'")
+
 
 @api_controller("/secrets", tags=["Secrets"], auth=JWTAuth())
 class SecretsController:
@@ -236,6 +243,13 @@ class SecretsController:
     @route.patch("/{project_id}/{environment}/{key}/", response={200: DataResponse[SecretRecordSchema], 404: ErrorResponse})
     async def update_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretUpdateSchema):
         return await self.update_secret(request, project_id, key, data, environment)
+
+    @route.delete("/{project_id}/environments/{environment}/clean/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
+    async def clean_environment_secrets(self, request, project_id: uuid.UUID, environment: str):
+        count = await SecretService.clean_environment(
+            user=request.auth, project_id=project_id, environment=environment
+        )
+        return CustomResponse.success(message=f"Cleaned {count} secrets from environment '{environment}'")
 
     @route.delete("/{project_id}/{environment}/{key}/", response={200: SuccessResponse, 404: ErrorResponse})
     async def delete_secret_env(self, request, project_id: uuid.UUID, environment: str, key: str):

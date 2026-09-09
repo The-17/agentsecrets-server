@@ -287,7 +287,7 @@ class Command(BaseCommand):
                         user_integrations[integration] = set()
                     user_integrations[integration].add(uid)
 
-        canonical_usage, _, typos_usage = process_command_executions(
+        canonical_usage, _, typos_usage, alias_usage = process_command_executions(
             raw_command_accumulator
         )
         integration_usage = {k: len(u_set) for k, u_set in user_integrations.items()}
@@ -340,6 +340,7 @@ class Command(BaseCommand):
                 "total_proxy_blocked": proxy_stats["total_blocked"] or 0,
                 "total_proxy_redacted": combined_redacted,
                 "command_usage": canonical_usage,
+                "alias_usage": alias_usage,
                 "environment_distribution": env_dist,
                 "integration_usage": integration_usage,
                 "total_secrets_resolved": combined_secrets_resolved,

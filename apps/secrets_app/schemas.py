@@ -108,6 +108,7 @@ class ProjectResponseDataSchema(Schema):
     workspace_name: str
     name: str
     description: str = ""
+    total_secrets: Optional[int] = 0
 
 
 class ProjectInviteResponseDataSchema(Schema):

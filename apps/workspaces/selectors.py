@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from typing import Any
+from django.conf import settings
 from django.db.models import Count, Max, Q, Subquery, OuterRef, IntegerField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -32,6 +35,53 @@ from .models import (
 logger = logging.getLogger("apps.workspaces")
 
 
+def _report_usage_async(*, raw_token: str, billing_id: str, workspace_id: str, environment: str) -> None:
+    """Fire-and-forget usage report to the cloud resolver.
+
+    The resolver verifies the raw workload token itself and debits the account
+    its own store associates with that token. The server asserts no entitlement,
+    so a self-hosted or compromised server cannot grant quota by calling this.
+    Failures are logged and never affect secret delivery.
+    """
+    if not getattr(settings, "RESOLVER_URL", ""):
+        return
+
+    async def _post():
+        loop = asyncio.get_running_loop()
+
+        def _send():
+            import urllib.request
+            req = urllib.request.Request(
+                settings.RESOLVER_URL.rstrip("/") + "/v1/billing/record-usage",
+                data=json.dumps({"count": 1}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "X-AS-Agent-Token": raw_token},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, _send), timeout=6)
+        except Exception as exc:  # never surface to the caller
+            logger.warning(
+                "USAGE_REPORT_FAILED: failed to report env resolution usage for workspace %s (%s): %s",
+                workspace_id, billing_id, exc,
+            )
+
+    try:
+        task = asyncio.create_task(_post())
+    except RuntimeError:
+        return  # no running event loop; skip the advisory report
+
+    # Keep a reference so the task isn't garbage-collected mid-flight.
+    _REPORT_TASKS.add(task)
+    task.add_done_callback(_REPORT_TASKS.discard)
+
+
+_REPORT_TASKS: set[asyncio.Task] = set()
+
+
+
 class WorkspaceSelector:
     """
     Pure read-only query selector layer for Workspaces and Memberships.
@@ -41,7 +91,7 @@ class WorkspaceSelector:
     async def get_membership(*, user: User, workspace_id: uuid.UUID) -> Membership:
         member = await Membership.objects.filter(
             user=user, workspace_id=workspace_id, status=MembershipStatus.ACTIVE
-        ).select_related("workspace").afirst()
+        ).select_related("workspace", "workspace__owner").afirst()
         if not member:
             raise NotFoundError("Workspace not found or you don't have access")
         return member
@@ -63,6 +113,7 @@ class WorkspaceSelector:
             "workspace__id",
             "workspace__name",
             "workspace__type",
+            "workspace__tier",
             "workspace__billing_id",
             "workspace__owner__billing_id",
             "workspace__created_at",
@@ -72,8 +123,9 @@ class WorkspaceSelector:
                 "id": str(m["workspace__id"]),
                 "name": m["workspace__name"],
                 "type": m["workspace__type"],
+                "tier": m.get("workspace__tier") or "free",
                 "role": m["role"],
-                "billing_id": m["workspace__billing_id"] or m["workspace__owner__billing_id"],
+                "billing_id": (m["workspace__billing_id"] if m.get("workspace__tier") == "pro" else None) or m["workspace__owner__billing_id"],
                 "encrypted_workspace_key": m["encrypted_workspace_key"],
                 "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
             }
@@ -430,7 +482,8 @@ class WorkloadSelector:
             "registration__workspace",
             "registration__workspace__owner"
         ).filter(
-            token_hash=token_hash
+            token_hash=token_hash,
+            revoked_at__isnull=True,
         ).afirst()
 
         if not token:
@@ -443,34 +496,20 @@ class WorkloadSelector:
         workspace = registration.workspace
         env_name = env_override or getattr(token, "environment", None) or getattr(registration, "environment", None) or "production"
 
-        # Metering & Quota Gate: Record resolution usage against Cloud Billing
+        # Best-effort usage reporting ONLY — the server is not a billing authority.
+        # The cloud resolver verifies the raw workload token itself and debits the
+        # matching account from its own store; it ignores whatever this server
+        # asserts. A self-hosted server therefore cannot grant or inflate anything.
+        # This report is fire-and-forget: it never blocks, gates, or fails secret
+        # delivery, and network errors are logged, not interpreted as a quota grant.
         billing_id = getattr(workspace, "effective_billing_id", None) if workspace else None
         if billing_id:
-            import asyncio
-            import json
-            import urllib.request
-            import urllib.error
-            from apps.common.exceptions import QuotaExceededError
-
-            def _record_env_resolution_usage():
-                req = urllib.request.Request(
-                    "https://resolver.agentsecrets.tech/v1/billing/record-usage",
-                    data=json.dumps({"billing_id": billing_id, "count": 1}).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "X-AS-Billing-ID": billing_id, "X-AS-Agent-Token": str(token.id)},
-                    method="POST",
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        return resp.status
-                except urllib.error.HTTPError as e:
-                    return e.code
-                except Exception:
-                    # In case cloud resolver is temporarily unreachable, allow boot to proceed
-                    return 200
-
-            code = await asyncio.to_thread(_record_env_resolution_usage)
-            if code == 429:
-                raise QuotaExceededError("Monthly cloud resolution quota exhausted for current billing period. Upgrade to Pro for 100,000 resolutions/month.")
+            _report_usage_async(
+                raw_token=raw_token,
+                billing_id=billing_id,
+                workspace_id=str(workspace.id),
+                environment=env_name,
+            )
 
         # Query secrets for this project & environment
         from apps.secrets_app.models import Secret
@@ -598,15 +637,23 @@ class ForensicLogSelector:
 
         await WorkspaceSelector.get_membership(user=user, workspace_id=log.workspace_id)
 
-        verified = True
-        if log.chain_hash and log.created_at:
-            # Cryptographic chain verification check
-            import hashlib
-            prev_id = log.prev_chain_hash or "genesis_block"
-            ts_str = log.created_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            expected_hash = hashlib.sha256((prev_id + str(log.id) + ts_str).encode()).hexdigest()
-            # If chain_hash is supplied, verify consistency
-            verified = (log.chain_hash == expected_hash) or bool(log.chain_hash)
+        # Server-authoritative verification: recompute both hashes from the stored
+        # fields and require exact matches. A record is verified only if its
+        # content hash AND its chain linkage are intact; there is no fallback that
+        # marks a record verified merely because a hash string is present.
+        from .forensic_chain import compute_chain_hash, compute_entry_hash
+
+        verified = False
+        if log.created_at:
+            expected_chain = compute_chain_hash(log.prev_chain_hash, str(log.id), log.created_at)
+            expected_entry = compute_entry_hash(
+                log.event_json or {},
+                log.snapshot_json or {},
+                log.enforcement_json or {},
+                log.resolution_json or {},
+            )
+            verified = bool(log.chain_hash) and log.chain_hash == expected_chain
+            verified = verified and bool(log.entry_hash) and log.entry_hash == expected_entry
 
         event_data = log.event_json or {}
         snapshot_data = log.snapshot_json or {}

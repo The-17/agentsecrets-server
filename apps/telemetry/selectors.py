@@ -366,6 +366,7 @@ class TelemetrySelector:
             "feature_adoption": {
                 "environment_distribution": env_dist,
                 "command_usage": agg.command_usage,
+                "alias_usage": getattr(agg, "alias_usage", {}) or {},
                 "integration_usage": agg.integration_usage,
                 "typos_usage": agg.typos_usage,
             },
@@ -502,7 +503,7 @@ class TelemetrySelector:
             for cmd, count in snapshot.command_executions.items():
                 raw_cmd_counter[cmd] += count
 
-        canonical_usage, _, typos_usage = process_command_executions(raw_cmd_counter)
+        canonical_usage, _, typos_usage, alias_usage = process_command_executions(raw_cmd_counter)
 
         total_cmds = sum(canonical_usage.values())
         command_share = {
@@ -642,6 +643,7 @@ class TelemetrySelector:
             "feature_adoption": {
                 "environment_distribution": env_dist,
                 "command_usage": canonical_usage,
+                "alias_usage": alias_usage,
                 "integration_usage": integration_usage,
                 "typos_usage": typos_usage,
             },

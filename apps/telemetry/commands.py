@@ -11,13 +11,14 @@ _PATH_OR_BINARY_REGEX = re.compile(
 _KNOWN_COMMAND_PREFIXES = [
     "status", "secrets", "secret", "project", "projects", "workspace", "workspaces",
     "agent", "agents", "log", "logs", "env", "exec", "mcp", "call", "init",
-    "login", "logout", "docs", "environment", "environments", "allowlist", "allowlists"
+    "login", "logout", "docs", "environment", "environments", "allowlist", "allowlists",
+    "server", "servers"
 ]
 
 # Canonical top-level command domains
 CANONICAL_DOMAINS = {
     "secrets", "workspaces", "projects", "agents", "proxy", "call",
-    "env", "exec", "mcp", "status", "logs", "auth", "init", "docs", "environment"
+    "env", "exec", "mcp", "status", "logs", "login", "logout", "init", "docs", "environment", "server"
 }
 
 # Mapping from raw/aliased command names to (domain, sub_action)
@@ -175,12 +176,20 @@ COMMAND_MAP: Dict[str, Tuple[str, str]] = {
     "environment": ("environment", "general"),
     "environments": ("environment", "general"),
 
-    # ── Core & Auth ──
+    # ── Server Domain ──
+    "server": ("server", "general"),
+    "servers": ("server", "general"),
+    "server-get": ("server", "get"),
+    "server-set": ("server", "set"),
+    "server-status": ("server", "status"),
+    "server-reset": ("server", "reset"),
+
+    # ── Core, Login & Logout ──
     "status": ("status", "general"),
     "init": ("init", "general"),
-    "login": ("auth", "login"),
-    "logout": ("auth", "logout"),
-    "auth": ("auth", "general"),
+    "login": ("login", "general"),
+    "logout": ("logout", "general"),
+    "auth": ("login", "general"),
     "docs": ("docs", "general"),
     "root": ("status", "root"),
 
@@ -242,7 +251,7 @@ def classify_command(raw_name: str) -> Tuple[str, str, bool]:
 
 def process_command_executions(
     raw_executions: Dict[str, int]
-) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]], Dict[str, int]]:
+) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]], Dict[str, int], Dict[str, int]]:
     """
     Processes a dictionary of raw command execution counts.
 
@@ -250,13 +259,15 @@ def process_command_executions(
       1. canonical_totals: Dict[str, int] (e.g. {"secrets": 2589, "env": 295034, ...})
       2. hierarchical_breakdown: Dict[str, Dict[str, int]] (e.g. {"secrets": {"total": 2589, "actions": {"list": 58, "set": 4, ...}}})
       3. sanitized_typos: Dict[str, int] (e.g. {"secres": 1, "statut": 1, ...})
+      4. alias_usage: Dict[str, int] (e.g. {"list-secrets": 39, "set-secret": 14, ...})
     """
     if not raw_executions or not isinstance(raw_executions, dict):
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     canonical_totals: Dict[str, int] = {}
     hierarchical_breakdown: Dict[str, Dict[str, int]] = {}
     sanitized_typos: Dict[str, int] = {}
+    alias_usage: Dict[str, int] = {}
 
     for raw_cmd, count in raw_executions.items():
         if not count or count <= 0:
@@ -265,6 +276,8 @@ def process_command_executions(
         domain, action, is_typo = classify_command(raw_cmd)
         if not domain:
             continue
+
+        cleaned = sanitize_raw_command_name(raw_cmd).lower()
 
         if is_typo:
             sanitized_typos[action] = sanitized_typos.get(action, 0) + count
@@ -279,4 +292,8 @@ def process_command_executions(
                 hierarchical_breakdown[domain]["actions"].get(action, 0) + count
             )
 
-    return canonical_totals, hierarchical_breakdown, sanitized_typos
+            # Record alias/shortcut invocations (verb-noun forms like list-secrets, set-secret, or generic verbs)
+            if cleaned != domain and (action != "general" or "-" in cleaned or cleaned in {"list", "get", "set", "pull", "push", "diff", "use", "sync"}):
+                alias_usage[cleaned] = alias_usage.get(cleaned, 0) + count
+
+    return canonical_totals, hierarchical_breakdown, sanitized_typos, alias_usage

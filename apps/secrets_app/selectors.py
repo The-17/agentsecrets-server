@@ -24,6 +24,7 @@ class ProjectSelector:
             "workspace_name": project.workspace.name,
             "name": project.name,
             "description": project.description or "",
+            "total_secrets": getattr(project, "total_secrets_cnt", 0),
         }
 
     @staticmethod
@@ -101,6 +102,7 @@ class ProjectSelector:
         )
         if workspace_id:
             qs = qs.filter(workspace_id=workspace_id)
+        qs = qs.annotate(total_secrets_cnt=Count("secrets"))
         projects: list[dict[str, Any]] = []
         async for p in qs.select_related("workspace"):
             projects.append(ProjectSelector.project_data(p))

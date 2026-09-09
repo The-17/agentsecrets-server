@@ -193,3 +193,59 @@ class TelemetryEndpointTests(TestCase):
             )
             self.assertEqual(response.status_code, 200)
             mock_call_command.assert_called_once_with("calculate_metrics")
+
+    def test_command_classification_and_alias_usage(self):
+        """Verify server, login, logout, and alias_usage classification and endpoint presentation."""
+        from apps.telemetry.commands import process_command_executions
+
+        raw_commands = {
+            "login": 10,
+            "logout": 2,
+            "server": 5,
+            "list-secrets": 8,
+            "pull-secrets": 3,
+            "create-project": 4,
+            "secrets": 20,
+            "bad_cmd": 1,
+        }
+
+        canonical, hierarchical, typos, aliases = process_command_executions(raw_commands)
+
+        # 1. Verify domains
+        self.assertIn("login", canonical)
+        self.assertEqual(canonical["login"], 10)
+        self.assertIn("logout", canonical)
+        self.assertEqual(canonical["logout"], 2)
+        self.assertIn("server", canonical)
+        self.assertEqual(canonical["server"], 5)
+        self.assertNotIn("auth", canonical)
+
+        # 2. Verify server is NOT in typos
+        self.assertNotIn("server", typos)
+        self.assertIn("bad_cmd", typos)
+
+        # 3. Verify aliases are tracked
+        self.assertEqual(aliases.get("list-secrets"), 8)
+        self.assertEqual(aliases.get("pull-secrets"), 3)
+        self.assertEqual(aliases.get("create-project"), 4)
+        self.assertNotIn("secrets", aliases)
+
+        # 4. Verify endpoint includes alias_usage
+        DailyMetricsAggregate.objects.create(
+            date=timezone.now().date(),
+            total_users=10,
+            total_proxy_calls=10,
+            command_usage=canonical,
+            alias_usage=aliases,
+            typos_usage=typos,
+            integration_usage={"env": 2},
+            environment_distribution={"development": 10},
+        )
+
+        response = self.client.get("/telemetry/metrics/")
+        self.assertEqual(response.status_code, 200)
+        fa = response.json()["data"]["feature_adoption"]
+        self.assertIn("alias_usage", fa)
+        self.assertEqual(fa["alias_usage"]["list-secrets"], 8)
+        self.assertEqual(fa["command_usage"]["server"], 5)
+        self.assertNotIn("server", fa["typos_usage"])

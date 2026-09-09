@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -16,6 +17,9 @@ from apps.workspaces.models import (
     WorkspaceActivityLog,
     ForensicAuditLogEntry,
     AuditLogEntry,
+    AgentRegistration,
+    AgentToken,
+    IdentityLevel,
 )
 
 
@@ -342,3 +346,297 @@ class UnifiedEnterpriseLoggingTests(TestCase):
         self.assertEqual(len(logs_cli), 1)
         self.assertEqual(logs_cli[0]["source"], "cli")
 
+
+
+class WorkloadEnvRevocationAndBillingMirrorTests(TestCase):
+    """Phase C: revoked tokens must not receive env secrets; billing detach is
+    resolver-confirmed only (server never self-asserts Pro)."""
+
+    def setUp(self):
+        super().setUp()
+        import hashlib
+
+        self.owner = User.objects.create_user(
+            email="env_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Env",
+            last_name="Owner",
+        )
+        self.auth_headers = {
+            "HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.owner).access_token}"
+        }
+        self.ws = Workspace.objects.create(
+            name="Env Workspace",
+            owner=self.owner,
+            type=WorkspaceType.SHARED,
+        )
+        Membership.objects.create(
+            user=self.owner,
+            workspace=self.ws,
+            role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="dummy",
+        )
+        self.agent = AgentRegistration.objects.create(
+            workspace=self.ws, name="env-bot", created_by=self.owner
+        )
+        self.raw_token = "agt_env_live_secret_abcdef123456"
+        self.token = AgentToken.objects.create(
+            registration=self.agent,
+            workspace=self.ws,
+            token_hash=hashlib.sha256(self.raw_token.encode()).hexdigest(),
+            label="env-token",
+        )
+
+    def _env_call(self):
+        return self.client.post(
+            "/api/workloads/env/",
+            data={},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.raw_token}",
+        )
+
+    def test_revoked_token_rejected_on_env_endpoint(self):
+        # Valid token reaches the token-lookup (200 path; no secrets in workspace so empty map)
+        resp = self._env_call()
+        self.assertEqual(resp.status_code, 200)
+
+        # Revoke the token; env delivery must now be refused (403 from
+        # AuthorizationError — "Invalid or revoked workload token").
+        self.token.revoked_at = timezone.now()
+        self.token.save(update_fields=["revoked_at"])
+
+        resp = self._env_call()
+        self.assertEqual(resp.status_code, 403)
+
+    def test_initialize_reserves_id_without_detaching(self):
+        init = self.client.post(
+            f"/api/workspaces/{self.ws.id}/billing/initialize/",
+            content_type="application/json",
+            **self.auth_headers,
+        )
+        self.assertEqual(init.status_code, 200)
+        billing_id = init.json()["data"]["billing_id"]
+        self.assertTrue(billing_id.startswith("ws_bill_"))
+
+        self.ws.refresh_from_db()
+        # Reserving an id must NOT detach: tier stays free so the workspace still
+        # draws the owner pool (the anti-abuse invariant).
+        self.assertEqual(self.ws.billing_id, billing_id)
+        self.assertEqual(self.ws.tier, "free")
+        self.assertEqual(self.ws.effective_billing_id, self.owner.billing_id)
+
+    def test_reconcile_does_not_self_assert_pro(self):
+        # Even if an admin calls reconcile with no resolver confirmation, the
+        # workspace must NOT flip to pro. RESOLVER_URL is unreachable here, so the
+        # reconcile returns a non-pro status and leaves tier free.
+        from django.test import override_settings
+
+        init = self.client.post(
+            f"/api/workspaces/{self.ws.id}/billing/initialize/",
+            content_type="application/json",
+            **self.auth_headers,
+        )
+        self.assertEqual(init.status_code, 200)
+
+        with override_settings(RESOLVER_URL="http://127.0.0.1:1"):
+            rec = self.client.post(
+                f"/api/workspaces/{self.ws.id}/billing/reconcile/",
+                content_type="application/json",
+                **self.auth_headers,
+            )
+        self.assertEqual(rec.status_code, 200)
+        data = rec.json()["data"]
+        self.assertEqual(data["tier"], "free")
+
+        self.ws.refresh_from_db()
+        self.assertEqual(self.ws.tier, "free")
+
+
+class AuditIngestWorkspaceBindingTests(TestCase):
+    """Phase C-4: audit/forensic ingest must be scoped to the caller's own workspaces
+    on EVERY auth path (user JWT and agent token), not just the agent-token path."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="binding_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Binding",
+            last_name="Owner",
+        )
+        self.foreign_ws = Workspace.objects.create(
+            name="Foreign Workspace", owner=self.owner, type=WorkspaceType.SHARED
+        )
+        self.my_ws = Workspace.objects.create(
+            name="My Workspace", owner=self.owner, type=WorkspaceType.SHARED
+        )
+        Membership.objects.create(
+            user=self.owner, workspace=self.my_ws,
+            role=MembershipRole.OWNER, status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="k",
+        )
+        self.stranger = User.objects.create_user(
+            email="binding_stranger@example.com",
+            password="SecurePassword123!",
+            first_name="Binding",
+            last_name="Stranger",
+        )
+        self.owner_headers = {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.owner).access_token}"}
+        self.stranger_headers = {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.stranger).access_token}"}
+
+    def _audit_payload(self, ws_id):
+        return [{
+            "workspace_id": str(ws_id),
+            "timestamp": timezone.now().isoformat(),
+            "identity_level": "issued",
+            "credential_ref": "k",
+            "injection_style": "bearer",
+            "target_domain": "api.stripe.com",
+            "target_url": "https://api.stripe.com/v1/charges",
+            "method": "POST",
+            "status_code": 200,
+            "duration_ms": 5,
+            "resolution_path": "cloud",
+            "source": "cloud",
+        }]
+
+    def test_user_cannot_ingest_into_unowned_workspace(self):
+        # Owner is NOT a member of foreign_ws (no membership row), so ingest claiming it is dropped.
+        res = self.client.post(
+            "/api/internal/audit/logs/",
+            data=self._audit_payload(self.foreign_ws.id),
+            content_type="application/json",
+            **self.owner_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["created_count"], 0)
+        self.assertFalse(
+            AuditLogEntry.objects.filter(workspace_id=self.foreign_ws.id).exists()
+        )
+
+    def test_member_can_ingest_into_own_workspace(self):
+        res = self.client.post(
+            "/api/internal/audit/logs/",
+            data=self._audit_payload(self.my_ws.id),
+            content_type="application/json",
+            **self.owner_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["created_count"], 1)
+        self.assertTrue(AuditLogEntry.objects.filter(workspace_id=self.my_ws.id).exists())
+
+    def test_stranger_with_no_membership_cannot_ingest_anywhere(self):
+        res = self.client.post(
+            "/api/internal/audit/logs/",
+            data=self._audit_payload(self.foreign_ws.id),
+            content_type="application/json",
+            **self.stranger_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["created_count"], 0)
+
+
+class ForensicChainTamperTests(TestCase):
+    """Phase C-5: replay verification must catch tampering. The server recomputes
+    the content + linkage hashes from stored fields; editing any block flips the
+    verified flag to False."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="chain_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Chain",
+            last_name="Owner",
+        )
+        self.ws = Workspace.objects.create(name="Chain WS", owner=self.owner, type=WorkspaceType.SHARED)
+        Membership.objects.create(
+            user=self.owner, workspace=self.ws,
+            role=MembershipRole.OWNER, status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="k",
+        )
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.owner).access_token}"}
+
+    def _ingest(self):
+        payload = [{
+            "id": "flog_chain_tamper_001",
+            "workspace_id": str(self.ws.id),
+            "stream_id": "stream_tamper",
+            "stream_seq": 1,
+            "prev_chain_hash": "genesis_block",
+            "event": {"type": "proxy_call", "key_name": "STRIPE_KEY", "domain": "api.stripe.com"},
+            "snapshot": {"workspace": {"id": str(self.ws.id)}},
+            "enforcement": {"decision": "permitted", "decided_by": "allowlist"},
+            "resolution": {"credential_injected": True, "response_status": 200},
+        }]
+        return self.client.post("/api/internal/forensic/logs/", data=payload, content_type="application/json", **self.headers)
+
+    def _replay(self, log_id="flog_chain_tamper_001"):
+        return self.client.get(f"/api/forensic/logs/{log_id}/replay/", **self.headers)
+
+    def test_genuine_record_verifies(self):
+        res = self._ingest()
+        self.assertEqual(res.status_code, 201)
+        replay = self._replay()
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json()["data"]["verified"])
+
+    def test_tampered_content_flips_verified(self):
+        self._ingest()
+        log = ForensicAuditLogEntry.objects.get(id="flog_chain_tamper_001")
+        # Tamper with the stored decision content directly (as a DB-level edit would).
+        log.event_json = {"type": "proxy_call", "key_name": "EVIL_KEY", "domain": "evil.example"}
+        log.save(update_fields=["event_json"])
+
+        replay = self._replay()
+        self.assertEqual(replay.status_code, 200)
+        self.assertFalse(replay.json()["data"]["verified"])
+
+
+class AuditExportPaginationTests(TestCase):
+    """Phase C-6: export must be keyset-paginated with a hard cap and explicit fields."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="export_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Export",
+            last_name="Owner",
+        )
+        self.ws = Workspace.objects.create(name="Export WS", owner=self.owner, type=WorkspaceType.SHARED)
+        Membership.objects.create(
+            user=self.owner, workspace=self.ws,
+            role=MembershipRole.OWNER, status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="k",
+        )
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.owner).access_token}"}
+        # Seed a batch of audit rows with distinct timestamps so keyset pagination
+        # order is deterministic.
+        from datetime import timedelta
+        base_ts = timezone.now()
+        for i in range(60):
+            AuditLogEntry.objects.create(
+                workspace_id=self.ws.id,
+                timestamp=base_ts - timedelta(minutes=i),
+                identity_level=IdentityLevel.ISSUED,
+                credential_ref=f"k{i}",
+                injection_style="bearer",
+                target_domain="api.stripe.com",
+                target_url="https://api.stripe.com/v1/charges",
+                method="POST",
+                status_code=200,
+                duration_ms=5,
+                resolution_path="cloud",
+                source="cloud",
+            )
+
+    def test_export_streams_all_rows_without_duplication(self):
+        from django.test import Client
+        resp = self.client.get(f"/api/audit/export/?workspace_id={self.ws.id}", **self.headers)
+        self.assertEqual(resp.status_code, 200)
+        lines = [ln for ln in resp.streaming_content if ln.strip()]
+        self.assertEqual(len(lines), 60)
+        ids = {json.loads(ln)["id"] for ln in lines}
+        self.assertEqual(len(ids), 60)

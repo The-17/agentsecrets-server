@@ -515,3 +515,44 @@ class SecretService:
         secret.policy = policy
         await secret.asave(update_fields=["policy", "updated_at"])
         return secret.policy or {}
+
+    @staticmethod
+    async def clean_environment(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        environment: str,
+    ) -> int:
+        project, role = await ProjectSelector.resolve_secret_project_and_role(
+            user=user, project_id=project_id
+        )
+        if role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
+            raise AuthorizationError("Only workspace owners and admins can clean an environment")
+        SecretSelector.validate_env(environment)
+
+        @sync_to_async
+        def _execute_clean():
+            with transaction.atomic():
+                qs = Secret.objects.filter(project=project, environment=environment)
+                count = qs.count()
+                qs.delete()
+                return count
+
+        deleted_count = await _execute_clean()
+
+        await ActivityLogService.record(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            actor=user,
+            actor_email=user.email,
+            action="environment.cleaned",
+            target_type="environment",
+            target_id=f"{project.id}:{environment}",
+            target_name=f"{project.name}:{environment}",
+            metadata={"environment": environment, "deleted_count": deleted_count},
+            source="api",
+        )
+        logger.warning(
+            f"ENVIRONMENT_CLEANED: Cleaned {deleted_count} secrets from project '{project.name}' ({project.id}) env '{environment}'"
+        )
+        return deleted_count

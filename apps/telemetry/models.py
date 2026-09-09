@@ -211,6 +211,10 @@ class DailyMetricsAggregate(models.Model):
         default=dict,
         help_text="Aggregated command usage across all users for this day"
     )
+    alias_usage = models.JSONField(
+        default=dict,
+        help_text="Aggregated alias and shortcut usage across all users for this day"
+    )
 
     # Environment distribution
     environment_distribution = models.JSONField(
