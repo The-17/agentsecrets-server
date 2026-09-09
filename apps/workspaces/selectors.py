@@ -204,6 +204,7 @@ class AgentSelector:
             "active_token_count": getattr(agent, "active_token_count", 0),
             "last_used_at": last_used.isoformat() if last_used else None,
             "created_at": agent.created_at.isoformat(),
+            "capabilities": agent.capabilities or {},
         }
 
     @staticmethod
@@ -293,6 +294,7 @@ class AgentSelector:
             data.append({
                 "id": str(t.id),
                 "label": t.label,
+                "environment": getattr(t, "environment", None) or "",
                 "expires_at": t.expires_at.isoformat() if t.expires_at else None,
                 "revoked_at": t.revoked_at.isoformat() if t.revoked_at else None,
                 "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
@@ -494,6 +496,15 @@ class WorkloadSelector:
 
         registration = token.registration
         workspace = registration.workspace
+
+        # Least privilege: env delivery returns REAL credentials, so it requires an
+        # explicit can_env_read grant. Absent/false → refuse. This is the server's
+        # authoritative gate; the resolver mirrors the same default on its side.
+        caps = registration.capabilities or {}
+        can_env_read = caps.get("can_env_read", False)
+        if can_env_read is not True and can_env_read not in ("true", "1", "yes"):
+            raise AuthorizationError("Workload token lacks can_env_read capability; environment delivery is not permitted")
+
         env_name = env_override or getattr(token, "environment", None) or getattr(registration, "environment", None) or "production"
 
         # Best-effort usage reporting ONLY — the server is not a billing authority.

@@ -378,7 +378,8 @@ class WorkloadEnvRevocationAndBillingMirrorTests(TestCase):
             encrypted_workspace_key="dummy",
         )
         self.agent = AgentRegistration.objects.create(
-            workspace=self.ws, name="env-bot", created_by=self.owner
+            workspace=self.ws, name="env-bot", created_by=self.owner,
+            capabilities={"can_env_read": True, "can_proxy_resolve": True},
         )
         self.raw_token = "agt_env_live_secret_abcdef123456"
         self.token = AgentToken.objects.create(
@@ -407,6 +408,29 @@ class WorkloadEnvRevocationAndBillingMirrorTests(TestCase):
         self.token.save(update_fields=["revoked_at"])
 
         resp = self._env_call()
+        self.assertEqual(resp.status_code, 403)
+
+    def test_env_delivery_denied_without_can_env_read(self):
+        # Least privilege: an agent lacking can_env_read must NOT receive real
+        # credentials even with a valid, un-revoked token.
+        import hashlib as _hashlib
+        no_env_agent = AgentRegistration.objects.create(
+            workspace=self.ws, name="proxy-only", created_by=self.owner,
+            capabilities={"can_proxy_resolve": True, "can_env_read": False},
+        )
+        raw = "agt_env_denied_secret_xyz789"
+        AgentToken.objects.create(
+            registration=no_env_agent,
+            workspace=self.ws,
+            token_hash=_hashlib.sha256(raw.encode()).hexdigest(),
+            label="denied-env",
+        )
+        resp = self.client.post(
+            "/api/workloads/env/",
+            data={},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {raw}",
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_initialize_reserves_id_without_detaching(self):
@@ -640,3 +664,65 @@ class AuditExportPaginationTests(TestCase):
         self.assertEqual(len(lines), 60)
         ids = {json.loads(ln)["id"] for ln in lines}
         self.assertEqual(len(ids), 60)
+
+
+class BillingAuthorizeTests(TestCase):
+    """Phase D-3: the resolver's billing routes must be token-bound. This tests the
+    control-plane authorize endpoint that binds a billing_id to a verified identity."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="billowner@example.com", password="SecurePassword123!",
+            first_name="Bill", last_name="Owner",
+        )
+        self.admin = User.objects.create_user(
+            email="billadmin@example.com", password="SecurePassword123!",
+            first_name="Bill", last_name="Admin",
+        )
+        self.stranger = User.objects.create_user(
+            email="billstranger@example.com", password="SecurePassword123!",
+            first_name="Bill", last_name="Stranger",
+        )
+        # Free shared workspace: bills against the owner's personal (pooled) account.
+        self.ws = Workspace.objects.create(name="Bill WS", owner=self.owner, type=WorkspaceType.SHARED)
+        Membership.objects.create(user=self.owner, workspace=self.ws, role=MembershipRole.OWNER,
+                                  status=MembershipStatus.ACTIVE, encrypted_workspace_key="k_owner")
+        Membership.objects.create(user=self.admin, workspace=self.ws, role=MembershipRole.ADMIN,
+                                  status=MembershipStatus.ACTIVE, encrypted_workspace_key="k_admin")
+        self.headers = lambda u: {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(u).access_token}"}
+
+    def _authorize(self, user, billing_id):
+        return self.client.post("/api/internal/billing/authorize/",
+                                data=json.dumps({"billing_id": billing_id}),
+                                content_type="application/json", **self.headers(user))
+
+    def test_owner_authorized_on_pooled_effective_id(self):
+        resp = self._authorize(self.owner, self.owner.billing_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["authorized"])
+
+    def test_admin_denied_on_owner_pool_id(self):
+        # Admin of a free shared workspace must NOT manage the owner's personal account.
+        resp = self._authorize(self.admin, self.owner.billing_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["authorized"])
+
+    def test_admin_authorized_on_workspace_own_reserved_id(self):
+        # Admin may manage the workspace's own reserved/detached ws_bill_ id.
+        self.ws.billing_id = "ws_bill_test_reserved_admin"
+        self.ws.save(update_fields=["billing_id"])
+        resp = self._authorize(self.admin, "ws_bill_test_reserved_admin")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["authorized"])
+
+    def test_stranger_denied(self):
+        resp = self._authorize(self.stranger, self.owner.billing_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["authorized"])
+
+    def test_no_credential_rejected(self):
+        resp = self.client.post("/api/internal/billing/authorize/",
+                                data=json.dumps({"billing_id": self.owner.billing_id}),
+                                content_type="application/json")
+        self.assertEqual(resp.status_code, 401)

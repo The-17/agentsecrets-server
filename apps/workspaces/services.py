@@ -428,6 +428,12 @@ class AgentService:
                 kwargs = {"workspace_id": workspace_id, "name": payload.name, "created_by": user}
                 if project_id:
                     kwargs["project_id"] = project_id
+                # Least privilege: persist only the explicitly granted capabilities.
+                # When none are supplied, default to proxy-only (env-read is denied).
+                caps = dict(payload.capabilities or {})
+                caps.setdefault("can_proxy_resolve", True)
+                caps.setdefault("can_env_read", False)
+                kwargs["capabilities"] = caps
                 agent = AgentRegistration.objects.create(**kwargs)
                 token = AgentToken.objects.create(
                     registration=agent,

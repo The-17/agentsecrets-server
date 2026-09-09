@@ -110,6 +110,7 @@ class AgentCreateSchema(Schema):
     name: str
     label: Optional[str] = None
     expires_in_days: Optional[int] = None
+    capabilities: Optional[Dict[str, Any]] = None
 
 
 class AgentTokenCreateSchema(Schema):
@@ -246,6 +247,16 @@ class AgentVerifyResponseSchema(Schema):
     token_id: Optional[str] = None
     billing_id: Optional[str] = None
     allowlist: Optional[List[str]] = None
+
+
+class InternalBillingAuthorizeRequest(Schema):
+    billing_id: str
+
+
+class InternalBillingAuthorizeResponse(Schema):
+    authorized: bool
+    workspace_id: Optional[str] = None
+    role: Optional[str] = None
 
 
 class AuditLogItemSchema(Schema):

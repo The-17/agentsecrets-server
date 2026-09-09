@@ -37,6 +37,8 @@ from .schemas import (
     AgentTokenItemSchema,
     AgentTokenCreatedResponseDataSchema,
     AgentVerifyResponseSchema,
+    InternalBillingAuthorizeRequest,
+    InternalBillingAuthorizeResponse,
     AuditLogItemSchema,
     AuditSummaryResponseSchema,
     WorkspaceActivityItemSchema,
@@ -499,6 +501,83 @@ class ResolverController:
         auth_caller = getattr(request, "auth", None)
         result = await AgentService.verify_agent_token(auth_caller=auth_caller, data=payload)
         return result
+
+    @route.post("/billing/authorize/", response={200: InternalBillingAuthorizeResponse, 401: ErrorResponse}, auth=None)
+    async def authorize_billing(self, request):
+        """Token-bound billing authorization for the cloud resolver.
+
+        The caller presents a credential that the server can verify — a user JWT
+        (website session) or an agent token. The server returns whether that
+        identity is an owner/admin of a workspace whose effective_billing_id
+        matches the requested billing_id. This lets the resolver authorize billing
+        operations with zero shared secret: it never trusts a bare billing_id on
+        its own, it asks the control plane to bind the id to a verified identity.
+        """
+        try:
+            body = json.loads(request.body) if request.body else {}
+        except Exception:
+            body = {}
+        payload = InternalBillingAuthorizeRequest(**body)
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+        if not bearer_token:
+            return 401, {"status": "error", "message": "Unauthorized: Bearer credential required"}
+
+        user = await sync_to_async(InternalOrUserAuth().authenticate)(request, bearer_token)
+
+        # Workload token path: authorize only the token's own workspace billing id.
+        if not isinstance(user, User):
+            import hashlib
+            from .models import AgentToken
+            from django.db.models import Q
+            token_hash = hashlib.sha256(bearer_token.encode()).hexdigest()
+            agent_token_auth = await AgentToken.objects.select_related(
+                "registration", "registration__workspace", "registration__workspace__owner"
+            ).filter(
+                Q(token_hash=token_hash) | Q(id=bearer_token),
+                revoked_at__isnull=True,
+            ).afirst()
+            if not agent_token_auth:
+                return 401, {"status": "error", "message": "Unauthorized: invalid credential"}
+            ws = agent_token_auth.workspace
+            if str(ws.effective_billing_id) == payload.billing_id:
+                return 200, {
+                    "authorized": True,
+                    "workspace_id": str(ws.id),
+                    "role": "agent",
+                }
+            return 200, {"authorized": False}
+
+        # User (JWT/session) path: owner/admin may manage a workspace's OWN
+        # reserved/detached ws_bill_* id (upgrade path, before the tier flips). The
+        # pooled effective id (which falls back to the OWNER's personal account for
+        # free workspaces) is manageable only by that workspace's OWNER — an admin
+        # must not reach the owner's personal billing via a shared free workspace.
+        from .models import Membership, MembershipRole, MembershipStatus
+        memberships = Membership.objects.filter(
+            user=user,
+            status=MembershipStatus.ACTIVE,
+            role__in=[MembershipRole.OWNER, MembershipRole.ADMIN],
+        ).select_related("workspace", "workspace__owner")
+        async for m in memberships:
+            own_billing_id = str(m.workspace.billing_id or "")
+            effective_billing_id = str(m.workspace.effective_billing_id)
+            if own_billing_id == payload.billing_id:
+                # A workspace's own dedicated id is manageable by owner OR admin.
+                return 200, {
+                    "authorized": True,
+                    "workspace_id": str(m.workspace_id),
+                    "role": m.role,
+                }
+            if effective_billing_id == payload.billing_id and m.role == MembershipRole.OWNER:
+                # The pooled id is the owner's personal account; only the owner.
+                return 200, {
+                    "authorized": True,
+                    "workspace_id": str(m.workspace_id),
+                    "role": m.role,
+                }
+        return 200, {"authorized": False}
 
     @route.post("/audit/logs/", response={201: dict, 401: dict, 429: dict}, auth=None)
     async def create_audit_logs(self, request):
