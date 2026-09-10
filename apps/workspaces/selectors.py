@@ -694,3 +694,68 @@ class ForensicLogSelector:
             "verified": verified,
         }
 
+
+
+class CloudSyncSelector:
+    """Builds the control-plane → resolver workspace sync payload (spec 14).
+
+    Returns the active delegation (so the resolver knows which CEDK private key
+    unseals the DEK), the allowlist, and every secret as its Fernet-unwrapped
+    DEK-ciphertext. The server strips only its OWN envelope; the value stays
+    AES-GCM-encrypted under the workspace DEK, so the resolver (which holds the
+    DEK via CEDK) performs the final decrypt. Plaintext never leaves the client.
+    """
+
+    @staticmethod
+    async def build_sync_payload(*, workspace_id: uuid.UUID) -> dict[str, Any]:
+        from .models import CloudDelegationKey, WorkspaceAllowlist
+        from apps.common.services.encryption import EncryptionService
+        from apps.secrets_app.models import Secret
+
+        # 1. Active delegation (single active resolver registration per workspace).
+        delegation = await CloudDelegationKey.objects.filter(
+            workspace_id=workspace_id, is_active=True
+        ).afirst()
+        sealed_workspace_key = delegation.sealed_workspace_key if delegation else None
+        delegation_public_key = delegation.public_key if delegation else None
+
+        # 2. Allowlist domains.
+        allowlist = [d async for d in WorkspaceAllowlist.objects.filter(
+            workspace_id=workspace_id
+        ).values_list("domain", flat=True)]
+
+        # 3. Secrets across all projects in the workspace. Fernet-unwrap so the
+        #    value is the client's DEK-AES-GCM ciphertext ([12B nonce][ct+16B tag]).
+        secrets: list[dict[str, Any]] = []
+        latest = None
+        async for s in Secret.objects.filter(project__workspace_id=workspace_id).select_related("project"):
+            try:
+                dek_ciphertext = EncryptionService.decrypt(s.value)
+            except Exception as exc:
+                logger.warning("SYNC_SKIP: could not unwrap secret %s/%s: %s", s.project_id, s.key, exc)
+                continue
+            secrets.append({
+                "project_id": str(s.project_id),
+                "project_name": s.project.name,
+                "environment": s.environment,
+                "key": s.key,
+                "value": dek_ciphertext,
+                "policy": s.policy or {},
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            })
+            if s.updated_at and (latest is None or s.updated_at > latest):
+                latest = s.updated_at
+
+        # 4. Version watermark: max updated_at across delegation/allowlist/secrets.
+        if delegation and delegation.updated_at and (latest is None or delegation.updated_at > latest):
+            latest = delegation.updated_at
+
+        return {
+            "workspace_id": str(workspace_id),
+            "version": latest.isoformat() if latest else None,
+            "sealed_workspace_key": sealed_workspace_key,
+            "public_key": delegation_public_key,
+            "has_delegation": bool(delegation),
+            "allowlist": allowlist,
+            "secrets": secrets,
+        }

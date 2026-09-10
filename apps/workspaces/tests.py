@@ -726,3 +726,137 @@ class BillingAuthorizeTests(TestCase):
                                 data=json.dumps({"billing_id": self.owner.billing_id}),
                                 content_type="application/json")
         self.assertEqual(resp.status_code, 401)
+
+
+class CloudDelegationEndpointTests(TestCase):
+    """Phase B-1: CEDK delegation endpoints must not NameError → 500. The
+    CloudDelegationSelector/CloudDelegationService imports were missing, so all
+    three routes raised at call time."""
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="deleg_owner@example.com", password="SecurePassword123!",
+            first_name="Deleg", last_name="Owner",
+        )
+        self.ws = Workspace.objects.create(name="Deleg WS", owner=self.owner, type=WorkspaceType.SHARED)
+        Membership.objects.create(
+            user=self.owner, workspace=self.ws, role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE, encrypted_workspace_key="k",
+        )
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {RefreshToken.for_user(self.owner).access_token}"}
+        self.url = f"/api/workspaces/{self.ws.id}/delegation/"
+
+    def test_get_delegation_returns_200(self):
+        resp = self.client.get(self.url, **self.headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["workspace_id"], str(self.ws.id))
+        self.assertIn("public_key", data)
+        self.assertIn("has_sealed_key", data)
+
+    def test_save_and_get_delegation_roundtrip(self):
+        pub = "a" * 64
+        sealed = "b" * 64
+        save = self.client.post(self.url, data=json.dumps({
+            "resolver_name": "default", "public_key": pub, "sealed_workspace_key": sealed,
+        }), content_type="application/json", **self.headers)
+        self.assertEqual(save.status_code, 200)
+
+        get = self.client.get(self.url, **self.headers)
+        self.assertEqual(get.status_code, 200)
+        data = get.json()["data"]
+        self.assertTrue(data["has_sealed_key"])
+        self.assertTrue(data["is_active"])
+
+    def test_revoke_delegation(self):
+        pub = "c" * 64
+        self.client.post(self.url, data=json.dumps({
+            "resolver_name": "default", "public_key": pub, "sealed_workspace_key": "d" * 64,
+        }), content_type="application/json", **self.headers)
+        rev = self.client.delete(self.url, **self.headers)
+        self.assertEqual(rev.status_code, 200)
+        get = self.client.get(self.url, **self.headers)
+        self.assertFalse(get.json()["data"]["is_active"])
+
+
+class WorkspaceSyncContractTests(TestCase):
+    """Phase B-2: control-plane → resolver sync contract. Token-bound, delivers
+    the CEDK delegation, allowlist, and secret DEK-ciphertext (server unwraps its
+    own Fernet envelope only)."""
+
+    def setUp(self):
+        super().setUp()
+        import hashlib as _hashlib
+        from apps.secrets_app.models import Project, Secret
+        from apps.common.services.encryption import EncryptionService
+
+        self.owner = User.objects.create_user(
+            email="sync_owner@example.com", password="SecurePassword123!",
+            first_name="Sync", last_name="Owner",
+        )
+        self.ws = Workspace.objects.create(name="Sync WS", owner=self.owner, type=WorkspaceType.SHARED)
+        Membership.objects.create(user=self.owner, workspace=self.ws, role=MembershipRole.OWNER,
+                                  status=MembershipStatus.ACTIVE, encrypted_workspace_key="k")
+        self.agent = AgentRegistration.objects.create(workspace=self.ws, name="sync-bot", created_by=self.owner)
+        self.raw = "agt_sync_workspace_token_abcdef"
+        AgentToken.objects.create(
+            registration=self.agent, workspace=self.ws,
+            token_hash=_hashlib.sha256(self.raw.encode()).hexdigest(), label="sync",
+        )
+        # Delegation + project + one secret stored as Fernet(DEK-ciphertext).
+        from apps.workspaces.models import CloudDelegationKey
+        CloudDelegationKey.objects.create(
+            workspace=self.ws, resolver_name="default",
+            public_key="a" * 64, sealed_workspace_key="c2VhbGVk", is_active=True,
+        )
+        WorkspaceAllowlist.objects.create(workspace=self.ws, domain="api.stripe.com")
+        self.project = Project.objects.create(workspace=self.ws, name="payments")
+        Secret.objects.create(
+            project=self.project, environment="production", key="STRIPE_KEY",
+            value=EncryptionService.encrypt("BASE64DEK_CIPHERTEXT_XYZ"),
+        )
+
+    def _sync(self, token, version=None):
+        url = f"/api/internal/workspaces/{self.ws.id}/sync/"
+        if version:
+            from urllib.parse import quote
+            url += f"?version={quote(str(version), safe='')}"
+        return self.client.get(url, HTTP_AUTHORIZATION=f"Bearer {token}")
+
+    def test_unauthorized_without_credential(self):
+        resp = self.client.get(f"/api/internal/workspaces/{self.ws.id}/sync/")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_sync_returns_delegation_allowlist_and_dek_ciphertext(self):
+        resp = self._sync(self.raw)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["workspace_id"], str(self.ws.id))
+        self.assertTrue(data["has_delegation"])
+        self.assertEqual(data["sealed_workspace_key"], "c2VhbGVk")
+        self.assertEqual(data["public_key"], "a" * 64)
+        self.assertIn("api.stripe.com", data["allowlist"])
+        # Secret value must be the server's Fernet-UNWRAPPED payload (DEK-ciphertext),
+        # never the double-wrapped stored form.
+        keys = {s["key"]: s["value"] for s in data["secrets"]}
+        self.assertEqual(keys["STRIPE_KEY"], "BASE64DEK_CIPHERTEXT_XYZ")
+
+    def test_cross_workspace_token_rejected(self):
+        other_ws = Workspace.objects.create(name="Other", owner=self.owner, type=WorkspaceType.SHARED)
+        other_agent = AgentRegistration.objects.create(workspace=other_ws, name="x", created_by=self.owner)
+        import hashlib as _h
+        other_raw = "agt_sync_other_workspace_token_zzz"
+        AgentToken.objects.create(
+            registration=other_agent, workspace=other_ws,
+            token_hash=_h.sha256(other_raw.encode()).hexdigest(), label="x",
+        )
+        resp = self._sync(other_raw)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_version_short_circuit(self):
+        first = self._sync(self.raw).json()
+        v = first.get("version")
+        if v:
+            again = self._sync(self.raw, version=v).json()
+            self.assertTrue(again.get("unchanged"))

@@ -51,6 +51,8 @@ from .selectors import (
     AuditSelector,
     ActivityLogSelector,
     ForensicLogSelector,
+    CloudDelegationSelector,
+    CloudSyncSelector,
 )
 from .services import (
     WorkspaceService,
@@ -60,6 +62,7 @@ from .services import (
     WorkloadService,
     ActivityLogService,
     ForensicLogService,
+    CloudDelegationService,
 )
 
 logger = logging.getLogger("apps.workspaces")
@@ -698,6 +701,54 @@ class ResolverController:
 
         created_count, ids = await ForensicLogService.ingest_forensic_logs(entries=entries)
         return 201, {"created_count": created_count, "ids": ids}
+
+    @route.get("/workspaces/{workspace_id}/sync/", response={200: dict, 401: ErrorResponse, 404: ErrorResponse}, auth=None)
+    async def sync_workspace(self, request, workspace_id: uuid.UUID):
+        """Control-plane → resolver workspace state sync (spec 14).
+
+        Token-bound, zero shared secret: the resolver presents an active agent
+        token (Bearer agt_...) belonging to the workspace it wants to sync. The
+        payload carries the active CEDK delegation (so the resolver knows which
+        private key unseals the DEK), the allowlist, and every secret as its
+        Fernet-unwrapped DEK-ciphertext. The server never sees plaintext — the
+        value stays AES-GCM-encrypted under the workspace DEK for the resolver to
+        decrypt. `version` lets the resolver short-circuit an unchanged poll.
+        """
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        # A user JWT / service key may also sync (operator tooling).
+        user = await sync_to_async(InternalOrUserAuth().authenticate)(request, token) if token else None
+
+        from .models import Membership, MembershipStatus
+        authorized = False
+        if isinstance(user, User):
+            authorized = await Membership.objects.filter(
+                user=user, workspace_id=workspace_id, status=MembershipStatus.ACTIVE
+            ).aexists()
+        elif token:
+            import hashlib
+            from .models import AgentToken
+            from django.db.models import Q
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            agent_token_auth = await AgentToken.objects.filter(
+                Q(token_hash=token_hash) | Q(id=token),
+                workspace_id=workspace_id,
+                revoked_at__isnull=True,
+            ).afirst()
+            authorized = agent_token_auth is not None
+
+        if not authorized:
+            return 401, {"status": "error", "message": "Unauthorized: valid workspace credential required"}
+
+        requested_version = request.GET.get("version")
+        payload = await CloudSyncSelector.build_sync_payload(workspace_id=workspace_id)
+
+        # Cheap short-circuit: if the caller already has this version, tell it.
+        if requested_version and payload.get("version") == requested_version:
+            return 200, {"workspace_id": str(workspace_id), "version": payload["version"], "unchanged": True}
+
+        return 200, payload
 
 
 @api_controller("/workloads", tags=["Workloads"])
