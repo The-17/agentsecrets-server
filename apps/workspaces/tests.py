@@ -560,6 +560,37 @@ class AuditIngestWorkspaceBindingTests(TestCase):
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["created_count"], 0)
 
+    def test_rfc3339_nano_timestamp_is_accepted(self):
+        # CLI emits RFC3339Nano (9 fractional digits). The flat ingest must accept
+        # it (Django's default parser rejects >6 digits).
+        payload = self._audit_payload(self.my_ws.id)
+        payload[0]["timestamp"] = "2026-09-10T18:00:00.123456789Z"
+        res = self.client.post(
+            "/api/internal/audit/logs/",
+            data=payload,
+            content_type="application/json",
+            **self.owner_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["created_count"], 1)
+
+    def test_local_env_audit_is_labeled_cli_source(self):
+        # CLI local `env` sends resolution_path="env" with no explicit source. The
+        # server must label it source="cli", NOT default it to "cloud".
+        payload = self._audit_payload(self.my_ws.id)
+        payload[0]["resolution_path"] = "env"
+        payload[0].pop("source", None)
+        res = self.client.post(
+            "/api/internal/audit/logs/",
+            data=payload,
+            content_type="application/json",
+            **self.owner_headers,
+        )
+        self.assertEqual(res.status_code, 201)
+        log = AuditLogEntry.objects.filter(workspace_id=self.my_ws.id).order_by("-recorded_at").first()
+        self.assertIsNotNone(log)
+        self.assertEqual(log.source, "cli")
+
 
 class ForensicChainTamperTests(TestCase):
     """Phase C-5: replay verification must catch tampering. The server recomputes

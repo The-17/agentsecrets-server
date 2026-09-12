@@ -11,10 +11,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 
 # Compact separators keep hashing stable regardless of any pretty-printers.
 _CANONICAL_SEPARATORS = (",", ":")
+
+# Matches sub-microsecond fractional digits (Django stores microseconds only).
+_SUBMICRO_RE = re.compile(r"^(.*\.\d{6})\d+(.*)$")
+
+
+def parse_iso_timestamp(value: str) -> datetime:
+    """Parse an ISO-8601 / RFC3339 timestamp, tolerating RFC3339 *nanosecond*
+    precision (which the stdlib and Django's default parser reject) by truncating
+    to microseconds. Uses only the standard library — no python-dateutil
+    dependency."""
+    s = value.strip()
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1] + "+00:00"
+    m = _SUBMICRO_RE.match(s)
+    if m:
+        s = m.group(1) + m.group(2)
+    return datetime.fromisoformat(s)
+
 
 
 def canonical_dumps(obj) -> str:

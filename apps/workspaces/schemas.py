@@ -111,6 +111,7 @@ class AgentCreateSchema(Schema):
     label: Optional[str] = None
     expires_in_days: Optional[int] = None
     capabilities: Optional[Dict[str, Any]] = None
+    environment: Optional[str] = None  # development | staging | production; bound to the issued token
 
 
 class AgentTokenCreateSchema(Schema):
@@ -118,6 +119,7 @@ class AgentTokenCreateSchema(Schema):
 
     label: Optional[str] = None
     expires_in_days: Optional[int] = None
+    environment: Optional[str] = None  # development | staging | production; bound to the issued token
 
 
 class AgentCapabilitiesSchema(Schema):

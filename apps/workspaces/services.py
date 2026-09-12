@@ -440,6 +440,9 @@ class AgentService:
                     workspace_id=workspace_id,
                     token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
                     label=payload.label,
+                    # Secrets are keyed by lowercase environment; normalize so a token
+                    # bound to "Production" resolves against secrets stored as "production".
+                    environment=(payload.environment or "development").strip().lower(),
                     expires_at=expires_at,
                     created_by=user,
                 )
@@ -495,6 +498,8 @@ class AgentService:
             workspace_id=workspace_id,
             token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
             label=data.label,
+            # Match create_agent_with_token: lowercase so it resolves against stored secrets.
+            environment=(data.environment or "development").strip().lower(),
             expires_at=expires_at,
             created_by=user,
         )
@@ -662,11 +667,22 @@ class AgentService:
             if "domain" in e and "target_domain" not in mapped:
                 mapped["target_domain"] = e["domain"]
 
+            # Parse the timestamp explicitly so BOTH RFC3339 microsecond and
+            # nanosecond (RFC3339Nano) forms are accepted. Django's default parser
+            # rejects >6 fractional digits, which older/newer CLIs may emit.
+            ts = mapped.get("timestamp")
+            if isinstance(ts, str) and ts:
+                from .forensic_chain import parse_iso_timestamp
+                try:
+                    mapped["timestamp"] = parse_iso_timestamp(ts)
+                except Exception:
+                    logger.warning("AUDIT_TS_PARSE: unparseable timestamp %r; using server time", ts)
+                    mapped["timestamp"] = timezone.now()
             if not mapped.get("timestamp"):
                 mapped["timestamp"] = timezone.now()
 
             if "source" not in mapped:
-                if mapped.get("resolution_path") in ("local proxy", "cli"):
+                if mapped.get("resolution_path") in ("local proxy", "cli", "env"):
                     mapped["source"] = "cli"
                 else:
                     mapped["source"] = "cloud"
@@ -906,10 +922,10 @@ class ForensicLogService:
             created_at_val = None
             ts = e.get("created_at") or e.get("timestamp")
             if ts:
-                from dateutil import parser
+                from .forensic_chain import parse_iso_timestamp
                 try:
                     if isinstance(ts, str):
-                        created_at_val = parser.isoparse(ts)
+                        created_at_val = parse_iso_timestamp(ts)
                     elif hasattr(ts, "isoformat"):
                         created_at_val = ts
                 except Exception:
