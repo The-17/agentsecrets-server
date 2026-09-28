@@ -136,6 +136,39 @@ class InternalAgentVerifySchema(Schema):
     token: str
 
 
+class TokenRotateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    overlap_hours: Optional[int] = None
+    reason: str = "routine"  # routine | compromise (compromise: zero overlap, poison family)
+
+
+class RotationPolicySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    period_days: Optional[int] = None
+    overlap_hours: Optional[int] = None
+    enabled: bool = True
+
+
+class MintSuccessorSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    token_id: Optional[str] = None
+    rotation_id: Optional[str] = None
+    reason: str = "routine"
+    overlap_hours: Optional[int] = None
+
+
+class FamilyRevokeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    family_key: str
+    reason: str = "compromise"
+
+
 # ==========================================
 # RESPONSE SCHEMAS
 # ==========================================
@@ -229,12 +262,67 @@ class AgentTokenItemSchema(Schema):
     revoked_at: Optional[str] = None
     last_used_at: Optional[str] = None
     created_at: str
+    status: str = "active"  # active | superseded_overlap | overlap_expired | revoked | expired
+    rotation_state: str = "active"
+    rotation_family_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    superseded_by: Optional[str] = None
 
 
 class AgentTokenCreatedResponseDataSchema(Schema):
     token: str
     token_id: str
     token_metadata: Dict[str, Any]
+
+
+class RotationMetadataSchema(Schema):
+    rotation_state: str
+    rotation_family_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    superseded_by: Optional[str] = None
+    rotation_due: bool = False
+
+
+class TokenRotateResponseDataSchema(Schema):
+    token: Optional[str] = None  # raw value, fresh mint only — shown exactly once
+    token_id: str
+    label: Optional[str] = None
+    expires_at: Optional[str] = None
+    created_at: str
+    rotation: RotationMetadataSchema
+
+
+class RotationPolicyResponseDataSchema(Schema):
+    id: str
+    rotation: RotationMetadataSchema
+
+
+class MintSuccessorResponseDataSchema(Schema):
+    token_id: str
+    token: Optional[str] = None  # raw value on fresh mint; absent on idempotent replay
+    replayed: bool = False
+    predecessor_overlap_until: Optional[str] = None
+    rotation: RotationMetadataSchema
+
+
+class DueRotationItemSchema(Schema):
+    family_key: str
+    token_id: str
+    workspace_id: str
+    registration_id: str
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    rotation_state: str
+
+
+class FamilyRevokeResponseDataSchema(Schema):
+    family_key: str
+    revoked_count: int
+    token_ids: List[str] = []
 
 
 class AgentVerifyResponseSchema(Schema):
@@ -248,6 +336,7 @@ class AgentVerifyResponseSchema(Schema):
     capabilities: Optional[Dict[str, Any]] = None
     token_id: Optional[str] = None
     billing_id: Optional[str] = None
+    rotation: Optional[RotationMetadataSchema] = None
     allowlist: Optional[List[str]] = None
 
 

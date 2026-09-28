@@ -182,7 +182,10 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ENCRYPTION_KEY = config("ENCRYPTION_KEY")
-RESOLVER_SERVICE_KEY = config("RESOLVER_SERVICE_KEY", default="")
+# Ed25519 public key (hex) the control plane trusts for resolver-originated
+# state-changing internal RPCs (rotation execute/family-revoke). The resolver
+# holds the private half; no shared secret exists (ADR 008).
+RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
 

@@ -1,8 +1,8 @@
 # Standard library
-import hmac
+import base64
+import hashlib
 import logging
-
-import uuid
+import time
 
 # Django
 from django.conf import settings
@@ -13,6 +13,12 @@ from ninja.security import HttpBearer
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError, AuthenticationFailed
 from rest_framework_simplejwt.settings import api_settings
+
+try:
+    from nacl.exceptions import BadSignature
+except ImportError:  # PyNaCl < 1.5 names it BadSignatureError
+    from nacl.exceptions import BadSignatureError as BadSignature
+from nacl.signing import VerifyKey
 
 from apps.accounts.models import User
 
@@ -91,33 +97,17 @@ class JWTAuth(HttpBearer):
             return None
 
 
-class ResolverServiceKeyAuth(HttpBearer):
-    """
-    Auth class for resolver-facing internal endpoints.
-    
-    Validates the Bearer token against the RESOLVER_SERVICE_KEY
-    environment variable using constant-time comparison.
-    """
-
-    def authenticate(self, request, token):
-        expected = getattr(settings, "RESOLVER_SERVICE_KEY", None)
-        if not expected:
-            return None
-        # Constant-time comparison to prevent timing attacks
-        if hmac.compare_digest(token, expected):
-            return token
-        return None
-
-
 class InternalOrUserAuth(HttpBearer):
     """
-    Combined auth class that allows BOTH ResolverServiceKeyAuth and JWTAuth.
-    Checks Resolver Service Key first, falls back to User JWT.
+    Combined auth class for internal endpoints: User JWT only.
+
+    The shared-secret ResolverServiceKeyAuth path was retired (ADR 008):
+    resolver-originated state-changing RPCs authenticate with
+    ResolverSignatureAuth (Ed25519, no shared secret) instead.
     """
 
     def __init__(self):
         super().__init__()
-        self._resolver_auth = ResolverServiceKeyAuth()
         self._jwt_auth = JWTAuth()
 
     def __call__(self, request):
@@ -126,10 +116,61 @@ class InternalOrUserAuth(HttpBearer):
         return super().__call__(request)
 
     def authenticate(self, request, token):
-        # Try Resolver Service Key first
-        res = self._resolver_auth.authenticate(request, token)
-        if res is not None:
-            return res
-
-        # Fall back to User JWT
         return self._jwt_auth.authenticate(request, token)
+
+
+class ResolverSignatureAuth(HttpBearer):
+    """
+    Authenticates resolver-originated state-changing internal RPCs
+    (rotation execute / family-revoke) with an Ed25519 request signature.
+
+    The resolver holds the private half (`RESOLVER_SIGNING_KEY`); the control
+    plane verifies against `RESOLVER_SIGNING_PUBKEY`. No shared secret exists,
+    nothing a self-hoster copies from this repo can forge, and verification
+    works through edge-terminated TLS (ADR 008).
+
+    Canonical payload: ``{timestamp}\\n{METHOD}\\n{path}\\n{sha256_hex(body)}``.
+    """
+
+    freshness_window_s = 300
+
+    def __call__(self, request):
+        # No Authorization header is involved: identity is proven by the
+        # Ed25519 signature headers alone. Bypass HttpBearer's Bearer parsing.
+        return self.authenticate(request, None)
+
+    def authenticate(self, request, token):
+        del token
+        try:
+            return self._verify(request)
+        except Exception as exc:
+            logger.warning("ResolverSignatureAuth rejected request: %s", type(exc).__name__)
+            return None
+
+    def _verify(self, request):
+        pubkey_hex = getattr(settings, "RESOLVER_SIGNING_PUBKEY", "") or ""
+        if not pubkey_hex:
+            return None
+        meta = request.META
+        key_id = meta.get("HTTP_X_RESOLVER_KEY_ID", "")
+        timestamp = meta.get("HTTP_X_RESOLVER_TIMESTAMP", "")
+        signature_b64 = meta.get("HTTP_X_RESOLVER_SIGNATURE", "")
+        if not (key_id and timestamp and signature_b64):
+            return None
+        try:
+            ts = int(timestamp)
+        except (TypeError, ValueError):
+            return None
+        if abs(time.time() - ts) > self.freshness_window_s:
+            return None
+        body = request.body or b""
+        body_hash = hashlib.sha256(body).hexdigest()
+        path = meta.get("PATH_INFO", "") or request.path
+        payload = "\n".join([timestamp, request.method.upper(), path, body_hash])
+        try:
+            verify_key = VerifyKey(bytes.fromhex(pubkey_hex))
+            signature = base64.b64decode(signature_b64)
+            verify_key.verify(signature + payload.encode())
+        except (ValueError, BadSignature):
+            return None
+        return key_id

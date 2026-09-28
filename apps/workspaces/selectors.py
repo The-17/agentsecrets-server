@@ -289,8 +289,17 @@ class AgentSelector:
         if not exists:
             raise NotFoundError("Agent not found")
 
+        now = timezone.now()
         data: list[dict[str, Any]] = []
         async for t in AgentToken.objects.filter(registration_id=registration_id):
+            if t.revoked_at or t.rotation_state == "revoked":
+                status = "revoked"
+            elif t.rotation_state == "superseded":
+                status = "superseded_overlap" if (t.overlap_until and t.overlap_until >= now) else "overlap_expired"
+            elif t.expires_at and t.expires_at < now:
+                status = "expired"
+            else:
+                status = "active"
             data.append({
                 "id": str(t.id),
                 "label": t.label,
@@ -299,8 +308,43 @@ class AgentSelector:
                 "revoked_at": t.revoked_at.isoformat() if t.revoked_at else None,
                 "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
                 "created_at": t.created_at.isoformat(),
+                "status": status,
+                "rotation_state": t.rotation_state,
+                "rotation_family_id": t.rotation_family_id,
+                "overlap_until": t.overlap_until.isoformat() if t.overlap_until else None,
+                "next_rotation_at": t.next_rotation_at.isoformat() if t.next_rotation_at else None,
+                "rotation_period_days": t.rotation_period.days if t.rotation_period else None,
+                "superseded_by": t.superseded_by,
             })
         return data
+
+    @staticmethod
+    async def get_due_token_rotations(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Rotation-armed families past their cadence (metadata only, never
+        secret material). Consumed by the resolver's Pro-gated sweep (HR-M3)."""
+        now = timezone.now()
+        due: list[dict[str, Any]] = []
+        qs = AgentToken.objects.filter(
+            workspace_id=workspace_id,
+            rotation_state="active",
+            revoked_at__isnull=True,
+            rotation_period__isnull=False,
+            next_rotation_at__lte=now,
+        ).only(
+            "id", "workspace_id", "registration_id", "rotation_family_id",
+            "rotation_period", "next_rotation_at", "rotation_state",
+        )
+        async for t in qs:
+            due.append({
+                "family_key": t.rotation_family_id or str(t.id),
+                "token_id": str(t.id),
+                "workspace_id": str(t.workspace_id),
+                "registration_id": str(t.registration_id),
+                "next_rotation_at": t.next_rotation_at.isoformat() if t.next_rotation_at else None,
+                "rotation_period_days": t.rotation_period.days if t.rotation_period else None,
+                "rotation_state": t.rotation_state,
+            })
+        return due
 
 
 class AuditSelector:

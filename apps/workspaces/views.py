@@ -8,7 +8,8 @@ from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
 
 from apps.accounts.models import User
-from apps.accounts.auth import JWTAuth, InternalOrUserAuth
+from apps.accounts.auth import JWTAuth, InternalOrUserAuth, ResolverSignatureAuth
+from ninja import Query
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from apps.common.exceptions import BodyValidationError
@@ -37,6 +38,16 @@ from .schemas import (
     AgentTokenItemSchema,
     AgentTokenCreatedResponseDataSchema,
     AgentVerifyResponseSchema,
+    TokenRotateSchema,
+    RotationPolicySchema,
+    MintSuccessorSchema,
+    FamilyRevokeSchema,
+    RotationMetadataSchema,
+    TokenRotateResponseDataSchema,
+    RotationPolicyResponseDataSchema,
+    MintSuccessorResponseDataSchema,
+    DueRotationItemSchema,
+    FamilyRevokeResponseDataSchema,
     InternalBillingAuthorizeRequest,
     InternalBillingAuthorizeResponse,
     AuditLogItemSchema,
@@ -376,6 +387,35 @@ class TokenController:
         )
         return CustomResponse.success(message="Token deleted")
 
+    @route.post("/{workspace_id}/agents/{registration_id}/tokens/{token_id}/rotate/", response={201: DataResponse[TokenRotateResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def rotate_token(self, request, workspace_id: uuid.UUID, registration_id: str, token_id: str, data: TokenRotateSchema):
+        raw_token, metadata = await AgentService.rotate_agent_token(
+            user=request.auth,
+            workspace_id=workspace_id,
+            registration_id=registration_id,
+            token_id=token_id,
+            overlap_hours=data.overlap_hours,
+            reason=data.reason,
+        )
+        return CustomResponse.success(
+            message="Agent token rotated",
+            data={"token": raw_token, **metadata},
+            status_code=201,
+        )
+
+    @route.put("/{workspace_id}/agents/{registration_id}/tokens/{token_id}/rotation-policy/", response={200: DataResponse[RotationPolicyResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def set_rotation_policy(self, request, workspace_id: uuid.UUID, registration_id: str, token_id: str, data: RotationPolicySchema):
+        result = await AgentService.set_token_rotation_policy(
+            user=request.auth,
+            workspace_id=workspace_id,
+            registration_id=registration_id,
+            token_id=token_id,
+            period_days=data.period_days,
+            overlap_hours=data.overlap_hours,
+            enabled=data.enabled,
+        )
+        return CustomResponse.success(message="Rotation policy updated", data=result)
+
 
 @api_controller("/audit", tags=["Audit Logs"], auth=JWTAuth())
 class AuditController:
@@ -504,6 +544,60 @@ class ResolverController:
         auth_caller = getattr(request, "auth", None)
         result = await AgentService.verify_agent_token(auth_caller=auth_caller, data=payload)
         return result
+
+    @route.post("/agents/mint-successor/", response={201: DataResponse[MintSuccessorResponseDataSchema], 200: DataResponse[MintSuccessorResponseDataSchema], 401: ErrorResponse, 404: ErrorResponse}, auth=None)
+    async def mint_successor(self, request):
+        """Token-bound successor mint for pull-renewal (Axis A).
+
+        Presenting a valid token authorizes minting its own successor; the
+        presented secret is required, a bare token id is never sufficient.
+        The raw successor is returned exactly once (absent on idempotent
+        replay); the caller must persist before use."""
+        try:
+            body = json.loads(request.body) if request.body else {}
+        except Exception:
+            body = {}
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        payload = MintSuccessorSchema(
+            token=body.get("token") or bearer_token or "",
+            token_id=body.get("token_id"),
+            rotation_id=body.get("rotation_id"),
+            reason=body.get("reason") or "routine",
+            overlap_hours=body.get("overlap_hours"),
+        )
+        raw_token, result = await AgentService.mint_successor_for_token(
+            raw_token=payload.token,
+            rotation_id=payload.rotation_id,
+            reason=payload.reason,
+            overlap_hours=payload.overlap_hours,
+        )
+        return CustomResponse.success(
+            message="Token successor minted",
+            data={"token": raw_token, **result},
+            status_code=200 if result["replayed"] else 201,
+        )
+
+    @route.get("/rotation/due/", response={200: DataResponse[List[DueRotationItemSchema]], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_due(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Rotation-armed families past cadence (metadata only). Consumed by
+        the resolver's Pro-gated sweep; arming is desired-state, the resolver
+        executes only for Pro workspaces against its own Polar store (HR-M3)."""
+        data = await AgentSelector.get_due_token_rotations(workspace_id=workspace_id)
+        return CustomResponse.success(message="Due token rotations retrieved", data=data)
+
+    @route.post("/rotation/family-revoke/", response={200: DataResponse[FamilyRevokeResponseDataSchema], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_family_revoke(self, request, data: FamilyRevokeSchema):
+        """Resolver-driven family revoke on corroborated reuse (HR-H6):
+        zero overlap, every live member poisoned."""
+        result = await AgentService.revoke_token_family(
+            workspace_id=uuid.UUID(data.workspace_id),
+            family_key=data.family_key,
+            reason=data.reason,
+        )
+        return CustomResponse.success(message="Token family revoked", data=result)
 
     @route.post("/billing/authorize/", response={200: InternalBillingAuthorizeResponse, 401: ErrorResponse}, auth=None)
     async def authorize_billing(self, request):

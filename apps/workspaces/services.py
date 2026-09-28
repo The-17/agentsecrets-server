@@ -544,6 +544,264 @@ class AgentService:
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
         await AgentToken.objects.filter(registration_id=registration_id).adelete()
 
+    DEFAULT_ROTATION_OVERLAP = timezone.timedelta(hours=24)
+    ROTATION_REASONS = ("routine", "compromise")
+
+    @staticmethod
+    def _rotate_token_sync(
+        *,
+        predecessor_id: str,
+        rotation_id: str | None,
+        reason: str,
+        overlap: Any | None,
+    ) -> tuple[str | None, AgentToken, bool]:
+        """Mint a successor token inside one atomic transaction (HR-H4).
+
+        Returns (raw_token_or_None_on_replay, successor, replayed). The raw
+        value exists only on fresh mint and is shown to the caller exactly
+        once; a replayed rotation_id returns metadata without raw material.
+        Cap: one live successor per rotation_id per family.
+        """
+        if reason not in AgentService.ROTATION_REASONS:
+            raise BodyValidationError("reason", "Must be 'routine' or 'compromise'")
+        now = timezone.now()
+        overlap_eff = overlap or AgentService.DEFAULT_ROTATION_OVERLAP
+        with transaction.atomic():
+            try:
+                predecessor = AgentToken.objects.select_for_update().get(id=predecessor_id)
+            except AgentToken.DoesNotExist:
+                raise NotFoundError("Token not found")
+            family_id = predecessor.rotation_family_id or predecessor.id
+            if rotation_id:
+                replay = AgentToken.objects.filter(
+                    rotation_family_id=family_id,
+                    rotation_id=rotation_id,
+                    supersedes=predecessor.id,
+                ).first()
+                if replay is not None:
+                    return None, replay, True
+            if predecessor.rotation_state != "active" or predecessor.revoked_at:
+                raise BodyValidationError("token_id", "Only an active token can be rotated")
+            raw_token = secrets_module.token_urlsafe(32)
+            successor = AgentToken.objects.create(
+                registration_id=predecessor.registration_id,
+                workspace_id=predecessor.workspace_id,
+                token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+                label=predecessor.label,
+                environment=predecessor.environment,
+                expires_at=predecessor.expires_at,
+                created_by=predecessor.created_by,
+                rotation_family_id=family_id,
+                supersedes=predecessor.id,
+                rotation_id=rotation_id or None,
+                rotation_period=predecessor.rotation_period,
+                rotation_overlap=predecessor.rotation_overlap,
+                next_rotation_at=(now + predecessor.rotation_period) if predecessor.rotation_period else None,
+            )
+            if not predecessor.rotation_family_id:
+                predecessor.rotation_family_id = family_id
+            predecessor.superseded_by = successor.id
+            if reason == "compromise":
+                predecessor.revoked_at = now
+                predecessor.overlap_until = now
+                predecessor.save(update_fields=[
+                    "rotation_family_id", "superseded_by", "revoked_at",
+                    "overlap_until",
+                ])
+                AgentToken.objects.filter(rotation_family_id=family_id).exclude(
+                    id=successor.id
+                ).exclude(rotation_state="revoked").update(
+                    rotation_state="revoked", revoked_at=now, overlap_until=now
+                )
+            else:
+                predecessor.rotation_state = "superseded"
+                predecessor.overlap_until = now + overlap_eff
+                predecessor.save(update_fields=[
+                    "rotation_family_id", "superseded_by", "rotation_state",
+                    "overlap_until",
+                ])
+            return raw_token, successor, False
+
+    @staticmethod
+    def _token_rotation_metadata(token: AgentToken, now: Any) -> dict[str, Any]:
+        due = bool(
+            token.rotation_state == "active"
+            and token.rotation_period
+            and token.next_rotation_at
+            and token.next_rotation_at <= now
+        )
+        return {
+            "rotation_state": token.rotation_state,
+            "rotation_family_id": token.rotation_family_id,
+            "overlap_until": token.overlap_until.isoformat() if token.overlap_until else None,
+            "next_rotation_at": token.next_rotation_at.isoformat() if token.next_rotation_at else None,
+            "rotation_period_days": token.rotation_period.days if token.rotation_period else None,
+            "superseded_by": token.superseded_by,
+            "rotation_due": due,
+        }
+
+    @staticmethod
+    async def rotate_agent_token(
+        *,
+        user: User,
+        workspace_id: uuid.UUID,
+        registration_id: str,
+        token_id: str,
+        overlap_hours: int | None = None,
+        reason: str = "routine",
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Manual one-shot rotation (free for all tiers). The caller must
+        persist the returned raw token: it is shown exactly once."""
+        exists = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).aexists()
+        if not exists:
+            raise NotFoundError("Agent not found")
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        target = await AgentToken.objects.filter(id=token_id, registration_id=registration_id).afirst()
+        if not target:
+            raise NotFoundError("Token not found")
+        if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+            raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+        overlap = timezone.timedelta(hours=overlap_hours) if overlap_hours is not None else None
+        raw_token, successor, _ = await sync_to_async(AgentService._rotate_token_sync)(
+            predecessor_id=target.id, rotation_id=None, reason=reason, overlap=overlap,
+        )
+        try:
+            await ActivityLogService.record(
+                workspace_id=workspace_id,
+                actor=user,
+                actor_email=getattr(user, "email", ""),
+                action="agent_token.compromise_rotated" if reason == "compromise" else "agent_token.rotated",
+                target_type="agent_token",
+                target_id=str(successor.id),
+                target_name=target.label or str(target.id),
+                metadata={"reason": reason, "family_id": successor.rotation_family_id},
+                source="api",
+            )
+        except Exception as exc:
+            logger.warning("ROTATE_AUDIT_SKIP: %s", exc)
+        return raw_token, {
+            "token_id": str(successor.id),
+            "label": successor.label,
+            "expires_at": successor.expires_at.isoformat() if successor.expires_at else None,
+            "created_at": successor.created_at.isoformat(),
+            "rotation": AgentService._token_rotation_metadata(successor, timezone.now()),
+        }
+
+    @staticmethod
+    async def mint_successor_for_token(
+        *,
+        raw_token: str,
+        rotation_id: str | None = None,
+        reason: str = "routine",
+        overlap_hours: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Token-bound mint for pull-renewal: presenting a valid token
+        authorizes minting its own successor. The presented secret (hash
+        match) is required; a bare token id is never sufficient."""
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        predecessor = await AgentToken.objects.filter(token_hash=token_hash).afirst()
+        if not predecessor or not hmac_module.compare_digest(token_hash, predecessor.token_hash):
+            raise NotFoundError("Token not found")
+        if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+            raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+        overlap = timezone.timedelta(hours=overlap_hours) if overlap_hours is not None else None
+        raw_new, successor, replayed = await sync_to_async(AgentService._rotate_token_sync)(
+            predecessor_id=predecessor.id, rotation_id=rotation_id, reason=reason, overlap=overlap,
+        )
+        now = timezone.now()
+        predecessor_overlap_until = None
+        if successor.supersedes:
+            refreshed = await AgentToken.objects.filter(id=successor.supersedes).afirst()
+            if refreshed and refreshed.overlap_until:
+                predecessor_overlap_until = refreshed.overlap_until.isoformat()
+        return raw_new, {
+            "token_id": str(successor.id),
+            "replayed": replayed,
+            "rotation": AgentService._token_rotation_metadata(successor, now),
+            "predecessor_overlap_until": predecessor_overlap_until,
+        }
+
+    @staticmethod
+    async def set_token_rotation_policy(
+        *,
+        user: User,
+        workspace_id: uuid.UUID,
+        registration_id: str,
+        token_id: str,
+        period_days: int | None = None,
+        overlap_hours: int | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Arm or disarm a rotation cadence. Desired-state only: execution is
+        Pro-gated in the resolver against its own Polar store (HR-M3)."""
+        exists = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).aexists()
+        if not exists:
+            raise NotFoundError("Agent not found")
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        token = await AgentToken.objects.filter(id=token_id, registration_id=registration_id).afirst()
+        if not token:
+            raise NotFoundError("Token not found")
+        if token.rotation_state != "active" or token.revoked_at:
+            raise BodyValidationError("token_id", "Only an active token can arm a cadence")
+        now = timezone.now()
+        if not enabled or period_days is None:
+            token.rotation_period = None
+            token.next_rotation_at = None
+        else:
+            if not 1 <= period_days <= 365:
+                raise BodyValidationError("period_days", "Must be between 1 and 365")
+            if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+                raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+            token.rotation_period = timezone.timedelta(days=period_days)
+            token.next_rotation_at = now + token.rotation_period
+            if overlap_hours is not None:
+                token.rotation_overlap = timezone.timedelta(hours=overlap_hours)
+        await token.asave(update_fields=[
+            "rotation_period", "rotation_overlap", "next_rotation_at",
+        ])
+        return {
+            "id": str(token.id),
+            "rotation": AgentService._token_rotation_metadata(token, now),
+        }
+
+    @staticmethod
+    async def revoke_token_family(
+        *,
+        workspace_id: uuid.UUID,
+        family_key: str,
+        reason: str = "compromise",
+    ) -> dict[str, Any]:
+        """Resolver-driven family revoke on corroborated reuse (HR-H6):
+        zero overlap, every live family member poisoned, none rollbackable."""
+
+        @sync_to_async
+        def _revoke_sync():
+            from django.db.models import Q as DQ
+            now = timezone.now()
+            with transaction.atomic():
+                qs = AgentToken.objects.select_for_update().filter(
+                    DQ(rotation_family_id=family_key) | DQ(id=family_key),
+                    workspace_id=workspace_id,
+                ).exclude(rotation_state="revoked")
+                ids = list(qs.values_list("id", flat=True))
+                count = qs.update(rotation_state="revoked", revoked_at=now, overlap_until=now)
+                return count, ids
+
+        count, ids = await _revoke_sync()
+        try:
+            await ActivityLogService.record(
+                workspace_id=workspace_id,
+                action="agent_token.family_revoked",
+                target_type="agent_token_family",
+                target_id=family_key,
+                target_name=family_key,
+                metadata={"reason": reason, "revoked_count": count},
+                source="cloud",
+            )
+        except Exception as exc:
+            logger.warning("REVOKE_AUDIT_SKIP: %s", exc)
+        return {"family_key": family_key, "revoked_count": count, "token_ids": [str(i) for i in ids]}
+
     @staticmethod
     async def verify_agent_token(*, auth_caller: Any, data: InternalAgentVerifySchema) -> dict[str, Any]:
         token_hash = hashlib.sha256(data.token.encode()).hexdigest()
@@ -576,13 +834,38 @@ class AgentService:
         if not (is_hash_match or is_id_match):
             return {"valid": False, "reason": "Invalid token"}
 
-        if token.revoked_at:
-            return {"valid": False, "reason": "Revoked"}
+        now = timezone.now()
+        identifiers = {
+            "token_id": str(token.id),
+            "workspace_id": str(token.workspace_id),
+            "rotation": {
+                "rotation_state": token.rotation_state,
+                "rotation_family_id": token.rotation_family_id,
+                "overlap_until": token.overlap_until.isoformat() if token.overlap_until else None,
+                "next_rotation_at": token.next_rotation_at.isoformat() if token.next_rotation_at else None,
+                "rotation_period_days": token.rotation_period.days if token.rotation_period else None,
+                "superseded_by": token.superseded_by,
+                "rotation_due": False,
+            },
+        }
+        if token.revoked_at or token.rotation_state == "revoked":
+            successor_used = False
+            if token.superseded_by:
+                successor = await AgentToken.objects.filter(id=token.superseded_by).afirst()
+                successor_used = bool(successor and successor.last_used_at)
+            return {"valid": False, "reason": "revoked_reuse_suspected" if successor_used else "Revoked", **identifiers}
 
-        if token.expires_at and token.expires_at < timezone.now():
-            return {"valid": False, "reason": "Expired"}
+        if token.rotation_state == "superseded":
+            if not (token.overlap_until and token.overlap_until >= now):
+                return {"valid": False, "reason": "overlap_expired", **identifiers}
+            rotation_reason = "superseded_overlap"
+        else:
+            rotation_reason = None
 
-        token.last_used_at = timezone.now()
+        if token.expires_at and token.expires_at < now:
+            return {"valid": False, "reason": "Expired", **identifiers}
+
+        token.last_used_at = now
         await token.asave(update_fields=["last_used_at"])
 
         agent = token.registration
@@ -594,6 +877,7 @@ class AgentService:
 
         return {
             "valid": True,
+            "reason": rotation_reason,
             "agent_id": str(agent.id),
             "agent_name": agent.name,
             "workspace_id": str(token.workspace_id),
@@ -603,6 +887,7 @@ class AgentService:
             "token_id": str(token.id),
             "billing_id": billing_id,
             "allowlist": allowlist,
+            "rotation": AgentService._token_rotation_metadata(token, now),
         }
 
     @staticmethod

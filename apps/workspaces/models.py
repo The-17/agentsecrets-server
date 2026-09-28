@@ -281,6 +281,40 @@ class AgentToken(models.Model):
         User, on_delete=models.SET_NULL, null=True,
         related_name='created_agent_tokens'
     )
+    rotation_family_id = models.CharField(
+        max_length=100, null=True, blank=True, db_index=True,
+        help_text="Root token id of this rotation family; assigned on first rotation"
+    )
+    supersedes = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text="Token id this token directly succeeds (plain id reference, never a raw token)"
+    )
+    superseded_by = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text="Token id that directly succeeds this token"
+    )
+    rotation_period = models.DurationField(
+        null=True, blank=True,
+        help_text="Automated cadence; arming is desired-state only, execution is Pro-gated in the resolver (HR-M3)"
+    )
+    rotation_overlap = models.DurationField(
+        null=True, blank=True,
+        help_text="Routine-rotation grace window; null means the 24h default"
+    )
+    next_rotation_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    overlap_until = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Superseded predecessor stays valid until this time (routine rotation only; compromise revokes immediately)"
+    )
+    rotation_state = models.CharField(
+        max_length=20, default='active', db_index=True,
+        choices=[('active', 'Active'), ('superseded', 'Superseded'), ('revoked', 'Revoked')],
+        help_text="active | superseded (in overlap) | revoked (explicit or compromise-poisoned)"
+    )
+    rotation_id = models.CharField(
+        max_length=100, null=True, blank=True, db_index=True,
+        help_text="Idempotency key of the rotation cycle that minted this token (HR-H4)"
+    )
 
     class Meta:
         db_table = 'agent_tokens'
