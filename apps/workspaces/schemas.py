@@ -336,6 +336,7 @@ class AgentVerifyResponseSchema(Schema):
     capabilities: Optional[Dict[str, Any]] = None
     token_id: Optional[str] = None
     billing_id: Optional[str] = None
+    expires_at: Optional[str] = None
     rotation: Optional[RotationMetadataSchema] = None
     allowlist: Optional[List[str]] = None
 

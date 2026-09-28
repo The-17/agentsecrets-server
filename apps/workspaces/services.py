@@ -887,6 +887,7 @@ class AgentService:
             "token_id": str(token.id),
             "billing_id": billing_id,
             "allowlist": allowlist,
+            "expires_at": token.expires_at.isoformat() if token.expires_at else None,
             "rotation": AgentService._token_rotation_metadata(token, now),
         }
 
