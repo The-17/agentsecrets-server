@@ -92,6 +92,7 @@ class ProviderBindingTests(TestCase):
         }
 
     def _arm(self, binding, key="APP_DB_PASSWORD", expected=200):
+        binding = {"target_user": "app", **binding}
         res = self.client.put(
             self._base(key) + "/rotation-policy/",
             data={"rotation_type": "value_provider", "period_days": 30,
@@ -101,6 +102,16 @@ class ProviderBindingTests(TestCase):
         )
         self.assertEqual(res.status_code, expected)
         return res
+
+    def test_arm_rejects_missing_target_user(self):
+        res = self.client.put(
+            self._base() + "/rotation-policy/",
+            data={"rotation_type": "value_provider", "period_days": 30,
+                  "provider_binding": {"adapter": "postgres", "admin_credential_ref": "PGADMIN_DSN"}},
+            content_type="application/json",
+            **self.auth_headers,
+        )
+        self.assertEqual(res.status_code, 422)
 
     def _execute(self, rotation_id, expected=200):
         body = json.dumps({
@@ -145,7 +156,8 @@ class ProviderBindingTests(TestCase):
         other = self.client.put(
             f"/api/secrets/{self.other_project_id}/production/FOREIGN_DSN/rotation-policy/",
             data={"rotation_type": "value_provider", "period_days": 30,
-                  "provider_binding": {"adapter": "postgres", "admin_credential_ref": "ADMIN2"}},
+                  "provider_binding": {"adapter": "postgres", "admin_credential_ref": "ADMIN2",
+                                       "target_user": "app"}},
             content_type="application/json",
             **self.auth_headers,
         )
@@ -154,7 +166,8 @@ class ProviderBindingTests(TestCase):
         res = self.client.put(
             self._base() + "/rotation-policy/",
             data={"rotation_type": "value_provider", "period_days": 30,
-                  "provider_binding": {"adapter": "postgres", "admin_credential_ref": "FOREIGN_DSN"}},
+                  "provider_binding": {"adapter": "postgres", "admin_credential_ref": "FOREIGN_DSN",
+                                       "target_user": "app"}},
             content_type="application/json",
             **self.auth_headers,
         )

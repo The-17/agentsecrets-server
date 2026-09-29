@@ -525,7 +525,20 @@ def _validate_provider_binding_shape(binding: Any) -> dict[str, Any]:
     ref = binding.get("admin_credential_ref")
     if not ref or not isinstance(ref, str):
         raise _binding_error("provider_binding", "admin_credential_ref is required")
-    return {"mode": "provider", "adapter": adapter, "admin_credential_ref": ref.upper()}
+    target_user = binding.get("target_user")
+    if adapter == "postgres" and (not target_user or not isinstance(target_user, str)):
+        raise _binding_error("provider_binding", "target_user is required for the postgres adapter")
+    normalized: dict[str, Any] = {
+        "mode": "provider", "adapter": adapter, "admin_credential_ref": ref.upper(),
+    }
+    if target_user:
+        normalized["target_user"] = target_user
+    length = binding.get("length_bytes")
+    if length is not None:
+        if not isinstance(length, int) or not 16 <= length <= 256:
+            raise _binding_error("provider_binding", "length_bytes must be between 16 and 256")
+        normalized["length_bytes"] = length
+    return normalized
 
 
 def _validate_provider_binding_sync(*, secret: Secret, binding: Any, environment: str) -> dict[str, Any]:
