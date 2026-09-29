@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 from django.db.models import Count, F
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.common.exceptions import NotFoundError, AuthorizationError, BodyValidationError
@@ -192,3 +193,29 @@ class SecretSelector:
         if not secret:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
         return secret
+
+    @staticmethod
+    async def get_due_value_rotations(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Value-rotation cadences past due (key names only, never ciphertext).
+        Consumed by the resolver's Pro-gated reminder sweep (HR-M3)."""
+        now = timezone.now()
+        due: list[dict[str, Any]] = []
+        qs = Secret.objects.filter(
+            project__workspace_id=workspace_id,
+            rotation_period__isnull=False,
+            next_rotation_at__lte=now,
+        ).exclude(rotation_type="none").only(
+            "id", "project_id", "environment", "key",
+            "rotation_type", "rotation_period", "next_rotation_at",
+        )
+        async for s in qs:
+            due.append({
+                "secret_id": str(s.id),
+                "project_id": str(s.project_id),
+                "environment": s.environment,
+                "key": s.key,
+                "rotation_type": s.rotation_type,
+                "rotation_period_days": s.rotation_period.days if s.rotation_period else None,
+                "next_rotation_at": s.next_rotation_at.isoformat() if s.next_rotation_at else None,
+            })
+        return due

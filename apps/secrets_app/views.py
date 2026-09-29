@@ -15,6 +15,16 @@ from .schemas import (
     ProjectInviteSchema,
     SecretBulkUpsertSchema,
     SecretUpdateSchema,
+    SecretVersionCreateSchema,
+    SecretPromoteSchema,
+    SecretRotationPolicySchema,
+    SecretVersionItemSchema,
+    SecretPendingResponseDataSchema,
+    SecretPromoteResponseDataSchema,
+    SecretRollbackResponseDataSchema,
+    SecretRotationPolicyDataSchema,
+    SecretRotationStatusDataSchema,
+    DueValueRotationItemSchema,
     ProjectResponseDataSchema,
     ProjectInviteResponseDataSchema,
     ProjectEnvironmentsResponseDataSchema,
@@ -26,6 +36,7 @@ from .schemas import (
 )
 from .selectors import ProjectSelector, SecretSelector
 from .services import ProjectService, SecretService
+from .rotation import SecretRotationService
 
 logger = logging.getLogger("apps.secrets_app")
 
@@ -269,3 +280,55 @@ class SecretsController:
             user=request.auth, project_id=project_id, key=key, environment=environment, policy=data
         )
         return CustomResponse.success(message="Policy updated successfully", data=policy)
+
+    # --- Value rotation (B1 client-push; ROTATION_PLAN Phase 1) ---
+
+    @route.post("/{project_id}/{environment}/{key}/versions/", response={201: DataResponse[SecretPendingResponseDataSchema], 200: DataResponse[SecretPendingResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse})
+    async def stage_version(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretVersionCreateSchema):
+        result, replayed = await SecretRotationService.create_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            ciphertext=data.ciphertext, rotation_id=data.rotation_id, reason=data.reason,
+        )
+        return CustomResponse.success(
+            message="Version staged as pending",
+            data=result,
+            status_code=200 if replayed else 201,
+        )
+
+    @route.post("/{project_id}/{environment}/{key}/promote/", response={200: DataResponse[SecretPromoteResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse})
+    async def promote_version(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretPromoteSchema):
+        result = await SecretRotationService.promote_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            expected_current_version_id=data.expected_current_version_id, reason=data.reason,
+        )
+        return CustomResponse.success(message="Pending version promoted to current", data=result)
+
+    @route.post("/{project_id}/{environment}/{key}/rollback/", response={200: DataResponse[SecretRollbackResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 422: ErrorResponse})
+    async def rollback_version(self, request, project_id: uuid.UUID, environment: str, key: str):
+        result = await SecretRotationService.rollback_to_previous(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Rolled back to previous version", data=result)
+
+    @route.delete("/{project_id}/{environment}/{key}/versions/pending/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
+    async def abort_pending(self, request, project_id: uuid.UUID, environment: str, key: str):
+        await SecretRotationService.abort_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Pending version aborted")
+
+    @route.get("/{project_id}/{environment}/{key}/rotation/", response={200: DataResponse[SecretRotationStatusDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def rotation_status(self, request, project_id: uuid.UUID, environment: str, key: str):
+        result = await SecretRotationService.get_rotation_status(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Rotation status retrieved", data=result)
+
+    @route.put("/{project_id}/{environment}/{key}/rotation-policy/", response={200: DataResponse[SecretRotationPolicyDataSchema], 403: ErrorResponse, 404: ErrorResponse, 422: ErrorResponse})
+    async def set_rotation_policy(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretRotationPolicySchema):
+        result = await SecretRotationService.set_rotation_policy(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            rotation_type=data.rotation_type, period_days=data.period_days,
+            overlap_hours=data.overlap_hours, enabled=data.enabled,
+        )
+        return CustomResponse.success(message="Rotation policy updated", data=result)

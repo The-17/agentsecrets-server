@@ -98,6 +98,32 @@ class SecretUpdateSchema(Schema):
     value: str
 
 
+class SecretVersionCreateSchema(Schema):
+    """Stage a client-encrypted value as pending. Ciphertext is the client's
+    DEK-ciphertext; the server applies only its own envelope."""
+    model_config = ConfigDict(extra="forbid")
+
+    ciphertext: str
+    rotation_id: Optional[str] = None
+    reason: str = "routine"  # routine | compromise
+
+
+class SecretPromoteSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_version_id: Optional[str] = None
+    reason: str = "routine"  # routine | compromise (compromise shreds previous)
+
+
+class SecretRotationPolicySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    rotation_type: str = "value_client"  # value_client | value_auto | value_provider
+    period_days: Optional[int] = None
+    overlap_hours: Optional[int] = None
+    enabled: bool = True
+
+
 # ==========================================
 # RESPONSE SCHEMAS
 # ==========================================
@@ -187,3 +213,63 @@ class ProjectTransferResponseDataSchema(Schema):
     target_workspace_id: str
     target_workspace_name: str
     secrets_transferred: int
+
+
+class SecretVersionItemSchema(Schema):
+    """Rotation metadata only — ciphertext is never serialized (HR-H1)."""
+    version_id: str
+    staging_label: str
+    rotation_reason: str
+    rotation_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    revoked_at: Optional[str] = None
+    created_at: str
+
+
+class SecretPendingResponseDataSchema(Schema):
+    version_id: str
+    staging_label: str
+    rotation_reason: str
+    rotation_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    revoked_at: Optional[str] = None
+    created_at: str
+    replayed: bool = False
+
+
+class SecretPromoteResponseDataSchema(Schema):
+    key: str
+    environment: str
+    current_version_id: str
+    previous_version_id: Optional[str] = None
+    reason: str
+
+
+class SecretRollbackResponseDataSchema(Schema):
+    key: str
+    environment: str
+    current_version_id: str
+    previous_version_id: str
+
+
+class SecretRotationPolicyDataSchema(Schema):
+    key: str
+    environment: str
+    policy: Dict[str, Any]
+
+
+class SecretRotationStatusDataSchema(Schema):
+    key: str
+    environment: str
+    policy: Dict[str, Any]
+    versions: List[SecretVersionItemSchema]
+
+
+class DueValueRotationItemSchema(Schema):
+    secret_id: str
+    project_id: str
+    environment: str
+    key: str
+    rotation_type: str
+    rotation_period_days: Optional[int] = None
+    next_rotation_at: Optional[str] = None

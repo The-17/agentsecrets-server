@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+from django.db import transaction
+from django.utils import timezone
+from asgiref.sync import sync_to_async
+
+from apps.accounts.models import User
+from apps.common.exceptions import (
+    NotFoundError,
+    AuthorizationError,
+    BodyValidationError,
+    ConflictError,
+)
+from apps.common.services.encryption import EncryptionService as encryption_service
+from apps.workspaces.models import MembershipRole
+from apps.workspaces.services import ActivityLogService
+from .models import Secret, SecretVersion
+from .selectors import ProjectSelector, SecretSelector
+
+logger = logging.getLogger("apps.secrets_app.rotation")
+
+
+class SecretRotationService:
+    """Domain service for B1 client-push value rotation (ROTATION_PLAN Phase 1).
+
+    Every new value arrives as client DEK-ciphertext; the server applies only
+    its own Fernet envelope and stores. Plaintext is never present here, and
+    ciphertext never leaves in status/metadata responses (HR-H1).
+    """
+
+    DEFAULT_OVERLAP = timezone.timedelta(hours=24)
+    REASONS = ("routine", "compromise")
+    TYPES = ("value_client", "value_auto", "value_provider")
+    RETAIN_PREVIOUS = 1
+
+    @staticmethod
+    async def _resolve_secret(
+        *, user: User, project_id: uuid.UUID, key: str, environment: str, write: bool = True
+    ) -> tuple[Any, Secret]:
+        project, role = await ProjectSelector.resolve_secret_project_and_role(
+            user=user, project_id=project_id
+        )
+        if write and role == MembershipRole.READ_ONLY:
+            raise AuthorizationError("You don't have permission to modify secrets")
+        SecretSelector.validate_env(environment)
+        secret = await Secret.objects.filter(
+            project=project, key=key.upper(), environment=environment
+        ).afirst()
+        if not secret:
+            raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")
+        return project, secret
+
+    @staticmethod
+    def _version_metadata(version: SecretVersion) -> dict[str, Any]:
+        return {
+            "version_id": str(version.id),
+            "staging_label": version.staging_label,
+            "rotation_reason": version.rotation_reason,
+            "rotation_id": version.rotation_id,
+            "overlap_until": version.overlap_until.isoformat() if version.overlap_until else None,
+            "revoked_at": version.revoked_at.isoformat() if version.revoked_at else None,
+            "created_at": version.created_at.isoformat(),
+        }
+
+    @staticmethod
+    async def create_pending_version(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        key: str,
+        environment: str = "development",
+        ciphertext: str,
+        rotation_id: str | None = None,
+        reason: str = "routine",
+    ) -> tuple[dict[str, Any], bool]:
+        """Stage a client-encrypted value as pending (two-phase step 1).
+
+        Returns (metadata, replayed). A repeated rotation_id returns the
+        existing pending row without minting; a clashing pending raises 409
+        (HR-H2: one pending per secret)."""
+        if reason not in SecretRotationService.REASONS:
+            raise BodyValidationError("reason", "Must be 'routine' or 'compromise'")
+        if not ciphertext:
+            raise BodyValidationError("ciphertext", "Ciphertext is required")
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment
+        )
+        stored = encryption_service.encrypt(ciphertext)
+
+        @sync_to_async
+        def _create():
+            with transaction.atomic():
+                existing = SecretVersion.objects.select_for_update().filter(
+                    secret=secret, staging_label="pending"
+                ).first()
+                if existing is not None:
+                    if rotation_id and existing.rotation_id == rotation_id:
+                        return existing, True
+                    raise ConflictError(
+                        "A pending version already exists for this secret; "
+                        "promote, roll back, or abort it first"
+                    )
+                version = SecretVersion.objects.create(
+                    secret=secret,
+                    ciphertext=stored,
+                    staging_label="pending",
+                    rotation_reason=reason,
+                    rotation_id=rotation_id or None,
+                    provider_binding={"mode": "out-of-band"},
+                    created_by=user,
+                )
+                return version, False
+
+        version, replayed = await _create()
+        try:
+            await ActivityLogService.record(
+                workspace_id=project.workspace_id,
+                project_id=project.id,
+                actor=user,
+                actor_email=getattr(user, "email", ""),
+                action="secret.rotation_pending",
+                target_type="secret",
+                target_id=str(secret.id),
+                target_name=secret.key,
+                metadata={"key": secret.key, "environment": environment, "reason": reason},
+                source="api",
+            )
+        except Exception as exc:
+            logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
+        return {**SecretRotationService._version_metadata(version), "replayed": replayed}, replayed
+
+    @staticmethod
+    async def promote_pending_version(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        key: str,
+        environment: str = "development",
+        expected_current_version_id: str | None = None,
+        reason: str = "routine",
+    ) -> dict[str, Any]:
+        """Flip pending to current in one transaction (two-phase step 4).
+
+        Routine keeps the old value as previous through the overlap window
+        (provider-side overlap: the old credential stays valid AT THE
+        PROVIDER until retire). Compromise shreds previous ciphertext
+        immediately and keeps no poisoned row (HR-H3/HR-M4).
+        CAS: when expected_current_version_id is given, promote only if the
+        current row still matches (HR-H4)."""
+        if reason not in SecretRotationService.REASONS:
+            raise BodyValidationError("reason", "Must be 'routine' or 'compromise'")
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment
+        )
+
+        @sync_to_async
+        def _promote():
+            with transaction.atomic():
+                try:
+                    pending = SecretVersion.objects.select_for_update().get(
+                        secret=secret, staging_label="pending"
+                    )
+                except SecretVersion.DoesNotExist:
+                    raise NotFoundError("No pending version to promote")
+                current = SecretVersion.objects.select_for_update().filter(
+                    secret=secret, staging_label="current"
+                ).first()
+                if current is not None and expected_current_version_id is not None:
+                    if str(current.id) != expected_current_version_id:
+                        raise ConflictError(
+                            "Current version changed since staging; refresh and retry"
+                        )
+                now = timezone.now()
+                overlap_eff = secret.rotation_overlap or SecretRotationService.DEFAULT_OVERLAP
+                if reason == "compromise":
+                    SecretVersion.objects.filter(
+                        secret=secret, staging_label__in=["previous", "current"]
+                    ).delete()
+                    previous_id = None
+                else:
+                    if current is not None:
+                        current.staging_label = "previous"
+                        current.overlap_until = now + overlap_eff
+                        current.rotation_reason = reason
+                        current.save(update_fields=[
+                            "staging_label", "overlap_until", "rotation_reason", "updated_at",
+                        ])
+                        previous_id = str(current.id)
+                    else:
+                        previous = SecretVersion.objects.create(
+                            secret=secret,
+                            ciphertext=secret.value,
+                            staging_label="previous",
+                            rotation_reason=reason,
+                            overlap_until=now + overlap_eff,
+                            created_by=user,
+                        )
+                        previous_id = str(previous.id)
+                    live = list(
+                        SecretVersion.objects.filter(
+                            secret=secret, staging_label="previous", revoked_at__isnull=True
+                        ).order_by("-created_at").values_list("id", flat=True)
+                    )
+                    if len(live) > SecretRotationService.RETAIN_PREVIOUS:
+                        SecretVersion.objects.filter(id__in=live[SecretRotationService.RETAIN_PREVIOUS:]).delete()
+                pending.staging_label = "current"
+                pending.rotation_reason = reason
+                pending.save(update_fields=["staging_label", "rotation_reason", "updated_at"])
+                secret.value = pending.ciphertext
+                secret.save(update_fields=["value", "updated_at"])
+                return str(pending.id), previous_id
+
+        current_id, previous_id = await _promote()
+        try:
+            await ActivityLogService.record(
+                workspace_id=project.workspace_id,
+                project_id=project.id,
+                actor=user,
+                actor_email=getattr(user, "email", ""),
+                action="secret.rotation_promoted",
+                target_type="secret",
+                target_id=str(secret.id),
+                target_name=secret.key,
+                metadata={"key": secret.key, "environment": environment, "reason": reason},
+                source="api",
+            )
+        except Exception as exc:
+            logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
+        return {
+            "key": secret.key,
+            "environment": environment,
+            "current_version_id": current_id,
+            "previous_version_id": previous_id,
+            "reason": reason,
+        }
+
+    @staticmethod
+    async def rollback_to_previous(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        key: str,
+        environment: str = "development",
+    ) -> dict[str, Any]:
+        """Restore the previous value to current in one transaction.
+
+        Refuses revoked/poisoned or reaped versions (HR-H3): after a
+        compromise rotation there is nothing to roll back to."""
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment
+        )
+
+        @sync_to_async
+        def _rollback():
+            with transaction.atomic():
+                current = SecretVersion.objects.select_for_update().filter(
+                    secret=secret, staging_label="current"
+                ).first()
+                if current is None:
+                    raise NotFoundError("No current version to roll back from")
+                previous = SecretVersion.objects.select_for_update().filter(
+                    secret=secret, staging_label="previous", revoked_at__isnull=True
+                ).order_by("-created_at").first()
+                if previous is None:
+                    raise BodyValidationError(
+                        "key", "No live previous version: it was poisoned by a "
+                        "compromise rotation or reaped after retention"
+                    )
+                now = timezone.now()
+                overlap_eff = secret.rotation_overlap or SecretRotationService.DEFAULT_OVERLAP
+                # Relabel the outgoing current FIRST so two `current` rows never
+                # coexist under the partial unique index (HR-H2).
+                current.staging_label = "previous"
+                current.overlap_until = now + overlap_eff
+                current.rotation_reason = "routine"
+                current.save(update_fields=[
+                    "staging_label", "overlap_until", "rotation_reason", "updated_at",
+                ])
+                previous.staging_label = "current"
+                previous.overlap_until = None
+                previous.save(update_fields=["staging_label", "overlap_until", "updated_at"])
+                secret.value = previous.ciphertext
+                secret.save(update_fields=["value", "updated_at"])
+                return str(previous.id), str(current.id)
+
+        current_id, previous_id = await _rollback()
+        try:
+            await ActivityLogService.record(
+                workspace_id=project.workspace_id,
+                project_id=project.id,
+                actor=user,
+                actor_email=getattr(user, "email", ""),
+                action="secret.rotation_rollback",
+                target_type="secret",
+                target_id=str(secret.id),
+                target_name=secret.key,
+                metadata={"key": secret.key, "environment": environment},
+                source="api",
+            )
+        except Exception as exc:
+            logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
+        return {
+            "key": secret.key,
+            "environment": environment,
+            "current_version_id": current_id,
+            "previous_version_id": previous_id,
+        }
+
+    @staticmethod
+    async def abort_pending_version(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        key: str,
+        environment: str = "development",
+    ) -> dict[str, Any]:
+        """Delete a staged pending version (unsticks crashed rotations; the
+        one-pending index would otherwise block the next attempt)."""
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment
+        )
+        deleted, _ = await SecretVersion.objects.filter(
+            secret=secret, staging_label="pending"
+        ).adelete()
+        if not deleted:
+            raise NotFoundError("No pending version to abort")
+        return {"key": secret.key, "environment": environment, "aborted": True}
+
+    @staticmethod
+    async def set_rotation_policy(
+        *,
+        user: User,
+        project_id: uuid.UUID,
+        key: str,
+        environment: str = "development",
+        rotation_type: str = "value_client",
+        period_days: int | None = None,
+        overlap_hours: int | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Arm or disarm a value-rotation cadence. Desired-state only:
+        execution (including reminders) is Pro-gated in the resolver (HR-M3)."""
+        if rotation_type not in SecretRotationService.TYPES:
+            raise BodyValidationError("rotation_type", "Must be value_client, value_auto, or value_provider")
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment
+        )
+        now = timezone.now()
+        if not enabled or rotation_type == "none" or period_days is None:
+            secret.rotation_type = "none"
+            secret.rotation_period = None
+            secret.next_rotation_at = None
+        else:
+            if not 1 <= period_days <= 365:
+                raise BodyValidationError("period_days", "Must be between 1 and 365")
+            if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+                raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+            secret.rotation_type = rotation_type
+            secret.rotation_period = timezone.timedelta(days=period_days)
+            secret.next_rotation_at = now + secret.rotation_period
+            if overlap_hours is not None:
+                secret.rotation_overlap = timezone.timedelta(hours=overlap_hours)
+        await secret.asave(update_fields=[
+            "rotation_type", "rotation_period", "rotation_overlap", "next_rotation_at", "updated_at",
+        ])
+        return {
+            "key": secret.key,
+            "environment": environment,
+            "policy": {
+                "rotation_type": secret.rotation_type,
+                "rotation_period_days": secret.rotation_period.days if secret.rotation_period else None,
+                "next_rotation_at": secret.next_rotation_at.isoformat() if secret.next_rotation_at else None,
+            },
+        }
+
+    @staticmethod
+    async def get_rotation_status(
+        *, user: User, project_id: uuid.UUID, key: str, environment: str = "development"
+    ) -> dict[str, Any]:
+        """Rotation metadata only — ciphertext never leaves in status (HR-H1)."""
+        project, secret = await SecretRotationService._resolve_secret(
+            user=user, project_id=project_id, key=key, environment=environment, write=False
+        )
+        versions = [
+            SecretRotationService._version_metadata(v)
+            async for v in SecretVersion.objects.filter(secret=secret).order_by("-created_at")[:10]
+        ]
+        return {
+            "key": secret.key,
+            "environment": environment,
+            "policy": {
+                "rotation_type": secret.rotation_type,
+                "rotation_period_days": secret.rotation_period.days if secret.rotation_period else None,
+                "next_rotation_at": secret.next_rotation_at.isoformat() if secret.next_rotation_at else None,
+            },
+            "versions": versions,
+        }

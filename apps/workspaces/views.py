@@ -9,6 +9,7 @@ from ninja_extra import api_controller, route
 
 from apps.accounts.models import User
 from apps.accounts.auth import JWTAuth, InternalOrUserAuth, ResolverSignatureAuth
+from apps.secrets_app.schemas import DueValueRotationItemSchema
 from ninja import Query
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
@@ -598,6 +599,14 @@ class ResolverController:
             reason=data.reason,
         )
         return CustomResponse.success(message="Token family revoked", data=result)
+
+    @route.get("/rotation/value-due/", response={200: DataResponse[List[DueValueRotationItemSchema]], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_value_due(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Value-rotation cadences past due (key names only, never ciphertext).
+        Consumed by the resolver's Pro-gated reminder sweep (HR-M3)."""
+        from apps.secrets_app.selectors import SecretSelector
+        data = await SecretSelector.get_due_value_rotations(workspace_id=workspace_id)
+        return CustomResponse.success(message="Due value rotations retrieved", data=data)
 
     @route.post("/billing/authorize/", response={200: InternalBillingAuthorizeResponse, 401: ErrorResponse}, auth=None)
     async def authorize_billing(self, request):
