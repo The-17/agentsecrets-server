@@ -314,6 +314,27 @@ class SecretRotationService:
                     "rotation_type",
                     "Key is a rotation trust anchor and can never be an autonomous target (HR-M1)",
                 )
+            if rotation_type == "value_client" and provider_binding is not None:
+                raise BodyValidationError(
+                    "provider_binding", "Meaningful only for autonomous/provider rotation"
+                )
+            if rotation_type == "value_provider":
+                if provider_binding is None:
+                    raise BodyValidationError("provider_binding", "Required for provider rotation")
+                checked = _validate_provider_binding_shape(provider_binding)
+                if checked["admin_credential_ref"] == secret.key:
+                    raise BodyValidationError("provider_binding", "A secret cannot rotate itself")
+                ref_exists = await Secret.objects.filter(
+                    project_id=secret.project_id, key=checked["admin_credential_ref"],
+                    environment=environment,
+                ).aexists()
+                if not ref_exists:
+                    raise BodyValidationError(
+                        "provider_binding",
+                        f"Admin credential '{checked['admin_credential_ref']}' does not exist "
+                        "in this project/environment",
+                    )
+                provider_binding = checked
             if provider_binding is not None and not isinstance(provider_binding, dict):
                 raise BodyValidationError("provider_binding", "Must be an object")
             secret.rotation_type = rotation_type
@@ -373,14 +394,17 @@ class SecretRotationService:
         rotation_id: str,
         reason: str = "routine",
     ) -> tuple[dict[str, Any], bool]:
-        """B2 autonomous execute: stage a resolver-encrypted value and promote
-        it in one atomic transaction. The resolver is a DEK-holder, so
-        ciphertext-only handling preserves zero-knowledge end to end.
+        """B2/B3 managed execute: stage a DEK-holder-encrypted value and
+        promote it in one atomic transaction. The caller (resolver or its
+        isolated executor) is a DEK-holder, so ciphertext-only handling
+        preserves zero-knowledge end to end.
 
         Authorization is the resolver's Ed25519 identity (checked at the view
         layer) plus server-side re-validation: the secret must belong to the
-        claimed workspace, be armed for value_auto, and pass the HR-M1
-        trust-anchor denylist. Returns (result, replayed)."""
+        claimed workspace; value_auto targets must pass the HR-M1 denylist;
+        value_provider targets must carry a valid binding whose admin
+        credential resolves in the same project/environment (HR-M2).
+        Returns (result, replayed)."""
         if reason not in SecretRotationService.REASONS:
             raise BodyValidationError("reason", "Must be 'routine' or 'compromise'")
         if not ciphertext:
@@ -400,13 +424,19 @@ class SecretRotationService:
                     raise NotFoundError(
                         f"Secret '{key.upper()}' does not exist in this workspace/project"
                     )
-                if secret.rotation_type != "value_auto":
+                if secret.rotation_type not in ("value_auto", "value_provider"):
                     raise BodyValidationError(
-                        "rotation_type", "Secret is not armed for autonomous rotation"
+                        "rotation_type", "Secret is not armed for managed rotation"
                     )
-                if not b2_key_allowed(secret.key):
-                    raise BodyValidationError(
-                        "key", "Key is a rotation trust anchor and can never be an autonomous target (HR-M1)"
+                if secret.rotation_type == "value_auto":
+                    if not b2_key_allowed(secret.key):
+                        raise BodyValidationError(
+                            "key", "Key is a rotation trust anchor and can never be an autonomous target (HR-M1)"
+                        )
+                    version_binding = {"mode": "autonomous"}
+                else:
+                    version_binding = _validate_provider_binding_sync(
+                        secret=secret, binding=secret.rotation_binding, environment=environment
                     )
                 existing = SecretVersion.objects.filter(
                     secret=secret, rotation_id=rotation_id
@@ -437,7 +467,7 @@ class SecretRotationService:
                     staging_label="pending",
                     rotation_reason=reason,
                     rotation_id=rotation_id,
-                    provider_binding={"mode": "autonomous"},
+                    provider_binding=version_binding,
                     created_by=None,
                 )
                 current_id, previous_id = _promote_pending_txn(
@@ -467,6 +497,52 @@ class SecretRotationService:
         except Exception as exc:
             logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
         return result, replayed
+
+
+# HR-M2: provider_binding can never be a confused deputy. The admin
+# credential reference must resolve to a real secret in the SAME
+# project/environment as the rotated secret — checked at arm time and
+# re-checked at execution time, server-side in both cases (the forgeable
+# server row is never trusted; the check runs against live DB state here).
+# Adapter ids are a closed code-defined set; no endpoint or extraction path
+# is caller-supplied (HR-C1).
+B3_ADAPTERS = ("postgres",)
+
+
+def _binding_error(field: str, message: str) -> BodyValidationError:
+    return BodyValidationError(field, message)
+
+
+def _validate_provider_binding_shape(binding: Any) -> dict[str, Any]:
+    if not isinstance(binding, dict):
+        raise _binding_error("provider_binding", "Must be an object")
+    adapter = binding.get("adapter")
+    if adapter not in B3_ADAPTERS:
+        raise _binding_error(
+            "provider_binding",
+            f"Adapter {adapter!r} is not supported yet (supported: {', '.join(B3_ADAPTERS)})",
+        )
+    ref = binding.get("admin_credential_ref")
+    if not ref or not isinstance(ref, str):
+        raise _binding_error("provider_binding", "admin_credential_ref is required")
+    return {"mode": "provider", "adapter": adapter, "admin_credential_ref": ref.upper()}
+
+
+def _validate_provider_binding_sync(*, secret: Secret, binding: Any, environment: str) -> dict[str, Any]:
+    """Sync HR-M2 check for the execute path (already inside a transaction)."""
+    checked = _validate_provider_binding_shape(binding)
+    ref_key = checked["admin_credential_ref"]
+    if ref_key == secret.key:
+        raise _binding_error("provider_binding", "A secret cannot rotate itself")
+    exists = Secret.objects.filter(
+        project_id=secret.project_id, key=ref_key, environment=environment
+    ).exists()
+    if not exists:
+        raise _binding_error(
+            "provider_binding",
+            f"Admin credential '{ref_key}' does not exist in this project/environment",
+        )
+    return checked
 
 
 # HR-M1: B2 scope structurally excludes the rotation system's own trust
