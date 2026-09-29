@@ -9,7 +9,7 @@ from ninja_extra import api_controller, route
 
 from apps.accounts.models import User
 from apps.accounts.auth import JWTAuth, InternalOrUserAuth, ResolverSignatureAuth
-from apps.secrets_app.schemas import DueValueRotationItemSchema
+from apps.secrets_app.schemas import DueValueRotationItemSchema, ValueExecuteSchema, SecretPromoteResponseDataSchema
 from ninja import Query
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
@@ -39,6 +39,7 @@ from .schemas import (
     AgentTokenItemSchema,
     AgentTokenCreatedResponseDataSchema,
     AgentVerifyResponseSchema,
+    ResolverDelegationResponseDataSchema,
     TokenRotateSchema,
     RotationPolicySchema,
     MintSuccessorSchema,
@@ -607,6 +608,31 @@ class ResolverController:
         from apps.secrets_app.selectors import SecretSelector
         data = await SecretSelector.get_due_value_rotations(workspace_id=workspace_id)
         return CustomResponse.success(message="Due value rotations retrieved", data=data)
+
+    @route.post("/rotation/value-execute/", response={200: DataResponse[SecretPromoteResponseDataSchema], 400: ErrorResponse, 401: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_value_execute(self, request, data: ValueExecuteSchema):
+        """B2 autonomous execute (resolver-signed): stage a resolver-encrypted
+        value and promote it in one atomic transaction. The resolver is a
+        DEK-holder, so ciphertext-only handling preserves zero-knowledge."""
+        from apps.secrets_app.rotation import SecretRotationService
+        result, _ = await SecretRotationService.execute_autonomous_rotation(
+            workspace_id=uuid.UUID(data.workspace_id),
+            project_id=uuid.UUID(data.project_id),
+            key=data.key,
+            environment=data.environment,
+            ciphertext=data.ciphertext,
+            rotation_id=data.rotation_id,
+            reason=data.reason,
+        )
+        return CustomResponse.success(message="Autonomous rotation executed", data=result)
+
+    @route.get("/rotation/workspace-keys/", response={200: DataResponse[ResolverDelegationResponseDataSchema], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_workspace_keys(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Active CEDK delegation for B2 DEK sync (sealed blob only). The
+        resolver unseals with its own CEDK_priv; no presenting token exists
+        on the unattended path."""
+        data = await CloudDelegationSelector.get_resolver_delegation(workspace_id=workspace_id)
+        return CustomResponse.success(message="Resolver delegation retrieved", data=data)
 
     @route.post("/billing/authorize/", response={200: InternalBillingAuthorizeResponse, 401: ErrorResponse}, auth=None)
     async def authorize_billing(self, request):

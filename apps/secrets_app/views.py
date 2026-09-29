@@ -329,6 +329,7 @@ class SecretsController:
         result = await SecretRotationService.set_rotation_policy(
             user=request.auth, project_id=project_id, key=key, environment=environment,
             rotation_type=data.rotation_type, period_days=data.period_days,
-            overlap_hours=data.overlap_hours, enabled=data.enabled,
+            overlap_hours=data.overlap_hours, provider_binding=data.provider_binding,
+            enabled=data.enabled,
         )
         return CustomResponse.success(message="Rotation policy updated", data=result)

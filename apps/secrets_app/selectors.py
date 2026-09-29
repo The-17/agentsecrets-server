@@ -206,7 +206,7 @@ class SecretSelector:
             next_rotation_at__lte=now,
         ).exclude(rotation_type="none").only(
             "id", "project_id", "environment", "key",
-            "rotation_type", "rotation_period", "next_rotation_at",
+            "rotation_type", "rotation_period", "rotation_binding", "next_rotation_at",
         )
         async for s in qs:
             due.append({
@@ -217,5 +217,6 @@ class SecretSelector:
                 "rotation_type": s.rotation_type,
                 "rotation_period_days": s.rotation_period.days if s.rotation_period else None,
                 "next_rotation_at": s.next_rotation_at.isoformat() if s.next_rotation_at else None,
+                "rotation_binding": s.rotation_binding or {},
             })
         return due

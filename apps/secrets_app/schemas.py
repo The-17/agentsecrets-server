@@ -121,7 +121,24 @@ class SecretRotationPolicySchema(Schema):
     rotation_type: str = "value_client"  # value_client | value_auto | value_provider
     period_days: Optional[int] = None
     overlap_hours: Optional[int] = None
+    provider_binding: Optional[Dict[str, Any]] = None
     enabled: bool = True
+
+
+class ValueExecuteSchema(Schema):
+    """B2 autonomous execute (resolver-signed): stage a resolver-encrypted
+    value and promote it atomically. Ciphertext is the resolver's DEK
+    ciphertext; the server applies only its own envelope."""
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    project_id: str
+    environment: str = "development"
+    key: str
+    ciphertext: str
+    rotation_id: str
+    reason: str = "routine"
+    overlap_hours: Optional[int] = None
 
 
 # ==========================================
@@ -273,3 +290,4 @@ class DueValueRotationItemSchema(Schema):
     rotation_type: str
     rotation_period_days: Optional[int] = None
     next_rotation_at: Optional[str] = None
+    rotation_binding: Dict[str, Any] = {}

@@ -325,6 +325,13 @@ class FamilyRevokeResponseDataSchema(Schema):
     token_ids: List[str] = []
 
 
+class ResolverDelegationResponseDataSchema(Schema):
+    workspace_id: str
+    sealed_workspace_key: Optional[str] = None
+    public_key: Optional[str] = None
+    has_delegation: bool = False
+
+
 class AgentVerifyResponseSchema(Schema):
     valid: bool
     reason: Optional[str] = None

@@ -59,6 +59,10 @@ class Secret(BaseModel):
         ],
         help_text="Rotation class; arming is desired-state only, execution is Pro-gated in the resolver (HR-M3)"
     )
+    rotation_binding = models.JSONField(
+        default=dict, blank=True,
+        help_text="B2 mint params (mode/length_bytes/encoding); B3 adapter id + admin credential ref"
+    )
     rotation_period = models.DurationField(null=True, blank=True)
     rotation_overlap = models.DurationField(
         null=True, blank=True,

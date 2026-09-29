@@ -514,6 +514,23 @@ class CloudDelegationSelector:
             "user_encrypted_workspace_key": member.encrypted_workspace_key,
         }
 
+    @staticmethod
+    async def get_resolver_delegation(*, workspace_id: uuid.UUID) -> dict[str, Any]:
+        """Active CEDK delegation for resolver-identity callers (B2 DEK sync).
+
+        Returns the sealed blob and public key only — no user material, no
+        membership lookup. The resolver unseals with its own CEDK_priv."""
+        from .models import CloudDelegationKey
+        delegation = await CloudDelegationKey.objects.filter(
+            workspace_id=workspace_id, is_active=True
+        ).afirst()
+        return {
+            "workspace_id": str(workspace_id),
+            "sealed_workspace_key": delegation.sealed_workspace_key if delegation else None,
+            "public_key": delegation.public_key if delegation else None,
+            "has_delegation": bool(delegation and delegation.sealed_workspace_key),
+        }
+
 
 class WorkloadSelector:
     """Selector for headless container workload secret deliveries."""
