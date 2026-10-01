@@ -891,3 +891,90 @@ class WorkspaceSyncContractTests(TestCase):
         if v:
             again = self._sync(self.raw, version=v).json()
             self.assertTrue(again.get("unchanged"))
+
+
+class RevokedTokensEndpointTests(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="owner_revoked@example.com",
+            password="SecurePassword123!",
+            first_name="Owner",
+            last_name="Revoked",
+        )
+        self.stranger = User.objects.create_user(
+            email="stranger_revoked@example.com",
+            password="SecurePassword123!",
+            first_name="Stranger",
+            last_name="Revoked",
+        )
+        self.ws = Workspace.objects.create(name="Revoke WS", owner=self.owner)
+        Membership.objects.create(
+            user=self.owner,
+            workspace=self.ws,
+            role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE,
+        )
+        self.agent = AgentRegistration.objects.create(
+            workspace=self.ws,
+            name="test-agent",
+            created_by=self.owner,
+        )
+
+        owner_refresh = RefreshToken.for_user(self.owner)
+        self.owner_headers = {"HTTP_AUTHORIZATION": f"Bearer {owner_refresh.access_token}"}
+
+        stranger_refresh = RefreshToken.for_user(self.stranger)
+        self.stranger_headers = {"HTTP_AUTHORIZATION": f"Bearer {stranger_refresh.access_token}"}
+
+    def test_revoked_tokens_endpoint_returns_correct_tokens(self):
+        now = timezone.now()
+        # 1. Active token - should NOT be returned
+        active_tok = AgentToken.objects.create(
+            id="agt_active_1",
+            registration=self.agent,
+            workspace=self.ws,
+            token_hash="hash_active_1",
+            label="active",
+        )
+        # 2. Token with revoked_at set - SHOULD be returned
+        revoked_tok_1 = AgentToken.objects.create(
+            id="agt_revoked_1",
+            registration=self.agent,
+            workspace=self.ws,
+            token_hash="hash_revoked_1",
+            label="revoked_by_timestamp",
+            revoked_at=now,
+        )
+        # 3. Revoked token in ANOTHER workspace - should NOT be returned
+        other_ws = Workspace.objects.create(name="Other WS", owner=self.owner)
+        other_agent = AgentRegistration.objects.create(workspace=other_ws, name="other-agent")
+        AgentToken.objects.create(
+            id="agt_other_revoked",
+            registration=other_agent,
+            workspace=other_ws,
+            token_hash="hash_other_revoked",
+            label="other_revoked",
+            revoked_at=now,
+        )
+
+        res = self.client.get(
+            f"/api/workspaces/{self.ws.id}/agents/revoked-tokens/",
+            **self.owner_headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "success")
+        token_ids = set(data["data"]["token_ids"])
+
+        self.assertIn("agt_revoked_1", token_ids)
+        self.assertNotIn("agt_active_1", token_ids)
+        self.assertNotIn("agt_other_revoked", token_ids)
+
+    def test_revoked_tokens_endpoint_rejects_non_members(self):
+        res = self.client.get(
+            f"/api/workspaces/{self.ws.id}/agents/revoked-tokens/",
+            **self.stranger_headers,
+        )
+        self.assertEqual(res.status_code, 404)
+

@@ -237,6 +237,10 @@ class AgentTokenCreatedResponseDataSchema(Schema):
     token_metadata: Dict[str, Any]
 
 
+class RevokedTokensResponseDataSchema(Schema):
+    token_ids: List[str] = []
+
+
 class AgentVerifyResponseSchema(Schema):
     valid: bool
     reason: Optional[str] = None

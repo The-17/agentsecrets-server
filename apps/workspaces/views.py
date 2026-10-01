@@ -37,6 +37,7 @@ from .schemas import (
     AgentTokenItemSchema,
     AgentTokenCreatedResponseDataSchema,
     AgentVerifyResponseSchema,
+    RevokedTokensResponseDataSchema,
     InternalBillingAuthorizeRequest,
     InternalBillingAuthorizeResponse,
     AuditLogItemSchema,
@@ -297,6 +298,12 @@ class AgentController:
             data={"agent": agent_data, "token": raw_token, "token_id": token_id},
             status_code=201,
         )
+
+    @route.get("/{workspace_id}/agents/revoked-tokens/", response={200: DataResponse[RevokedTokensResponseDataSchema], 403: ErrorResponse})
+    async def list_revoked_tokens(self, request, workspace_id: uuid.UUID):
+        await WorkspaceSelector.get_membership(user=request.auth, workspace_id=workspace_id)
+        token_ids = await AgentSelector.list_revoked_token_ids(workspace_id=workspace_id)
+        return CustomResponse.success(message="Revoked tokens retrieved", data={"token_ids": token_ids})
 
     @route.get("/{workspace_id}/agents/{registration_id}/", response={200: DataResponse[AgentItemSchema], 404: ErrorResponse})
     async def get_agent(self, request, workspace_id: uuid.UUID, registration_id: str):

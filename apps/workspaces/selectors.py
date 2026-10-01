@@ -302,6 +302,17 @@ class AgentSelector:
             })
         return data
 
+    @staticmethod
+    async def list_revoked_token_ids(*, workspace_id: uuid.UUID) -> list[str]:
+        """List all revoked token IDs for a workspace."""
+        now = timezone.now()
+        q = Q(revoked_at__isnull=False)
+        if hasattr(AgentToken, "rotation_state"):
+            q |= Q(rotation_state="revoked")
+            q |= (Q(rotation_state="superseded") & (Q(overlap_until__isnull=True) | Q(overlap_until__lt=now)))
+        qs = AgentToken.objects.filter(workspace_id=workspace_id).filter(q).values_list("id", flat=True)
+        return [str(token_id) async for token_id in qs]
+
 
 class AuditSelector:
     """
