@@ -319,6 +319,19 @@ class AgentSelector:
         return data
 
     @staticmethod
+    async def list_revoked_token_ids(*, workspace_id: uuid.UUID) -> list[str]:
+        """List all revoked and expired superseded token IDs for a workspace."""
+        now = timezone.now()
+        qs = AgentToken.objects.filter(
+            workspace_id=workspace_id
+        ).filter(
+            Q(revoked_at__isnull=False)
+            | Q(rotation_state="revoked")
+            | (Q(rotation_state="superseded") & (Q(overlap_until__isnull=True) | Q(overlap_until__lt=now)))
+        ).values_list("id", flat=True)
+        return [str(token_id) async for token_id in qs]
+
+    @staticmethod
     async def get_due_token_rotations(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
         """Rotation-armed families past their cadence (metadata only, never
         secret material). Consumed by the resolver's Pro-gated sweep (HR-M3)."""

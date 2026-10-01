@@ -325,6 +325,10 @@ class FamilyRevokeResponseDataSchema(Schema):
     token_ids: List[str] = []
 
 
+class RevokedTokensResponseDataSchema(Schema):
+    token_ids: List[str] = []
+
+
 class ResolverDelegationResponseDataSchema(Schema):
     workspace_id: str
     sealed_workspace_key: Optional[str] = None
