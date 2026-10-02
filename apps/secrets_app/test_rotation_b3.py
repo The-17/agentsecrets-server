@@ -137,6 +137,21 @@ class ProviderBindingTests(TestCase):
         policy = res.json()["data"]["policy"]
         self.assertEqual(policy["rotation_type"], "value_provider")
         self.assertEqual(policy["rotation_binding"]["admin_credential_ref"], "PGADMIN_DSN")
+        # Phase-1 backfill: no ref supplied -> bundled pin, no hash.
+        self.assertEqual(policy["rotation_binding"]["adapter_ref"], "postgres@1.0.0")
+
+    def test_arm_stores_explicit_ref(self):
+        res = self._arm({"adapter": "postgres", "admin_credential_ref": "pgadmin_dsn",
+                         "adapter_ref": "postgres@1.0.0#sha256:" + "ab" * 32})
+        policy = res.json()["data"]["policy"]
+        self.assertTrue(policy["rotation_binding"]["adapter_ref"].endswith("#sha256:" + "ab" * 32))
+
+    def test_arm_rejects_bad_refs(self):
+        base = {"adapter": "postgres", "admin_credential_ref": "pgadmin_dsn"}
+        self._arm({**base, "adapter_ref": "postgres"}, expected=422)
+        self._arm({**base, "adapter_ref": "postgres@v1"}, expected=422)
+        self._arm({**base, "adapter_ref": "stripe@1.0.0"}, expected=422)
+        self._arm({**base, "adapter_ref": "postgres@1.0.0#sha256:xyz"}, expected=422)
 
     def test_arm_rejects_bad_bindings(self):
         self._arm({"adapter": "stripe"}, expected=422)

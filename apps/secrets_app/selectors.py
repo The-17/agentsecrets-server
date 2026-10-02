@@ -209,6 +209,7 @@ class SecretSelector:
             "rotation_type", "rotation_period", "rotation_binding", "next_rotation_at",
         )
         async for s in qs:
+            from apps.secrets_app.rotation import _backfill_adapter_ref
             due.append({
                 "secret_id": str(s.id),
                 "project_id": str(s.project_id),
@@ -217,6 +218,6 @@ class SecretSelector:
                 "rotation_type": s.rotation_type,
                 "rotation_period_days": s.rotation_period.days if s.rotation_period else None,
                 "next_rotation_at": s.next_rotation_at.isoformat() if s.next_rotation_at else None,
-                "rotation_binding": s.rotation_binding or {},
+                "rotation_binding": _backfill_adapter_ref(s.rotation_binding) or {},
             })
         return due

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import Any
 from django.db import transaction
@@ -355,7 +356,7 @@ class SecretRotationService:
                 "rotation_type": secret.rotation_type,
                 "rotation_period_days": secret.rotation_period.days if secret.rotation_period else None,
                 "next_rotation_at": secret.next_rotation_at.isoformat() if secret.next_rotation_at else None,
-                "rotation_binding": secret.rotation_binding or {},
+                "rotation_binding": _backfill_adapter_ref(secret.rotation_binding) or {},
             },
         }
 
@@ -378,7 +379,7 @@ class SecretRotationService:
                 "rotation_type": secret.rotation_type,
                 "rotation_period_days": secret.rotation_period.days if secret.rotation_period else None,
                 "next_rotation_at": secret.next_rotation_at.isoformat() if secret.next_rotation_at else None,
-                "rotation_binding": secret.rotation_binding or {},
+                "rotation_binding": _backfill_adapter_ref(secret.rotation_binding) or {},
             },
             "versions": versions,
         }
@@ -513,6 +514,54 @@ def _binding_error(field: str, message: str) -> BodyValidationError:
     return BodyValidationError(field, message)
 
 
+# Phase-1 adapter refs: "<id>@<version>" with optional "#sha256:<hex>" pin.
+# Shape-validated and stored here; hash verification against the registry
+# activates in phase 2 (no registry exists yet). Until then the executor
+# runs the bundled descriptor and the ref is recorded, not enforced — the
+# stored shape is what phase 2 will verify, so get it right now.
+ADAPTER_REF_RE = re.compile(
+    r"^(?P<id>[a-z0-9][a-z0-9-]{1,62}[a-z0-9])@"
+    r"(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    r"(?:#sha256:(?P<hash>[0-9a-f]{64}))?$"
+)
+
+# Bundled phase-1 descriptor versions (id -> version). Backfill target for
+# arms created before adapter_ref existed.
+BUNDLED_ADAPTER_VERSIONS = {"postgres": "1.0.0"}
+
+
+def _validate_adapter_ref(adapter: str, ref: Any) -> str:
+    if not ref or not isinstance(ref, str):
+        # Backfill: arms predating adapter_ref pin to the bundled version
+        # with no hash (hash enforcement is phase-2).
+        return f"{adapter}@{BUNDLED_ADAPTER_VERSIONS[adapter]}"
+    m = ADAPTER_REF_RE.match(ref)
+    if not m:
+        raise _binding_error(
+            "provider_binding",
+            "adapter_ref must be <id>@<version> or <id>@<version>#sha256:<hex>",
+        )
+    if m.group("id") != adapter:
+        raise _binding_error("provider_binding", "adapter_ref id must match adapter")
+    return ref
+
+
+def _backfill_adapter_ref(binding: Any) -> Any:
+    """Lazy backfill for arms predating adapter_ref: provider-mode bindings
+    without a ref read as <adapter>@<bundled-version> (no hash — phase-2
+    verifies hashes; phase-1 records shape). Non-provider bindings pass
+    through untouched. Stored rows are NOT rewritten (no migration);
+    re-arming persists the ref going forward."""
+    if not isinstance(binding, dict) or binding.get("mode") != "provider":
+        return binding
+    if binding.get("adapter_ref"):
+        return binding
+    adapter = binding.get("adapter")
+    if adapter in BUNDLED_ADAPTER_VERSIONS:
+        return {**binding, "adapter_ref": f"{adapter}@{BUNDLED_ADAPTER_VERSIONS[adapter]}"}
+    return binding
+
+
 def _validate_provider_binding_shape(binding: Any) -> dict[str, Any]:
     if not isinstance(binding, dict):
         raise _binding_error("provider_binding", "Must be an object")
@@ -530,6 +579,7 @@ def _validate_provider_binding_shape(binding: Any) -> dict[str, Any]:
         raise _binding_error("provider_binding", "target_user is required for the postgres adapter")
     normalized: dict[str, Any] = {
         "mode": "provider", "adapter": adapter, "admin_credential_ref": ref.upper(),
+        "adapter_ref": _validate_adapter_ref(adapter, binding.get("adapter_ref")),
     }
     if target_user:
         normalized["target_user"] = target_user
