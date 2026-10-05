@@ -82,6 +82,26 @@ from .services import (
 logger = logging.getLogger("apps.workspaces")
 
 
+async def _resolver_signature_valid(request) -> bool:
+    """Ed25519 resolver-identity check for ingest endpoints (async-safe).
+
+    The resolver's unattended forensic batches carry no user/agent
+    credential. Accepting its signature here adds no privilege: the same key
+    already authorizes value-execute writes and family revokes. Any failure
+    (no key configured, bad signature, stale timestamp) returns False and the
+    caller falls through to its 401. Scope stays unrestricted (None) exactly
+    like the operator service-key path — per-entry workspace attribution is
+    still recorded, and entries carry identifiers only (HR-H1).
+    """
+    try:
+        from asgiref.sync import sync_to_async
+
+        from apps.accounts.auth import ResolverSignatureAuth
+        return bool(await sync_to_async(ResolverSignatureAuth()._verify)(request))
+    except Exception:
+        return False
+
+
 async def _ingest_workspace_scope(*, user, agent_token_auth) -> set[str] | None:
     """Return the set of workspace ids the ingest caller may write to.
 
@@ -745,10 +765,13 @@ class ResolverController:
                 ).afirst()
 
         if not user and not agent_token_auth:
-            unauth_key = f"rl_unauth_audit_{ip}"
-            unauth_count = cache.get(unauth_key, 0)
-            cache.set(unauth_key, unauth_count + 1, timeout=86400)
-            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
+            if await _resolver_signature_valid(request):
+                request.auth = None  # resolver channel: scope unrestricted (service-key parity)
+            else:
+                unauth_key = f"rl_unauth_audit_{ip}"
+                unauth_count = cache.get(unauth_key, 0)
+                cache.set(unauth_key, unauth_count + 1, timeout=86400)
+                return 401, {"detail": "Unauthorized: valid service key or agent token required"}
 
         request.auth = user or agent_token_auth
 
@@ -806,10 +829,13 @@ class ResolverController:
                 ).afirst()
 
         if not user and not agent_token_auth:
-            unauth_key = f"rl_unauth_forensic_{ip}"
-            unauth_count = cache.get(unauth_key, 0)
-            cache.set(unauth_key, unauth_count + 1, timeout=86400)
-            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
+            if await _resolver_signature_valid(request):
+                request.auth = None  # resolver channel: scope unrestricted (service-key parity)
+            else:
+                unauth_key = f"rl_unauth_forensic_{ip}"
+                unauth_count = cache.get(unauth_key, 0)
+                cache.set(unauth_key, unauth_count + 1, timeout=86400)
+                return 401, {"detail": "Unauthorized: valid service key or agent token required"}
 
         request.auth = user or agent_token_auth
 
