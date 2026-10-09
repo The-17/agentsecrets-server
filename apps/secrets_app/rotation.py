@@ -117,17 +117,11 @@ class SecretRotationService:
 
         version, replayed = await _create()
         try:
-            await ActivityLogService.record(
-                workspace_id=project.workspace_id,
-                project_id=project.id,
-                actor=user,
-                actor_email=getattr(user, "email", ""),
-                action="secret.rotation_pending",
-                target_type="secret",
-                target_id=str(secret.id),
-                target_name=secret.key,
+            await ActivityLogService.record_target(
+                user=user, workspace_id=project.workspace_id, project_id=project.id,
+                action="secret.rotation_pending", target_type="secret",
+                target_id=secret.id, target_name=secret.key,
                 metadata={"key": secret.key, "environment": environment, "reason": reason},
-                source="api",
             )
         except Exception as exc:
             logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
@@ -164,17 +158,11 @@ class SecretRotationService:
             reason=reason,
         )
         try:
-            await ActivityLogService.record(
-                workspace_id=project.workspace_id,
-                project_id=project.id,
-                actor=user,
-                actor_email=getattr(user, "email", ""),
-                action="secret.rotation_promoted",
-                target_type="secret",
-                target_id=str(secret.id),
-                target_name=secret.key,
+            await ActivityLogService.record_target(
+                user=user, workspace_id=project.workspace_id, project_id=project.id,
+                action="secret.rotation_promoted", target_type="secret",
+                target_id=secret.id, target_name=secret.key,
                 metadata={"key": secret.key, "environment": environment, "reason": reason},
-                source="api",
             )
         except Exception as exc:
             logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
@@ -238,17 +226,11 @@ class SecretRotationService:
 
         current_id, previous_id = await _rollback()
         try:
-            await ActivityLogService.record(
-                workspace_id=project.workspace_id,
-                project_id=project.id,
-                actor=user,
-                actor_email=getattr(user, "email", ""),
-                action="secret.rotation_rollback",
-                target_type="secret",
-                target_id=str(secret.id),
-                target_name=secret.key,
+            await ActivityLogService.record_target(
+                user=user, workspace_id=project.workspace_id, project_id=project.id,
+                action="secret.rotation_rollback", target_type="secret",
+                target_id=secret.id, target_name=secret.key,
                 metadata={"key": secret.key, "environment": environment},
-                source="api",
             )
         except Exception as exc:
             logger.warning("ROTATION_AUDIT_SKIP: %s", exc)
@@ -485,13 +467,10 @@ class SecretRotationService:
 
         result, replayed = await _execute()
         try:
-            await ActivityLogService.record(
-                workspace_id=workspace_id,
-                project_id=project_id,
-                action="secret.rotation_autonomous",
-                target_type="secret",
-                target_id=str(project_id),
-                target_name=key.upper(),
+            await ActivityLogService.record_target(
+                user=None, workspace_id=workspace_id, project_id=project_id,
+                action="secret.rotation_autonomous", target_type="secret",
+                target_id=project_id, target_name=key.upper(),
                 metadata={"key": key.upper(), "environment": environment, "reason": reason},
                 source="cloud",
             )

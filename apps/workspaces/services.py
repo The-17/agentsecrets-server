@@ -666,16 +666,13 @@ class AgentService:
             predecessor_id=target.id, rotation_id=None, reason=reason, overlap=overlap,
         )
         try:
-            await ActivityLogService.record(
-                workspace_id=workspace_id,
-                actor=user,
-                actor_email=getattr(user, "email", ""),
+            await ActivityLogService.record_target(
+                user=user, workspace_id=workspace_id, project_id=None,
                 action="agent_token.compromise_rotated" if reason == "compromise" else "agent_token.rotated",
                 target_type="agent_token",
-                target_id=str(successor.id),
+                target_id=successor.id,
                 target_name=target.label or str(target.id),
                 metadata={"reason": reason, "family_id": successor.rotation_family_id},
-                source="api",
             )
         except Exception as exc:
             logger.warning("ROTATE_AUDIT_SKIP: %s", exc)
@@ -789,12 +786,11 @@ class AgentService:
 
         count, ids = await _revoke_sync()
         try:
-            await ActivityLogService.record(
-                workspace_id=workspace_id,
+            await ActivityLogService.record_target(
+                user=None, workspace_id=workspace_id, project_id=None,
                 action="agent_token.family_revoked",
                 target_type="agent_token_family",
-                target_id=family_key,
-                target_name=family_key,
+                target_id=family_key, target_name=family_key,
                 metadata={"reason": reason, "revoked_count": count},
                 source="cloud",
             )
@@ -1109,6 +1105,37 @@ class ActivityLogService:
         except Exception as e:
             logger.error(f"Failed to record activity log {action}: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    async def record_target(
+        *,
+        user,
+        workspace_id,
+        project_id,
+        action: str,
+        target_type: str,
+        target_id,
+        target_name: str,
+        metadata: dict | None = None,
+        source: str = "api",
+    ):
+        """Shorthand for the overwhelmingly common record() shape: actor +
+        target + action + metadata. Every call site that passes these same
+        kwargs should use this instead of spelling them. The unattended
+        (user=None, source="cloud") rotation path uses the same helper.
+        """
+        await ActivityLogService.record(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            actor=user,
+            actor_email=getattr(user, "email", ""),
+            action=action,
+            target_type=target_type,
+            target_id=str(target_id),
+            target_name=target_name,
+            metadata=metadata or {},
+            source=source,
+        )
 
     @staticmethod
     async def record_batch(

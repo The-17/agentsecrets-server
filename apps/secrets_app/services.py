@@ -60,17 +60,11 @@ class ProjectService:
             description=data.description,
         )
         project.workspace = membership.workspace
-        await ActivityLogService.record(
-            workspace_id=membership.workspace.id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="project.created",
-            target_type="project",
-            target_id=str(project.id),
-            target_name=project.name,
+        await ActivityLogService.record_target(
+            user=user, workspace_id=membership.workspace.id, project_id=project.id,
+            action="project.created", target_type="project",
+            target_id=project.id, target_name=project.name,
             metadata={"name": project.name, "description": project.description},
-            source="api",
         )
         logger.info(
             f"PROJECT_CREATED: Project '{project.name}' (ID: {project.id}) "
@@ -115,17 +109,11 @@ class ProjectService:
         ws_id = project.workspace_id
         count = await project.secrets.acount()
         await project.adelete()
-        await ActivityLogService.record(
-            workspace_id=ws_id,
-            project_id=proj_id,
-            actor=user,
-            actor_email=user.email,
-            action="project.deleted",
-            target_type="project",
-            target_id=str(proj_id),
-            target_name=name,
+        await ActivityLogService.record_target(
+            user=user, workspace_id=ws_id, project_id=proj_id,
+            action="project.deleted", target_type="project",
+            target_id=proj_id, target_name=name,
             metadata={"name": name, "secrets_count": count},
-            source="api",
         )
         logger.warning(
             f"PROJECT_DELETED: Project '{name}' (Secrets: {count}) deleted"
@@ -192,40 +180,24 @@ class ProjectService:
 
         secrets_updated = await _execute_transfer()
 
-        # 4. Dual Activity Logs
-        await ActivityLogService.record(
-            workspace_id=source_ws.id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="project.transferred_out",
-            target_type="project",
-            target_id=str(project.id),
-            target_name=project.name,
-            metadata={
+        for ws_id, action, meta in (
+            (source_ws.id, "project.transferred_out", {
                 "target_workspace_id": str(target_ws.id),
                 "target_workspace_name": target_ws.name,
                 "secrets_count": secrets_updated,
-            },
-            source="api",
-        )
-
-        await ActivityLogService.record(
-            workspace_id=target_ws.id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="project.transferred_in",
-            target_type="project",
-            target_id=str(project.id),
-            target_name=project.name,
-            metadata={
+            }),
+            (target_ws.id, "project.transferred_in", {
                 "source_workspace_id": str(source_ws.id),
                 "source_workspace_name": source_ws.name,
                 "secrets_count": secrets_updated,
-            },
-            source="api",
-        )
+            }),
+        ):
+            await ActivityLogService.record_target(
+                user=user, workspace_id=ws_id, project_id=project.id,
+                action=action, target_type="project",
+                target_id=project.id, target_name=project.name,
+                metadata=meta,
+            )
 
         logger.info(
             f"PROJECT_TRANSFERRED: '{project.name}' moved from '{source_ws.name}' to '{target_ws.name}' ({secrets_updated} secrets re-encrypted)"
@@ -432,17 +404,11 @@ class SecretService:
         secret.value = encryption_service.encrypt(data.value)
         await secret.asave(update_fields=["value", "updated_at"])
 
-        await ActivityLogService.record(
-            workspace_id=project.workspace_id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="secret.updated",
-            target_type="secret",
-            target_id=str(secret.id),
-            target_name=secret.key,
+        await ActivityLogService.record_target(
+            user=user, workspace_id=project.workspace_id, project_id=project.id,
+            action="secret.updated", target_type="secret",
+            target_id=secret.id, target_name=secret.key,
             metadata={"key": secret.key, "environment": environment},
-            source="api",
         )
 
         return {
@@ -474,17 +440,11 @@ class SecretService:
         secret_id = str(secret.id)
         secret_key = secret.key
         await secret.adelete()
-        await ActivityLogService.record(
-            workspace_id=project.workspace_id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="secret.deleted",
-            target_type="secret",
-            target_id=secret_id,
-            target_name=secret_key,
+        await ActivityLogService.record_target(
+            user=user, workspace_id=project.workspace_id, project_id=project.id,
+            action="secret.deleted", target_type="secret",
+            target_id=secret_id, target_name=secret_key,
             metadata={"key": secret_key, "environment": environment},
-            source="api",
         )
         logger.warning(
             f"SECRET_DELETED: Secret '{key.upper()}' deleted from project "
@@ -540,17 +500,12 @@ class SecretService:
 
         deleted_count = await _execute_clean()
 
-        await ActivityLogService.record(
-            workspace_id=project.workspace_id,
-            project_id=project.id,
-            actor=user,
-            actor_email=user.email,
-            action="environment.cleaned",
-            target_type="environment",
+        await ActivityLogService.record_target(
+            user=user, workspace_id=project.workspace_id, project_id=project.id,
+            action="environment.cleaned", target_type="environment",
             target_id=f"{project.id}:{environment}",
             target_name=f"{project.name}:{environment}",
             metadata={"environment": environment, "deleted_count": deleted_count},
-            source="api",
         )
         logger.warning(
             f"ENVIRONMENT_CLEANED: Cleaned {deleted_count} secrets from project '{project.name}' ({project.id}) env '{environment}'"
