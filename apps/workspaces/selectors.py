@@ -392,7 +392,11 @@ class AuditSelector:
                 "duration_ms": log["duration_ms"],
                 "redacted": log["redacted"],
                 "resolution_path": log["resolution_path"],
-                "error": log["error"],
+                # error is a JSONField: structured enforcement blocks land here
+                # (e.g. {'decision': 'blocked', ...}). Coerce to a JSON string
+                # so one structured row can never 500 the whole list — same
+                # convention as the export path below.
+                "error": log["error"] if isinstance(log["error"], (str, type(None))) else json.dumps(log["error"], default=str),
                 "source": log.get("source") or "cloud",
             }
             async for log in logs
