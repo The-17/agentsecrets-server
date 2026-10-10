@@ -50,18 +50,21 @@ class Secret(BaseModel):
         help_text="Usage policy: allowed domains and HTTP methods"
     )
     rotation_type = models.CharField(
-        max_length=20, default='none', db_index=True,
+        max_length=20, default='none', null=True, blank=True, db_index=True,
         choices=[
             ('none', 'None'),
             ('value_client', 'Client/CI push (B1)'),
             ('value_auto', 'Resolver-autonomous (B2)'),
             ('value_provider', 'Provider-minted (B3)'),
         ],
-        help_text="Rotation class; arming is desired-state only, execution is Pro-gated in the resolver (HR-M3)"
+        help_text="Rotation class; arming is desired-state only, execution is Pro-gated in the resolver (HR-M3). "
+                  "Nullable so inserts from any code revision or raw path can never violate NOT NULL; "
+                  "None is treated exactly like 'none' everywhere it is read."
     )
     rotation_binding = models.JSONField(
-        default=dict, blank=True,
-        help_text="B2 mint params (mode/length_bytes/encoding); B3 adapter id + admin credential ref"
+        default=dict, null=True, blank=True,
+        help_text="B2 mint params (mode/length_bytes/encoding); B3 adapter id + admin credential ref. "
+                  "Nullable for the same insert-safety reason; readers treat None as {}."
     )
     rotation_period = models.DurationField(null=True, blank=True)
     rotation_overlap = models.DurationField(

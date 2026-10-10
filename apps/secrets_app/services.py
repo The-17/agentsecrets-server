@@ -328,7 +328,12 @@ class SecretService:
                 existing[k].value = enc
                 to_update.append(existing[k])
             else:
-                to_create.append(Secret(project=project, environment=env, key=k, value=enc, policy={}))
+                # Rotation fields set explicitly (never rely on implicit
+                # model defaults here): a new secret is always unarmed.
+                to_create.append(Secret(
+                    project=project, environment=env, key=k, value=enc, policy={},
+                    rotation_type="none", rotation_binding={},
+                ))
 
         @sync_to_async
         def _save_secrets():
