@@ -849,7 +849,7 @@ class CloudSyncSelector:
 
     @staticmethod
     async def build_sync_payload(*, workspace_id: uuid.UUID) -> dict[str, Any]:
-        from .models import CloudDelegationKey, WorkspaceAllowlist
+        from .models import CloudDelegationKey, Workspace, WorkspaceAllowlist
         from apps.common.services.encryption import EncryptionService
         from apps.secrets_app.models import Secret
 
@@ -891,6 +891,12 @@ class CloudSyncSelector:
         if delegation and delegation.updated_at and (latest is None or delegation.updated_at > latest):
             latest = delegation.updated_at
 
+        # 5. Billing entitlement for quota attribution by quota-enforcing
+        # consumers (e.g. the cloud resolver's login posture, which has no
+        # token-bound billing id). None when the workspace has no billing.
+        workspace = await Workspace.objects.filter(id=workspace_id).afirst()
+        billing_id = getattr(workspace, "effective_billing_id", None) if workspace else None
+
         return {
             "workspace_id": str(workspace_id),
             "version": latest.isoformat() if latest else None,
@@ -898,5 +904,6 @@ class CloudSyncSelector:
             "public_key": delegation_public_key,
             "has_delegation": bool(delegation),
             "allowlist": allowlist,
+            "billing_id": billing_id,
             "secrets": secrets,
         }
