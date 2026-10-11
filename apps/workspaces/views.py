@@ -466,6 +466,17 @@ class AuditController:
         fields = await AuditSelector.get_audit_log_detail(log_id=log_id, user=request.auth)
         return CustomResponse.success(message="Audit log detail retrieved", data=fields)
 
+    @route.get("/logs/{log_id}/replay/", response={200: DataResponse[ForensicDecisionReplaySchema], 404: ErrorResponse})
+    async def replay_by_audit(self, request, log_id: str):
+        """Forensic decision replay resolved from a Tier-2 audit id.
+
+        The web's log table only knows audit ids; this resolves the Tier-3
+        twin via correlation_id (timestamp proximity for pre-linkage rows)
+        and returns the same verified replay shape as the forensic endpoint.
+        """
+        data = await AuditSelector.get_replay_by_audit(log_id=log_id, user=request.auth)
+        return CustomResponse.success(message="Audit decision replay retrieved", data=data)
+
     @route.get("/summary/", response={200: DataResponse[AuditSummaryResponseSchema], 400: ErrorResponse})
     async def summary(self, request, workspace_id: str = None):
         if not workspace_id:

@@ -914,6 +914,7 @@ class AgentService:
 
         char_limits = {
             "id": 64,
+            "correlation_id": 64,
             "environment": 20,
             "agent_id": 64,
             "identity_level": 20,
@@ -930,7 +931,7 @@ class AgentService:
         }
 
         direct_fields = [
-            "id", "schema_version", "timestamp", "environment",
+            "id", "correlation_id", "schema_version", "timestamp", "environment",
             "agent_id", "identity_level", "method", "target_url",
             "target_path", "status_code", "duration_ms", "proxy_duration_ms",
             "redacted", "redaction_reason", "resolution_path",
@@ -1253,6 +1254,7 @@ class ForensicLogService:
             entry_kwargs: dict[str, Any] = {
                 "workspace_id": ws_val,
                 "project_id": project_id,
+                "correlation_id": str(e.get("correlation_id") or "")[:64],
                 "stream_id": stream_id[:64],
                 "stream_seq": stream_seq,
                 "prev_chain_hash": prev_chain_hash[:64],

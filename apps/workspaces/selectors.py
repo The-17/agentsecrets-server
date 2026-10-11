@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Count, Max, Q, Subquery, OuterRef, IntegerField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -464,42 +466,90 @@ class AuditSelector:
         return fields
 
     @staticmethod
+    async def get_replay_by_audit(*, log_id: str, user: User) -> dict[str, Any]:
+        """Resolve a Tier-3 forensic replay from a Tier-2 audit id.
+
+        Primary path is the resolver-emitted correlation_id stored on both
+        rows. Pre-linkage rows fall back to timestamp proximity (±2s within
+        the workspace); the resolver emits both rows within milliseconds.
+        Raises NotFoundError when no forensic twin exists (e.g. CLI-origin
+        events, whose forensic chain lives only in local SQLite).
+        """
+        log = await AuditLogEntry.objects.filter(
+            id=log_id
+        ).exclude(identity_level=IdentityLevel.USER).afirst()
+        if not log:
+            raise NotFoundError("Log not found")
+        await WorkspaceSelector.get_membership(user=user, workspace_id=log.workspace_id)
+
+        forensic = None
+        if log.correlation_id:
+            forensic = await ForensicAuditLogEntry.objects.filter(
+                workspace_id=log.workspace_id,
+                correlation_id=log.correlation_id,
+            ).afirst()
+        if forensic is None and log.timestamp:
+            window_start = log.timestamp - timedelta(seconds=2)
+            window_end = log.timestamp + timedelta(seconds=2)
+            forensic = await ForensicAuditLogEntry.objects.filter(
+                workspace_id=log.workspace_id,
+                created_at__gte=window_start,
+                created_at__lte=window_end,
+            ).order_by("created_at").afirst()
+        if forensic is None:
+            raise NotFoundError("No forensic record for this event")
+        return await ForensicLogSelector.get_replay(log_id=forensic.id, user=user)
+
+    @staticmethod
     async def get_audit_log_summary(
         *,
         workspace_id: str,
         start: str | None = None,
         end: str | None = None,
     ) -> dict[str, Any]:
+        # 60s cache-aside: dashboard polls summary on every navigation +
+        # visibility return. Aggregates only — no secret material is cached.
+        cache_key = f"audit-summary:{workspace_id}:{start or 'all'}:{end or 'all'}"
+        cached = await sync_to_async(cache.get)(cache_key)
+        if cached is not None:
+            return cached
+
         qs = AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER)
         if start:
             qs = qs.filter(timestamp__gte=start)
         if end:
             qs = qs.filter(timestamp__lte=end)
 
-        total_requests = await qs.acount()
-        total_errors = await qs.filter(status_code__gte=400).acount()
+        # Single aggregate for totals instead of 3 separate COUNT scans.
+        totals = await qs.aaggregate(
+            total=Count("id"),
+            errors=Count("id", filter=Q(status_code__gte=400)),
+            anon=Count("id", filter=Q(identity_level=IdentityLevel.ANONYMOUS)),
+        )
+        total_requests = totals["total"] or 0
+        total_errors = totals["errors"] or 0
 
         by_agent = await sync_to_async(list)(
             qs.exclude(agent_id__isnull=True).exclude(agent_id="").values("agent_id").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
         by_domain = await sync_to_async(list)(
             qs.values("target_domain").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
         by_credential = await sync_to_async(list)(
             qs.values("credential_ref").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
-        anon_count = await qs.filter(identity_level=IdentityLevel.ANONYMOUS).acount()
+        anon_count = totals["anon"] or 0
 
-        return {
+        result = {
             "period": {"start": start or "all", "end": end or "all"},
             "totals": {"requests": total_requests, "errors": total_errors},
             "by_agent": [{"agent_id": r["agent_id"], "count": r["count"], "failed": r["failed"]} for r in by_agent],
@@ -507,6 +557,8 @@ class AuditSelector:
             "by_domain": [{"domain": r["target_domain"], "count": r["count"], "failed": r["failed"]} for r in by_domain],
             "anonymous_call_count": anon_count,
         }
+        await sync_to_async(cache.set)(cache_key, result, 60)
+        return result
 
 
 class CloudDelegationSelector:

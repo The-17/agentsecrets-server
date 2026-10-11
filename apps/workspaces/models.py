@@ -392,6 +392,10 @@ class AuditLogEntry(models.Model):
     session_id = models.CharField(max_length=255, null=True, blank=True)
     policy_snapshot_id = models.CharField(max_length=255, null=True, blank=True)
     error = models.JSONField(null=True, blank=True)
+    # Per-request linkage binding this Tier-2 row to its Tier-3 forensic twin,
+    # emitted by the cloud resolver (corr_<hex>). Lets the web resolve replay
+    # from an audit id. Null for CLI-origin and pre-linkage rows.
+    correlation_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     class Meta:
         db_table = 'audit_logs'
@@ -625,6 +629,14 @@ class ForensicAuditLogEntry(models.Model):
         default=timezone.now,
         db_index=True,
         help_text="Timestamp when the event occurred"
+    )
+    # Per-request linkage to the Tier-2 audit twin (see AuditLogEntry).
+    correlation_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Resolver-emitted corr_ id binding this record to its audit twin"
     )
 
     class Meta:
