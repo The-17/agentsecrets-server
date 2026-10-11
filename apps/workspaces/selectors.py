@@ -376,13 +376,23 @@ class AuditSelector:
             "identity_level": "identity_level",
             "credential_ref": "credential_ref",
             "environment": "environment",
-            "resolution_path": "resolution_path",
             "source": "source",
         }
         for param, field in simple.items():
             val = params.get(param)
             if val:
                 qs = qs.filter(**{field: val})
+        resolution_path = params.get("resolution_path")
+        if resolution_path:
+            # Comma-separated allowed (e.g. ?resolution_path=env,direct_resolve).
+            values = [v.strip() for v in str(resolution_path).split(",") if v.strip()]
+            if len(values) > 1:
+                qs = qs.filter(resolution_path__in=values)
+            elif values:
+                qs = qs.filter(resolution_path=values[0])
+        exclude_resolution = params.get("exclude_resolution_path")
+        if exclude_resolution:
+            qs = qs.exclude(resolution_path=exclude_resolution)
         domain = params.get("domain")
         if domain:
             qs = qs.filter(target_domain__icontains=domain)
@@ -401,12 +411,13 @@ class AuditSelector:
         return qs
 
     @staticmethod
-    async def list_audit_logs(*, workspace_id: str, params: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+    async def list_audit_logs(*, workspace_id: str, params: dict[str, Any], limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         qs = AuditSelector.apply_filters(
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             params,
         )
         limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
         fields = [
             "id",
             "timestamp",
@@ -424,7 +435,7 @@ class AuditSelector:
             "error",
             "source",
         ]
-        logs = qs.order_by("-timestamp").values(*fields)[:limit]
+        logs = qs.order_by("-timestamp", "-id").values(*fields)[offset : offset + limit]
         return [
             {
                 "id": str(log["id"]),

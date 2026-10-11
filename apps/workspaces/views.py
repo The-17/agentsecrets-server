@@ -453,12 +453,12 @@ class AuditController:
     """
 
     @route.get("/logs/", response={200: DataResponse[List[AuditLogItemSchema]], 400: ErrorResponse})
-    async def list_logs(self, request, workspace_id: str = None, limit: int = 100):
+    async def list_logs(self, request, workspace_id: str = None, limit: int = 100, offset: int = 0):
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await WorkspaceSelector.get_membership(user=request.auth, workspace_id=uuid.UUID(workspace_id))
         params = request.GET.dict()
-        data = await AuditSelector.list_audit_logs(workspace_id=workspace_id, params=params, limit=limit)
+        data = await AuditSelector.list_audit_logs(workspace_id=workspace_id, params=params, limit=limit, offset=offset)
         return CustomResponse.success(message="Audit logs retrieved", data=data)
 
     @route.get("/logs/{log_id}/", response={200: DataResponse[Dict[str, Any]], 404: ErrorResponse})
