@@ -24,7 +24,7 @@ THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "ninja_extra",
-    # "corsheaders",
+    "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
 ]
 
@@ -40,6 +40,7 @@ LOCAL_APPS = [
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'apps.common.middleware.SecurityHeadersMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -188,6 +189,16 @@ ENCRYPTION_KEY = config("ENCRYPTION_KEY")
 RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
+
+# Browser dashboard origins allowed to call this API directly (custom
+# endpoints bypass the hosted dashboard's same-origin proxy, so a
+# self-hosted server must explicitly allow the dashboard origin here).
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in config("CORS_ALLOWED_ORIGINS", default="https://cloud.agentsecrets.tech").split(",")
+    if o.strip()
+]
+CORS_ALLOW_CREDENTIALS = False
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),

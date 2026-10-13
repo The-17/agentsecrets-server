@@ -12,6 +12,7 @@ contextlib2==21.6.0
 cryptography==46.0.3
 Django==5.2.4
 django-autoslug==1.9.9
+django-cors-headers==4.7.0
 django-jazzmin==3.0.4
 django-ninja==1.6.2
 django-ninja-extra==0.31.4
