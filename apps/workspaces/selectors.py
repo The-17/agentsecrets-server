@@ -368,10 +368,10 @@ class AuditSelector:
     Pure read-only query selector layer for Audit Logs.
     """
 
-    # Plan-mode log retention windows. Free workspaces see recent history;
-    # Pro keeps a full year. Unknown tier fails open (no restriction).
-    FREE_RETENTION_DAYS = 30
-    PRO_RETENTION_DAYS = 365
+    # Plan-mode log retention windows. Free keeps 3 days; Pro keeps 30.
+    # Unknown tier fails open (no restriction).
+    FREE_RETENTION_DAYS = 3
+    PRO_RETENTION_DAYS = 30
 
     @staticmethod
     async def retention_window(*, workspace_id: str) -> tuple[int | None, bool]:
