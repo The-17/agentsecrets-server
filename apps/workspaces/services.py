@@ -183,6 +183,44 @@ class MemberService:
     Domain service layer for Workspace Member operations and invitations.
     """
 
+    # Free workspaces hold this many seats (active + pending invites).
+    # Pro is unlimited. This is the same "3 members" the billing page
+    # advertises; the resolver never sees member rows, so the server —
+    # the choke point for web, CLI, and API invites — enforces it.
+    FREE_MEMBER_LIMIT = 3
+    LIMIT_MESSAGE = (
+        "Free workspaces hold 3 members. Upgrade to Pro for unlimited seats."
+    )
+
+    @staticmethod
+    async def check_member_cap(*, user: User, workspace_id: uuid.UUID) -> None:
+        """Raise BodyValidationError when a free workspace is out of seats.
+
+        Pro and unknown tiers pass (fail open). On a would-block, billing is
+        reconciled once first so a stale local tier can't wrongly refuse a
+        workspace the resolver already upgraded to Pro.
+        """
+        ws = await Workspace.objects.filter(id=workspace_id).afirst()
+        if ws is None or getattr(ws, "tier", None) == WorkspaceTier.PRO:
+            return
+        if getattr(ws, "tier", None) not in (WorkspaceTier.FREE,):
+            return
+        seats = await Membership.objects.filter(
+            workspace_id=workspace_id,
+            status__in=[MembershipStatus.ACTIVE, MembershipStatus.INVITED],
+        ).acount()
+        if seats < MemberService.FREE_MEMBER_LIMIT:
+            return
+        try:
+            reconciled = await WorkspaceService.reconcile_workspace_billing(
+                user=user, workspace_id=workspace_id
+            )
+        except Exception:
+            reconciled = {"tier": "free"}
+        if (reconciled or {}).get("tier") == WorkspaceTier.PRO:
+            return
+        raise BodyValidationError("email", MemberService.LIMIT_MESSAGE)
+
     @staticmethod
     async def process_member_invites(
         *,
@@ -196,6 +234,14 @@ class MemberService:
 
         results = []
         any_created = False
+        # Running seat counter so one batch can't overshoot the cap; the
+        # check reconciles billing on a would-block (self-heals stale tier)
+        # and raises only when the workspace is truly out of seats.
+        seats = await Membership.objects.filter(
+            workspace_id=workspace_id,
+            status__in=[MembershipStatus.ACTIVE, MembershipStatus.INVITED],
+        ).acount()
+        cap_known_open = False
 
         for invite in entries:
             try:
@@ -221,6 +267,14 @@ class MemberService:
                     results.append({"email": invite.email, "error": "Already a member"})
                     continue
 
+                if not cap_known_open and seats >= MemberService.FREE_MEMBER_LIMIT:
+                    try:
+                        await MemberService.check_member_cap(user=user, workspace_id=workspace_id)
+                        cap_known_open = True
+                    except BodyValidationError:
+                        results.append({"email": invite.email, "error": MemberService.LIMIT_MESSAGE})
+                        continue
+
                 await Membership.objects.acreate(
                     user=invitee,
                     workspace_id=workspace_id,
@@ -233,6 +287,7 @@ class MemberService:
                 )
                 results.append({"email": invite.email, "error": ""})
                 any_created = True
+                seats += 1
 
             except Exception as e:
                 logger.error(

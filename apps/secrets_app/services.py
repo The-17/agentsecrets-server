@@ -22,7 +22,7 @@ from apps.workspaces.models import (
     MembershipStatus,
     AgentRegistration,
 )
-from apps.workspaces.services import ActivityLogService
+from apps.workspaces.services import ActivityLogService, MemberService
 from .models import Project, Secret
 from .schemas import (
     ProjectCreateSchema,
@@ -276,6 +276,9 @@ class ProjectService:
         else:
             if await Membership.objects.filter(user=invitee, workspace=current_ws).aexists():
                 raise BodyValidationError("email", f"User {data.email} is already a member of this workspace")
+            # Plan seat cap (free holds 3; the migrate path above always lands
+            # at exactly owner + invitee, so it needs no check).
+            await MemberService.check_member_cap(user=user, workspace_id=current_ws.id)
             ws_for_invite = current_ws
             inv_m = await Membership.objects.acreate(
                 user=invitee,
