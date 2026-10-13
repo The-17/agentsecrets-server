@@ -1057,7 +1057,42 @@ class WorkloadService:
 
     @staticmethod
     async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
-        return await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        started_at = timezone.now()
+        payload = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        # Every headless env delivery is a credential injection: record it as a
+        # Tier-2 audit row (resolution_path="env") so container `env` runs show
+        # up in the web audit log like CLI `env` runs do. Best-effort and
+        # non-blocking: delivery must never fail because logging did. Key
+        # names only — values never touch the audit tier.
+        try:
+            keys = sorted((payload.get("secrets") or {}).keys())
+            duration_ms = int((timezone.now() - started_at).total_seconds() * 1000)
+            project_id = payload.get("project_id")
+            await AuditLogEntry.objects.acreate(
+                timestamp=started_at,
+                workspace_id=payload["workspace_id"],
+                project_id=project_id,
+                environment=payload.get("environment") or "production",
+                agent_id=payload.get("agent_name") or "",
+                agent_token_id=payload.get("token_id"),
+                identity_level=IdentityLevel.ISSUED,
+                credential_ref=",".join(keys)[:255],
+                injection_style="env_inject",
+                target_domain="",
+                target_url=f"env:{payload.get('environment') or 'production'}",
+                target_path="",
+                method="ENV",
+                status_code=200,
+                duration_ms=duration_ms,
+                proxy_duration_ms=0,
+                redacted=False,
+                resolution_path="env",
+                caller_role="workload",
+                source="cloud",
+            )
+        except Exception:
+            logger.warning("ENV_AUDIT: failed to record workload env delivery", exc_info=True)
+        return payload
 
 
 class ActivityLogService:

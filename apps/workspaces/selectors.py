@@ -21,6 +21,7 @@ from apps.common.exceptions import (
 )
 from .models import (
     Workspace,
+    WorkspaceTier,
     Membership,
     MembershipRole,
     MembershipStatus,
@@ -367,6 +368,37 @@ class AuditSelector:
     Pure read-only query selector layer for Audit Logs.
     """
 
+    # Plan-mode log retention windows. Free workspaces see recent history;
+    # Pro keeps a full year. Unknown tier fails open (no restriction).
+    FREE_RETENTION_DAYS = 30
+    PRO_RETENTION_DAYS = 365
+
+    @staticmethod
+    async def retention_window(*, workspace_id: str) -> tuple[int | None, bool]:
+        """(days, restricted) for a workspace. restricted=False means pro/unknown."""
+        try:
+            cache_key = f"ws-tier:{workspace_id}"
+            tier = await sync_to_async(cache.get)(cache_key)
+            if tier is None:
+                ws = await Workspace.objects.filter(id=workspace_id).afirst()
+                tier = getattr(ws, "tier", None) if ws is not None else None
+                await sync_to_async(cache.set)(cache_key, tier or "unknown", 300)
+        except Exception:
+            return None, False
+        if tier == WorkspaceTier.PRO:
+            return AuditSelector.PRO_RETENTION_DAYS, False
+        if tier == WorkspaceTier.FREE:
+            return AuditSelector.FREE_RETENTION_DAYS, True
+        return None, False
+
+    @staticmethod
+    async def apply_retention_floor(qs, *, workspace_id: str):
+        """Clamp a log queryset to the workspace's plan retention window."""
+        days, _ = await AuditSelector.retention_window(workspace_id=str(workspace_id))
+        if days:
+            qs = qs.filter(timestamp__gte=timezone.now() - timedelta(days=days))
+        return qs
+
     @staticmethod
     def apply_filters(qs, params: dict[str, Any]):
         simple = {
@@ -416,6 +448,7 @@ class AuditSelector:
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             params,
         )
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
         fields = [
@@ -534,6 +567,8 @@ class AuditSelector:
             qs = qs.filter(timestamp__gte=start)
         if end:
             qs = qs.filter(timestamp__lte=end)
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
+        retention_days, retention_restricted = await AuditSelector.retention_window(workspace_id=str(workspace_id))
 
         # Single aggregate for totals instead of 3 separate COUNT scans.
         totals = await qs.aaggregate(
@@ -571,6 +606,7 @@ class AuditSelector:
             "by_credential": [{"credential_ref": r["credential_ref"], "count": r["count"], "failed": r["failed"]} for r in by_credential],
             "by_domain": [{"domain": r["target_domain"], "count": r["count"], "failed": r["failed"]} for r in by_domain],
             "anonymous_call_count": anon_count,
+            "retention": {"days": retention_days, "restricted": retention_restricted},
         }
         await sync_to_async(cache.set)(cache_key, result, 60)
         return result
@@ -693,6 +729,8 @@ class WorkloadSelector:
             "workspace_id": str(workspace.id),
             "workspace_name": workspace.name,
             "agent_name": registration.name,
+            "project_id": str(registration.project_id) if registration.project_id else None,
+            "token_id": str(token.id),
             "environment": env_name,
             "secrets": secrets_map,
             "allowlist": allowlist,

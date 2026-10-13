@@ -518,6 +518,7 @@ class AuditController:
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             request.GET.dict(),
         )
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
 
         def serialize_row(row):
             out = {}
