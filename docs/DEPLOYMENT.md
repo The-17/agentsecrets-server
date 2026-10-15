@@ -230,6 +230,31 @@ curl -X POST https://api.agentsecrets.yourcompany.com/telemetry/internal/compute
   -H "Authorization: Bearer your-internal-cron-secret"
 ```
 
+### Vercel cron + Deployment Protection (read this before enabling it)
+
+When deployed on Vercel, `vercel.json` registers the cron (`59 23 * * *` →
+`/telemetry/internal/compute-metrics/`). Vercel attaches
+`Authorization: Bearer $CRON_SECRET` automatically **only if** a `CRON_SECRET`
+environment variable exists for the target environment — if it is missing, the
+request arrives unauthenticated and the endpoint answers `401`.
+
+Deployment Protection can break the cron even when `CRON_SECRET` is set. Vercel's
+cron invokes the *generated deployment URL* (`*.vercel.app`), never the custom
+domain. If protection is scoped to protect generated deployment URLs
+(`ssoProtection.deploymentType = "all_except_custom_domains"`), the cron request
+is answered with `302 → vercel.com/sso-api` at the edge, before it reaches
+Django. The function never runs, no error appears in the app logs, and the
+rollup silently stops producing `DailyMetricsAggregate` rows.
+
+Fix: use a protection scope that leaves production deployment URLs reachable
+(`"preview"` protects preview deployments only), or drive the rollup from outside
+Vercel against the custom domain, which is exempt from deployment protection:
+
+```bash
+curl -fsS -X POST https://api.agentsecrets.yourcompany.com/telemetry/internal/compute-metrics/ \
+  -H "Authorization: Bearer $CRON_SECRET"
+```
+
 ---
 
 ## 7. Health Probes & Monitoring
