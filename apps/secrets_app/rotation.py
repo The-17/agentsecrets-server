@@ -493,27 +493,62 @@ def _binding_error(field: str, message: str) -> BodyValidationError:
     return BodyValidationError(field, message)
 
 
-# Phase-1 adapter refs: "<id>@<version>" with optional "#sha256:<hex>" pin.
-# Shape-validated and stored here; hash verification against the registry
-# activates in phase 2 (no registry exists yet). Until then the executor
-# runs the bundled descriptor and the ref is recorded, not enforced — the
-# stored shape is what phase 2 will verify, so get it right now.
+# Adapter refs are full pins: "<id>@<version>#sha256:<hex>". Every part is
+# mandatory here for the version we execute, because a version without a hash
+# is a floating reference: the resolver resolves the pin through the adapter
+# registry, verifies the registry signature, and re-checks the hash in the
+# isolated child before running anything. A ref the operator supplies is
+# stored verbatim (the resolver is the authority on whether it verifies); a
+# ref without a hash is upgraded to this deployment's reviewed pin for that
+# version so no stored arm is ever floating.
 ADAPTER_REF_RE = re.compile(
     r"^(?P<id>[a-z0-9][a-z0-9-]{1,62}[a-z0-9])@"
     r"(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
     r"(?:#sha256:(?P<hash>[0-9a-f]{64}))?$"
 )
 
-# Bundled phase-1 descriptor versions (id -> version). Backfill target for
-# arms created before adapter_ref existed.
-BUNDLED_ADAPTER_VERSIONS = {"postgres": "1.0.0"}
+# The reviewed adapter versions this deployment pins to: adapter ->
+# (version, registry content hash).
+#
+# The hash is the sha256 of the canonical descriptor a human reviewed, signed
+# and published to the registry; the resolver fetches exactly those bytes and
+# re-checks this hash before execution, so a pin is a commitment to reviewed
+# bytes and what makes an arm auditable. The value must equal the published
+# registry entry and the resolver's bundled copy for the same version.
+#
+# Registry versions are append-only, so an older pin keeps resolving forever:
+# this table going stale costs freshness, never a broken rotation. Bumping a
+# version here is a deliberate act — an adapter upgrade is a review event, not
+# a floating reference.
+#
+# Consequence worth knowing before deploying: a pinned arm resolves through
+# the registry, so the resolver's REGISTRY_BASE_URL/REGISTRY_TRUSTED_KEYS must
+# be configured. With it unset the resolver reports pinned rotation disabled
+# and these arms fail closed (audited, retried) rather than running an
+# unreviewed recipe. That is the intended trade.
+REVIEWED_ADAPTERS: dict[str, tuple[str, str]] = {
+    "postgres": ("1.0.0", "4b42cba52172229f621fc34d320e2b107ee6ad0536ed03cc0aa9e4cf9c8bf0d7"),
+}
+
+
+def _reviewed_ref(adapter: str) -> str:
+    """The reviewed pinned ref for an adapter: <id>@<version>#sha256:<hash>."""
+    version, content_hash = REVIEWED_ADAPTERS[adapter]
+    return f"{adapter}@{version}#sha256:{content_hash}"
 
 
 def _validate_adapter_ref(adapter: str, ref: Any) -> str:
-    if not ref or not isinstance(ref, str):
-        # Backfill: arms predating adapter_ref pin to the bundled version
-        # with no hash (hash enforcement is phase-2).
-        return f"{adapter}@{BUNDLED_ADAPTER_VERSIONS[adapter]}"
+    reviewed = REVIEWED_ADAPTERS.get(adapter)
+    if ref is None or ref == "":
+        # Backfill: arms predating adapter_ref (or a caller naming only an
+        # adapter) pin to this deployment's reviewed version.
+        if reviewed is None:
+            raise _binding_error(
+                "provider_binding", f"No reviewed adapter version for {adapter!r}"
+            )
+        return _reviewed_ref(adapter)
+    if not isinstance(ref, str):
+        raise _binding_error("provider_binding", "adapter_ref must be a string")
     m = ADAPTER_REF_RE.match(ref)
     if not m:
         raise _binding_error(
@@ -522,22 +557,36 @@ def _validate_adapter_ref(adapter: str, ref: Any) -> str:
         )
     if m.group("id") != adapter:
         raise _binding_error("provider_binding", "adapter_ref id must match adapter")
-    return ref
+    if m.group("hash"):
+        # Operator-supplied pins are recorded verbatim. If the hash is wrong
+        # the resolver fails closed on verification; it is never quietly
+        # replaced with a pin we happen to trust instead.
+        return ref
+    # A hash-less ref is only meaningful for the version we reviewed, and even
+    # then it should be stored pinned. Any other version cannot be pinned from
+    # here, and storing it hash-less would only fail later at execution.
+    if reviewed is None or m.group("version") != reviewed[0]:
+        raise _binding_error(
+            "provider_binding",
+            f"adapter_ref must pin a #sha256:<hex> hash for {adapter} versions "
+            f"other than the reviewed {adapter}@{reviewed[0] if reviewed else '?'}",
+        )
+    return _reviewed_ref(adapter)
 
 
 def _backfill_adapter_ref(binding: Any) -> Any:
     """Lazy backfill for arms predating adapter_ref: provider-mode bindings
-    without a ref read as <adapter>@<bundled-version> (no hash — phase-2
-    verifies hashes; phase-1 records shape). Non-provider bindings pass
-    through untouched. Stored rows are NOT rewritten (no migration);
-    re-arming persists the ref going forward."""
+    without a ref read as this deployment's reviewed pin. Non-provider
+    bindings and bindings that already carry a ref pass through untouched.
+    Stored rows are NOT rewritten (no migration); re-arming and the next
+    due-sweep persist the pin going forward."""
     if not isinstance(binding, dict) or binding.get("mode") != "provider":
         return binding
     if binding.get("adapter_ref"):
         return binding
     adapter = binding.get("adapter")
-    if adapter in BUNDLED_ADAPTER_VERSIONS:
-        return {**binding, "adapter_ref": f"{adapter}@{BUNDLED_ADAPTER_VERSIONS[adapter]}"}
+    if adapter in REVIEWED_ADAPTERS:
+        return {**binding, "adapter_ref": _reviewed_ref(adapter)}
     return binding
 
 

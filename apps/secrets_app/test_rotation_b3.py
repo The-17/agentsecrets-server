@@ -26,6 +26,12 @@ class ProviderBindingTests(TestCase):
     ADMIN_CT = "REDACTED_DEK_CT_ADMIN_DSN"
     LEAF_CT = "REDACTED_DEK_CT_LEAF"
 
+    # The reviewed postgres pin: the published registry entry for 1.0.0.
+    REVIEWED_PG_REF = (
+        "postgres@1.0.0#sha256:"
+        "4b42cba52172229f621fc34d320e2b107ee6ad0536ed03cc0aa9e4cf9c8bf0d7"
+    )
+
     def setUp(self):
         super().setUp()
         self.user = User.objects.create_user(
@@ -137,8 +143,29 @@ class ProviderBindingTests(TestCase):
         policy = res.json()["data"]["policy"]
         self.assertEqual(policy["rotation_type"], "value_provider")
         self.assertEqual(policy["rotation_binding"]["admin_credential_ref"], "PGADMIN_DSN")
-        # Phase-1 backfill: no ref supplied -> bundled pin, no hash.
-        self.assertEqual(policy["rotation_binding"]["adapter_ref"], "postgres@1.0.0")
+        # No ref supplied -> this deployment's reviewed pin, hash included.
+        # A hash-less ref would be a floating reference: the resolver
+        # resolves the pin through the registry and re-checks the hash before
+        # executing anything.
+        self.assertEqual(
+            policy["rotation_binding"]["adapter_ref"], self.REVIEWED_PG_REF
+        )
+
+    def test_arm_upgrades_bare_ref_to_reviewed_pin(self):
+        res = self._arm({"adapter": "postgres", "admin_credential_ref": "pgadmin_dsn",
+                         "adapter_ref": "postgres@1.0.0"})
+        policy = res.json()["data"]["policy"]
+        self.assertEqual(
+            policy["rotation_binding"]["adapter_ref"], self.REVIEWED_PG_REF
+        )
+        # The reviewed ref is exactly what the registry published for
+        # 1.0.0, so the resolver can resolve it without a directory lookup
+        # surprise.
+        self.assertTrue(
+            policy["rotation_binding"]["adapter_ref"].endswith(
+                "#sha256:4b42cba52172229f621fc34d320e2b107ee6ad0536ed03cc0aa9e4cf9c8bf0d7"
+            )
+        )
 
     def test_arm_stores_explicit_ref(self):
         res = self._arm({"adapter": "postgres", "admin_credential_ref": "pgadmin_dsn",
@@ -152,6 +179,9 @@ class ProviderBindingTests(TestCase):
         self._arm({**base, "adapter_ref": "postgres@v1"}, expected=422)
         self._arm({**base, "adapter_ref": "stripe@1.0.0"}, expected=422)
         self._arm({**base, "adapter_ref": "postgres@1.0.0#sha256:xyz"}, expected=422)
+        # A version this deployment has not reviewed cannot be pinned from
+        # here; arming it hash-less would only fail later, at execution.
+        self._arm({**base, "adapter_ref": "postgres@9.9.9"}, expected=422)
 
     def test_arm_rejects_bad_bindings(self):
         self._arm({"adapter": "stripe"}, expected=422)
