@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+from urllib.parse import urlparse, parse_qs
 from cryptography.fernet import Fernet
 from nacl.public import PrivateKey
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from apps.accounts.models import User
 from apps.workspaces.models import Workspace, Membership, WorkspaceType, MembershipRole
 
@@ -229,3 +231,166 @@ class AccountsAPITests(TestCase):
         self.assertEqual(principal.first_name, "Stateless")
         self.assertEqual(str(principal.id), str(user.id))
         self.assertTrue(principal.is_authenticated)
+
+
+def _pkce_pair(verifier: str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") -> tuple[str, str]:
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+class OAuthLoginTests(TestCase):
+    """OAuth 2.1 Authorization Code + PKCE for headless agent login."""
+
+    CALLBACK = "http://127.0.0.1:9/callback"
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(
+            email="oauth@example.com",
+            password="OauthPassword123!",
+            first_name="Olive",
+            last_name="Auth",
+        )
+        _, self.challenge = _pkce_pair()
+        self.params = {
+            "response_type": "code",
+            "client_id": "agentsecrets-mcp",
+            "redirect_uri": self.CALLBACK,
+            "scope": "read write",
+            "state": "teststate123",
+            "code_challenge": self.challenge,
+            "code_challenge_method": "S256",
+        }
+
+    def _approve(self, params=None):
+        """Run login + approve; return the authorization code."""
+        params = params or self.params
+        login_res = self.client.post("/oauth/authorize", data={
+            **params, "action": "login",
+            "email": "oauth@example.com", "password": "OauthPassword123!",
+        })
+        self.assertEqual(login_res.status_code, 200)
+        approve_res = self.client.post("/oauth/authorize", data={
+            **params, "action": "approve",
+        })
+        self.assertEqual(approve_res.status_code, 302)
+        location = approve_res["Location"]
+        self.assertTrue(location.startswith(self.CALLBACK + "?"), location)
+        query = parse_qs(urlparse(location).query)
+        self.assertEqual(query.get("state"), ["teststate123"])
+        return query["code"][0]
+
+    def _exchange(self, code, verifier=None, redirect_uri=CALLBACK):
+        verifier, _ = _pkce_pair() if verifier is None else (verifier, None)
+        return self.client.post("/oauth/token", data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": "agentsecrets-mcp",
+            "code_verifier": verifier,
+        }, content_type="application/json")
+
+    def test_discovery_document(self):
+        res = self.client.get("/.well-known/oauth-authorization-server")
+        self.assertEqual(res.status_code, 200)
+        doc = res.json()
+        self.assertEqual(doc["token_endpoint"], "http://testserver/oauth/token")
+        self.assertEqual(doc["authorization_endpoint"], "http://testserver/oauth/authorize")
+        self.assertEqual(doc["response_types_supported"], ["code"])
+        self.assertIn("S256", doc["code_challenge_methods_supported"])
+
+    @override_settings(OAUTH_ISSUER_BASE_URL="https://api.example.test")
+    def test_discovery_honors_issuer_override(self):
+        doc = self.client.get("/.well-known/oauth-authorization-server").json()
+        self.assertEqual(doc["issuer"], "https://api.example.test/")
+
+    def test_authorize_rejects_bad_requests_without_redirect(self):
+        # Unknown client
+        res = self.client.get("/oauth/authorize", data={**self.params, "client_id": "evil"})
+        self.assertEqual(res.status_code, 400)
+        # Non-loopback redirect: rendered error, NEVER a redirect to it
+        res = self.client.get("/oauth/authorize", data={
+            **self.params, "redirect_uri": "https://evil.example/cb",
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertNotIn("Location", res.headers)
+        # Missing PKCE challenge
+        res = self.client.get("/oauth/authorize", data={
+            k: v for k, v in self.params.items() if k != "code_challenge"
+        })
+        self.assertEqual(res.status_code, 400)
+        # Wrong response type
+        res = self.client.get("/oauth/authorize", data={**self.params, "response_type": "token"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_full_loopback_flow_mints_working_jwt(self):
+        code = self._approve()
+        res = self._exchange(code)
+        self.assertEqual(res.status_code, 200)
+        bundle = res.json()
+        # Top-level fields (no {data:} envelope — the bridge reads these directly)
+        self.assertIn("access_token", bundle)
+        self.assertIn("refresh_token", bundle)
+        self.assertIn("expires_at", bundle)
+        self.assertIn("no-store", res.headers.get("Cache-Control", ""))
+        # The minted access token authenticates a real API call
+        me = self.client.get("/api/auth/me/", HTTP_AUTHORIZATION=f"Bearer {bundle['access_token']}")
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["data"]["email"], "oauth@example.com")
+
+    def test_deny_redirects_with_error(self):
+        self.client.post("/oauth/authorize", data={
+            **self.params, "action": "login",
+            "email": "oauth@example.com", "password": "OauthPassword123!",
+        })
+        res = self.client.post("/oauth/authorize", data={**self.params, "action": "deny"})
+        self.assertEqual(res.status_code, 302)
+        query = parse_qs(urlparse(res["Location"]).query)
+        self.assertEqual(query.get("error"), ["access_denied"])
+
+    def test_pkce_mismatch_rejected(self):
+        code = self._approve()
+        res = self._exchange(code, verifier="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        self.assertEqual(res.status_code, 401)
+
+    def test_code_replay_rejected(self):
+        code = self._approve()
+        self.assertEqual(self._exchange(code).status_code, 200)
+        self.assertEqual(self._exchange(code).status_code, 401)
+
+    def test_code_bound_to_redirect_uri(self):
+        code = self._approve()
+        res = self._exchange(code, redirect_uri="http://127.0.0.1:10/callback")
+        self.assertEqual(res.status_code, 401)
+
+    def test_unknown_code_rejected(self):
+        res = self._exchange("not-a-real-code")
+        self.assertEqual(res.status_code, 401)
+
+    def test_refresh_grant_rotates(self):
+        code = self._approve()
+        refresh = self._exchange(code).json()["refresh_token"]
+        res = self.client.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": "agentsecrets-mcp",
+        }, content_type="application/json")
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertIn("access_token", body)
+        # Old refresh token was rotated + blacklisted: reuse fails
+        again = self.client.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": "agentsecrets-mcp",
+        }, content_type="application/json")
+        self.assertEqual(again.status_code, 401)
+
+    def test_wrong_password_shows_login_error(self):
+        res = self.client.post("/oauth/authorize", data={
+            **self.params, "action": "login",
+            "email": "oauth@example.com", "password": "WrongPassword123!",
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"Invalid email or password", res.content)

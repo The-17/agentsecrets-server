@@ -188,6 +188,14 @@ ENCRYPTION_KEY = config("ENCRYPTION_KEY")
 # holds the private half; no shared secret exists (ADR 008).
 RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
+# Public base URL advertised in OAuth discovery metadata
+# (/.well-known/oauth-authorization-server). MUST be the real public domain —
+# never localhost — or agent clients cannot complete login. Honors the
+# PUBLIC_BASE_URL operators were told to set, with OAUTH_ISSUER_BASE_URL
+# as an explicit override. Empty falls back to the request's own host.
+OAUTH_ISSUER_BASE_URL = config(
+    "OAUTH_ISSUER_BASE_URL", default=config("PUBLIC_BASE_URL", default="")
+)
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
 
 # Browser dashboard origins allowed to call this API directly (custom

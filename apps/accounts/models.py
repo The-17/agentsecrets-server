@@ -113,6 +113,34 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.full_name
 
+class OAuthAuthorizationCode(BaseModel):
+    """
+    Single-use authorization code for the OAuth 2.1 Authorization Code + PKCE
+    flow that powers headless agent login (`auth_login` in the MCP bridge).
+
+    Only the SHA-256 hash of the code is stored — a database read never
+    yields a redeemable code. Codes are bound to (client, redirect_uri,
+    PKCE challenge) at issuance and claimed atomically at redemption.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="oauth_codes")
+    client_id = models.CharField(max_length=128, db_index=True)
+    redirect_uri = models.CharField(max_length=2000)
+    scope = models.CharField(max_length=512, default="", blank=True)
+    code_challenge = models.CharField(max_length=128)
+    code_challenge_method = models.CharField(max_length=16, default="S256")
+    code_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        # code_hash (unique) and expires_at (db_index) are indexed at the
+        # field level; no extra Meta indexes needed.
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"oauth-code {self.client_id} for {self.user.email}"
+
+
 class OneTimePassword(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     code = models.CharField(max_length=100)

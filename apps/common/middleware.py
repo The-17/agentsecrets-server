@@ -98,7 +98,7 @@ class SecurityHeadersMiddleware:
     """
 
     # Paths where responses must never be cached (tokens, credentials)
-    SENSITIVE_PREFIXES = ("/api/auth/", "/auth/")
+    SENSITIVE_PREFIXES = ("/api/auth/", "/auth/", "/oauth/")
 
     def __init__(self, get_response):
         self.get_response = get_response
