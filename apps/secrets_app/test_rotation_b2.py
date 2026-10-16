@@ -155,7 +155,9 @@ class AutonomousRotationTests(TestCase):
 
     def test_execute_rejects_unarmed_and_unknown(self):
         res = self._execute(self._execute_body(), expected=422)
-        self.assertIn("autonomous", res.text.lower())
+        # The resolver executes managed rotation only (value_auto /
+        # value_provider), so an unarmed secret is refused with that wording.
+        self.assertIn("managed rotation", res.text.lower())
 
         res = self.client.put(
             self._base() + "/rotation-policy/",
