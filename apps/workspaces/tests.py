@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from django.utils import timezone
@@ -1010,4 +1010,413 @@ class RevokedTokensEndpointTests(TestCase):
             **self.stranger_headers,
         )
         self.assertEqual(res.status_code, 404)
+
+
+class CrossWorkspaceContainmentTests(TestCase):
+    """A token may only ever touch a project inside its own workspace.
+
+    Covers the three enforcement points: agent creation (write path), agent
+    verification (source of the resolver's audit + billing fields), and workload
+    environment delivery (the secrets read path).
+    """
+
+    def setUp(self):
+        super().setUp()
+        import hashlib as _hashlib
+        from apps.secrets_app.models import Project
+
+        self.owner = User.objects.create_user(
+            email="containment_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Contain",
+            last_name="Owner",
+        )
+        self.ws_a = Workspace.objects.create(name="WS A", owner=self.owner, type=WorkspaceType.SHARED)
+        self.ws_b = Workspace.objects.create(name="WS B", owner=self.owner, type=WorkspaceType.SHARED)
+        for ws in (self.ws_a, self.ws_b):
+            Membership.objects.create(
+                user=self.owner, workspace=ws, role=MembershipRole.OWNER,
+                status=MembershipStatus.ACTIVE, encrypted_workspace_key="k",
+            )
+        self.project_a = Project.objects.create(workspace=self.ws_a, name="A project")
+        self.project_b = Project.objects.create(workspace=self.ws_b, name="B project")
+
+        refresh = RefreshToken.for_user(self.owner)
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {refresh.access_token}"}
+
+    def _make_agent(self, workspace, project, raw, capabilities=None):
+        import hashlib as _hashlib
+        agent = AgentRegistration.objects.create(
+            workspace=workspace,
+            project=project,
+            name=f"agent-{uuid.uuid4().hex[:8]}",
+            created_by=self.owner,
+            capabilities=capabilities,
+        )
+        AgentToken.objects.create(
+            registration=agent,
+            workspace=workspace,
+            token_hash=_hashlib.sha256(raw.encode()).hexdigest(),
+            environment="development",
+        )
+        return agent, raw
+
+    def _verify(self, raw):
+        return self.client.post(
+            "/api/internal/agents/verify/",
+            data={"token": raw},
+            content_type="application/json",
+        )
+
+    # --- write path: agent creation ---------------------------------------
+
+    def test_create_project_agent_rejects_project_from_other_workspace(self):
+        res = self.client.post(
+            f"/api/workspaces/{self.ws_a.id}/projects/{self.project_b.id}/agents/",
+            data={"name": "sneaky"},
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertFalse(
+            AgentRegistration.objects.filter(name="sneaky").exists()
+        )
+
+    def test_create_project_agent_accepts_project_in_same_workspace(self):
+        res = self.client.post(
+            f"/api/workspaces/{self.ws_a.id}/projects/{self.project_a.id}/agents/",
+            data={"name": "legit"},
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(res.status_code, 201)
+
+    # --- read path: verification (resolver audit + billing) ---------------
+
+    def test_verify_rejects_cross_workspace_project_agent(self):
+        _, raw = self._make_agent(self.ws_a, self.project_b, "agt_cross_verify_token")
+        res = self._verify(raw)
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertFalse(body["valid"])
+        self.assertEqual(body["reason"], "workspace_mismatch")
+
+    def test_verify_attributes_billing_to_the_projects_workspace(self):
+        _, raw = self._make_agent(self.ws_a, self.project_a, "agt_same_verify_token")
+        body = self._verify(raw).json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["workspace_id"], str(self.ws_a.id))
+        self.assertEqual(body["billing_id"], self.ws_a.effective_billing_id)
+        self.assertEqual(body["billing_id"], self.owner.billing_id)
+
+    def test_verify_without_project_still_bills_the_token_workspace(self):
+        _, raw = self._make_agent(self.ws_a, None, "agt_plain_verify_token")
+        body = self._verify(raw).json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["billing_id"], self.ws_a.effective_billing_id)
+
+    # --- read path: env delivery (secret material) ------------------------
+
+    @override_settings(RESOLVER_URL="")
+    def test_env_delivery_rejects_cross_workspace_project_agent(self):
+        from apps.secrets_app.models import Secret
+        from apps.common.services.encryption import EncryptionService
+
+        Secret.objects.create(
+            project=self.project_b, environment="development", key="B_SECRET",
+            value=EncryptionService.encrypt("b-secret-value"),
+        )
+        _, raw = self._make_agent(
+            self.ws_a, self.project_b, "agt_env_cross_token",
+            capabilities={"can_env_read": True},
+        )
+        res = self.client.post(
+            "/api/workloads/env/",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {raw}",
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertNotIn("b-secret-value", res.content.decode())
+
+    @override_settings(RESOLVER_URL="")
+    def test_env_delivery_returns_only_own_workspace_secrets(self):
+        from apps.secrets_app.models import Secret
+        from apps.common.services.encryption import EncryptionService
+
+        Secret.objects.create(
+            project=self.project_a, environment="development", key="A_SECRET",
+            value=EncryptionService.encrypt("a-secret-value"),
+        )
+        Secret.objects.create(
+            project=self.project_b, environment="development", key="B_SECRET",
+            value=EncryptionService.encrypt("b-secret-value"),
+        )
+        _, raw = self._make_agent(
+            self.ws_a, self.project_a, "agt_env_same_token",
+            capabilities={"can_env_read": True},
+        )
+        res = self.client.post(
+            "/api/workloads/env/",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {raw}",
+        )
+        self.assertEqual(res.status_code, 200)
+        payload = res.json()["data"]
+        self.assertEqual(payload["workspace_id"], str(self.ws_a.id))
+        self.assertIn("A_SECRET", payload["secrets"])
+        self.assertNotIn("B_SECRET", payload["secrets"])
+
+
+class EnvDeliveryForensicReplayTests(TestCase):
+    """Headless env delivery must be replayable, not just countable.
+
+    A delivery writes a Tier-2 audit row linked by correlation_id to a Tier-3
+    forensic twin (event type env_delivery), so the web can resolve replay from
+    the audit id. The pre-linkage proximity fallback must not bind an env row to
+    an unrelated proxy decision that merely landed inside the same ±2s window.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import hashlib as _hashlib
+        from apps.secrets_app.models import Project
+
+        self.owner = User.objects.create_user(
+            email="env_forensic_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Env",
+            last_name="Forensic",
+        )
+        self.ws = Workspace.objects.create(
+            name="Env Forensic WS", owner=self.owner, type=WorkspaceType.SHARED
+        )
+        Membership.objects.create(
+            user=self.owner, workspace=self.ws, role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE, encrypted_workspace_key="k",
+        )
+        self.project = Project.objects.create(workspace=self.ws, name="Env project")
+        refresh = RefreshToken.for_user(self.owner)
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {refresh.access_token}"}
+        self.agent = AgentRegistration.objects.create(
+            workspace=self.ws, project=self.project, name="env-bot",
+            created_by=self.owner, capabilities={"can_env_read": True},
+        )
+        self.raw = "agt_env_forensic_token"
+        AgentToken.objects.create(
+            registration=self.agent, workspace=self.ws,
+            token_hash=_hashlib.sha256(self.raw.encode()).hexdigest(),
+            environment="development",
+        )
+
+    def _deliver(self):
+        return self.client.post(
+            "/api/workloads/env/",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {self.raw}",
+        )
+
+    def test_env_delivery_emits_linked_forensic_twin(self):
+        res = self._deliver()
+        self.assertEqual(res.status_code, 200)
+
+        audit = (
+            AuditLogEntry.objects.filter(workspace=self.ws, resolution_path="env")
+            .order_by("-timestamp")
+            .first()
+        )
+        self.assertIsNotNone(audit, "env delivery must write a Tier-2 audit row")
+        self.assertTrue(audit.correlation_id, "audit row must carry a correlation_id")
+
+        forensic = ForensicAuditLogEntry.objects.filter(
+            workspace=self.ws, correlation_id=audit.correlation_id
+        ).first()
+        self.assertIsNotNone(forensic, "env delivery must emit a Tier-3 forensic twin")
+        self.assertEqual(forensic.event_json.get("type"), "env_delivery")
+        self.assertEqual(forensic.enforcement_json.get("decision"), "permitted")
+
+        # The twin must round-trip through the endpoint the web's log table uses.
+        replay = self.client.get(f"/api/audit/logs/{audit.id}/replay/", **self.headers)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["data"]["event"]["type"], "env_delivery")
+
+    def test_replay_fallback_does_not_bind_env_row_to_proxy_decision(self):
+        now = timezone.now()
+        env_log = AuditLogEntry.objects.create(
+            timestamp=now,
+            workspace=self.ws,
+            environment="development",
+            identity_level=IdentityLevel.ISSUED,
+            credential_ref="A_KEY",
+            injection_style="env_inject",
+            target_domain="",
+            target_url="env:development",
+            target_path="",
+            method="ENV",
+            status_code=200,
+            duration_ms=1,
+            resolution_path="env",
+            caller_role="workload",
+            source="cloud",
+        )
+        # Unrelated proxy decision inside the ±2s proximity window.
+        ForensicAuditLogEntry.objects.create(
+            id="flog_proxy_near_env",
+            workspace=self.ws,
+            stream_id="proxy",
+            stream_seq=1,
+            created_at=now,
+            prev_chain_hash="",
+            chain_hash="h",
+            entry_hash="e",
+            event_json={"type": "proxy_call"},
+            snapshot_json={},
+            enforcement_json={"decision": "blocked", "layers_evaluated": []},
+            resolution_json={},
+        )
+
+        res = self.client.get(f"/api/audit/logs/{env_log.id}/replay/", **self.headers)
+        self.assertEqual(
+            res.status_code, 404,
+            "an env row must not resolve to a proxy_call forensic row",
+        )
+
+    def test_env_delivery_row_has_no_http_status_code(self):
+        # Env delivery is not an HTTP request. A successful delivery must not
+        # record an HTTP status code, or the web audit list renders it as an HTTP
+        # call (and a CLI exit code of 0 became a bogus "403 BLOCKED").
+        res = self._deliver()
+        self.assertEqual(res.status_code, 200)
+        audit = (
+            AuditLogEntry.objects.filter(workspace=self.ws, resolution_path="env")
+            .order_by("-timestamp")
+            .first()
+        )
+        self.assertIsNotNone(audit)
+        self.assertIsNone(audit.status_code, "env rows must not carry an HTTP status code")
+
+    def test_env_refusal_is_audited_and_replayable(self):
+        # A refusal is a security decision: it must leave a Tier-2 row plus a
+        # Tier-3 twin naming the failing layer, and both must be replayable.
+        AgentToken.objects.filter(workspace=self.ws).update(revoked_at=timezone.now())
+
+        res = self._deliver()
+        self.assertEqual(res.status_code, 403)
+
+        audit = (
+            AuditLogEntry.objects.filter(workspace=self.ws, resolution_path="env")
+            .order_by("-timestamp")
+            .first()
+        )
+        self.assertIsNotNone(audit, "a refused env delivery must still be audited")
+        self.assertIsNone(audit.status_code, "env rows must not carry an HTTP status code")
+        self.assertEqual((audit.error or {}).get("decision"), "blocked")
+
+        forensic = ForensicAuditLogEntry.objects.filter(
+            workspace=self.ws, correlation_id=audit.correlation_id
+        ).first()
+        self.assertIsNotNone(forensic, "a refusal must emit a Tier-3 forensic twin")
+        self.assertEqual(forensic.enforcement_json.get("decision"), "blocked")
+        self.assertEqual(
+            forensic.enforcement_json.get("first_failure_layer"), "agent_capabilities"
+        )
+
+        replay = self.client.get(f"/api/audit/logs/{audit.id}/replay/", **self.headers)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["data"]["enforcement"]["decision"], "blocked")
+
+    def test_env_refusal_without_capability_is_attributed_to_agent_capabilities(self):
+        AgentRegistration.objects.filter(id=self.agent.id).update(capabilities={})
+
+        res = self._deliver()
+        self.assertEqual(res.status_code, 403)
+
+        audit = (
+            AuditLogEntry.objects.filter(workspace=self.ws, resolution_path="env")
+            .order_by("-timestamp")
+            .first()
+        )
+        self.assertIsNotNone(audit, "a capability refusal must be audited")
+        forensic = ForensicAuditLogEntry.objects.filter(
+            workspace=self.ws, correlation_id=audit.correlation_id
+        ).first()
+        self.assertIsNotNone(forensic)
+        self.assertEqual(
+            forensic.enforcement_json.get("first_failure_layer"), "agent_capabilities"
+        )
+
+
+class AgentCapabilityMergeTests(TestCase):
+    """
+    Regression: PUT capabilities must MERGE, not replace.
+
+    Replacing the whole dict silently wiped unrelated capabilities — a
+    secret-policy update dropped can_env_read / can_proxy_resolve, and a scope
+    toggle dropped the granular allow/deny policy.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.owner = User.objects.create_user(
+            email="capmerge_owner@example.com",
+            password="SecurePassword123!",
+            first_name="Cap",
+            last_name="Owner",
+        )
+        self.ws = Workspace.objects.create(
+            name="Cap Merge WS", owner=self.owner, type=WorkspaceType.SHARED
+        )
+        Membership.objects.create(
+            user=self.owner,
+            workspace=self.ws,
+            role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="k",
+        )
+        refresh = RefreshToken.for_user(self.owner)
+        self.headers = {"HTTP_AUTHORIZATION": f"Bearer {refresh.access_token}"}
+        self.agent = AgentRegistration.objects.create(
+            workspace=self.ws,
+            name="cap-agent",
+            created_by=self.owner,
+            capabilities={"can_env_read": True, "allowed_secrets": ["A"]},
+        )
+
+    def _put(self, payload):
+        return self.client.put(
+            f"/api/workspaces/{self.ws.id}/agents/{self.agent.id}/capabilities/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **self.headers,
+        )
+
+    def _get(self):
+        return self.client.get(
+            f"/api/workspaces/{self.ws.id}/agents/{self.agent.id}/capabilities/",
+            **self.headers,
+        )
+
+    def test_partial_update_preserves_unrelated_capabilities(self):
+        res = self._put({"denied_secrets": ["B"]})
+        self.assertEqual(res.status_code, 200)
+        caps = self._get().json()["data"]
+        self.assertTrue(caps.get("can_env_read"))
+        self.assertEqual(caps.get("allowed_secrets"), ["A"])
+        self.assertEqual(caps.get("denied_secrets"), ["B"])
+
+    def test_scope_toggle_preserves_secret_policy(self):
+        res = self._put({"can_env_read": False})
+        self.assertEqual(res.status_code, 200)
+        caps = self._get().json()["data"]
+        self.assertFalse(caps.get("can_env_read"))
+        self.assertEqual(caps.get("allowed_secrets"), ["A"])
+
+    def test_explicit_empty_list_still_clears(self):
+        res = self._put({"allowed_secrets": []})
+        self.assertEqual(res.status_code, 200)
+        caps = self._get().json()["data"]
+        self.assertEqual(caps.get("allowed_secrets"), [])
+        self.assertTrue(caps.get("can_env_read"))
 

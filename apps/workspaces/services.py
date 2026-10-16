@@ -474,6 +474,19 @@ class AgentService:
         project_id: uuid.UUID | None = None,
     ) -> tuple[dict[str, Any], str, str]:
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+
+        # A project-scoped agent must be bound to a project inside its own
+        # workspace. The project_id arrives from the URL, so without this check a
+        # member of workspace A could create an agent in A that points at
+        # workspace B's project — the entry point for cross-workspace secret
+        # reads and for quota debited against the wrong workspace.
+        if project_id is not None:
+            project_workspace_id = await Project.objects.filter(
+                id=project_id
+            ).values_list("workspace_id", flat=True).afirst()
+            if project_workspace_id is None or str(project_workspace_id) != str(workspace_id):
+                raise AuthorizationError("Project does not belong to this workspace")
+
         raw_token = secrets_module.token_urlsafe(32)
         expires_at = timezone.now() + timezone.timedelta(days=payload.expires_in_days) if payload.expires_in_days else None
 
@@ -529,8 +542,19 @@ class AgentService:
         agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).afirst()
         if not agent:
             raise NotFoundError("Agent not found")
-        agent.capabilities = capabilities
-        await agent.asave(update_fields=["capabilities", "updated_at"])
+        # Merge semantics: only override fields that were explicitly supplied
+        # (non-None). Replacing the whole dict silently wiped unrelated
+        # capabilities — e.g. a granular secret-policy update would drop
+        # can_env_read / can_proxy_resolve, and vice-versa.
+        merged = dict(agent.capabilities or {})
+        for key, value in capabilities.items():
+            if value is None:
+                continue
+            merged[key] = value
+        agent.capabilities = merged
+        # NOTE: AgentRegistration has no `updated_at` column; passing it to
+        # update_fields raises ValueError and 500s every capability update.
+        await agent.asave(update_fields=["capabilities"])
         return agent.capabilities or {}
 
     @staticmethod
@@ -921,7 +945,30 @@ class AgentService:
 
         agent = token.registration
         workspace = getattr(agent, "workspace", None)
-        billing_id = workspace.effective_billing_id if workspace else ""
+
+        # Cross-workspace containment, fail closed. A token may only act on a
+        # project inside its own workspace. When a project is set it is the
+        # canonical reference for both the audit trail and the billing debit, so
+        # the workspace reported and the account debited always agree with the
+        # project the call actually touches.
+        billing_workspace = workspace
+        if agent.project_id:
+            project = await Project.objects.select_related("workspace", "workspace__owner").filter(
+                id=agent.project_id
+            ).afirst()
+            if project is None or str(project.workspace_id) != str(token.workspace_id):
+                logger.warning(
+                    "AGENT_VERIFY_WORKSPACE_MISMATCH: token=%s agent=%s token_ws=%s project=%s project_ws=%s",
+                    token.id,
+                    agent.id,
+                    token.workspace_id,
+                    agent.project_id,
+                    getattr(project, "workspace_id", None),
+                )
+                return {"valid": False, "reason": "workspace_mismatch", **identifiers}
+            billing_workspace = project.workspace
+
+        billing_id = billing_workspace.effective_billing_id if billing_workspace else ""
 
         allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id).values_list("domain", flat=True)
         allowlist = [d async for d in allowlist_qs]
@@ -1113,7 +1160,20 @@ class WorkloadService:
     @staticmethod
     async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
         started_at = timezone.now()
-        payload = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        try:
+            payload = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        except Exception as exc:
+            # A refusal is a security decision too: record it (Tier-2 + Tier-3)
+            # so it is visible and replayable, then re-raise so the endpoint still
+            # answers with the correct status. Only genuine authorization refusals
+            # are audited (a transient DB error is not a policy denial), and only
+            # when the token maps to a workspace; an unknown token has no tenant
+            # to file against.
+            if isinstance(exc, AuthorizationError):
+                await WorkloadService._audit_env_refusal(
+                    raw_token=raw_token, exc=exc, started_at=started_at
+                )
+            raise
         # Every headless env delivery is a credential injection: record it as a
         # Tier-2 audit row (resolution_path="env") so container `env` runs show
         # up in the web audit log like CLI `env` runs do. Best-effort and
@@ -1123,31 +1183,133 @@ class WorkloadService:
             keys = sorted((payload.get("secrets") or {}).keys())
             duration_ms = int((timezone.now() - started_at).total_seconds() * 1000)
             project_id = payload.get("project_id")
+            environment = payload.get("environment") or "production"
+            workspace_id = payload["workspace_id"]
+            # Link the Tier-2 audit row to its Tier-3 forensic twin so the web can
+            # resolve replay from the audit id. Same corr_<hex> shape the resolver
+            # stamps on proxy resolves.
+            correlation_id = "corr_" + uuid.uuid4().hex
+            # Env delivery is not an HTTP request: no HTTP status code (the twin
+            # carries the decision/outcome). A 200 here made the audit list treat
+            # deliveries as HTTP calls.
             await AuditLogEntry.objects.acreate(
                 timestamp=started_at,
-                workspace_id=payload["workspace_id"],
+                workspace_id=workspace_id,
                 project_id=project_id,
-                environment=payload.get("environment") or "production",
+                environment=environment,
                 agent_id=payload.get("agent_name") or "",
                 agent_token_id=payload.get("token_id"),
                 identity_level=IdentityLevel.ISSUED,
                 credential_ref=",".join(keys)[:255],
                 injection_style="env_inject",
                 target_domain="",
-                target_url=f"env:{payload.get('environment') or 'production'}",
+                target_url=f"env:{environment}",
                 target_path="",
                 method="ENV",
-                status_code=200,
+                status_code=None,
                 duration_ms=duration_ms,
                 proxy_duration_ms=0,
                 redacted=False,
                 resolution_path="env",
                 caller_role="workload",
                 source="cloud",
+                correlation_id=correlation_id,
+            )
+            # Emit the Tier-3 forensic twin: the state + decision replay. Without
+            # it the audit row is countable but not replayable, and the
+            # replay-by-audit fallback could bind it to an unrelated proxy row.
+            await ForensicLogService.emit_env_delivery(
+                workspace_id=workspace_id,
+                workspace_name=payload.get("workspace_name") or "",
+                project_id=project_id,
+                environment=environment,
+                keys=keys,
+                allowlist=list(payload.get("allowlist") or []),
+                agent_name=payload.get("agent_name") or "",
+                token_id=payload.get("token_id"),
+                correlation_id=correlation_id,
+                duration_ms=duration_ms,
+                captured_at=started_at,
             )
         except Exception:
             logger.warning("ENV_AUDIT: failed to record workload env delivery", exc_info=True)
         return payload
+
+    @staticmethod
+    async def _audit_env_refusal(*, raw_token: str, exc: Exception, started_at) -> None:
+        """Record a refused env delivery as a Tier-2 audit row plus a Tier-3
+        forensic twin naming the layer that failed, so a refusal is visible and
+        replayable instead of vanishing. Best-effort: any failure here is logged
+        and swallowed so the original refusal still surfaces to the caller."""
+        try:
+            attribution = await WorkloadSelector.resolve_env_attribution(raw_token=raw_token)
+            if not attribution:
+                return
+            layer, reason = WorkloadService._classify_env_refusal(exc)
+            layers = [
+                {
+                    "layer": name,
+                    "result": "fail" if name == layer else "pass",
+                    "reason": reason if name == layer else "Not evaluated (blocked at an earlier layer)",
+                }
+                for name in ("agent_capabilities", "workspace_containment", "project_scope")
+            ]
+            environment = attribution.get("environment") or "production"
+            duration_ms = int((timezone.now() - started_at).total_seconds() * 1000)
+            correlation_id = "corr_" + uuid.uuid4().hex
+            await AuditLogEntry.objects.acreate(
+                timestamp=started_at,
+                workspace_id=attribution["workspace_id"],
+                project_id=attribution.get("project_id"),
+                environment=environment,
+                agent_id=attribution.get("agent_name") or "",
+                agent_token_id=attribution.get("token_id"),
+                identity_level=IdentityLevel.ISSUED,
+                credential_ref="",
+                injection_style="env_inject",
+                target_domain="",
+                target_url=f"env:{environment}",
+                target_path="",
+                method="ENV",
+                status_code=None,
+                duration_ms=duration_ms,
+                proxy_duration_ms=0,
+                redacted=False,
+                resolution_path="env",
+                caller_role="workload",
+                source="cloud",
+                correlation_id=correlation_id,
+                error={"decision": "blocked", "first_failure_layer": layer, "reason": reason},
+            )
+            await ForensicLogService.emit_env_delivery(
+                workspace_id=attribution["workspace_id"],
+                workspace_name=attribution.get("workspace_name") or "",
+                project_id=attribution.get("project_id"),
+                environment=environment,
+                keys=[],
+                allowlist=list(attribution.get("allowlist") or []),
+                agent_name=attribution.get("agent_name") or "",
+                token_id=attribution.get("token_id"),
+                correlation_id=correlation_id,
+                duration_ms=duration_ms,
+                captured_at=started_at,
+                decision="blocked",
+                layers=layers,
+                first_failure_layer=layer,
+            )
+        except Exception:
+            logger.warning("ENV_AUDIT: failed to record workload env refusal", exc_info=True)
+
+    @staticmethod
+    def _classify_env_refusal(exc: Exception) -> tuple[str, str]:
+        """Map a resolve_env_payload refusal to (failing_layer, reason)."""
+        msg = str(exc)
+        lowered = msg.lower()
+        if "workspace" in lowered and "project" in lowered:
+            return "workspace_containment", msg
+        if "token" in lowered or "can_env_read" in lowered:
+            return "agent_capabilities", msg
+        return "project_scope", msg
 
 
 class ActivityLogService:
@@ -1368,4 +1530,133 @@ class ForensicLogService:
 
         created = await ForensicAuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
         return len(created), [str(log.id) for log in created]
+
+    @staticmethod
+    async def next_stream_link(*, workspace_id: Any, stream_id: str = "control_plane") -> tuple[str, int]:
+        """Return (prev_chain_hash, stream_seq) for the next locally emitted
+        forensic row on a workspace's stream.
+
+        Server-origin rows (headless env delivery) are appended by this server,
+        not ingested from the resolver, so nothing hands us the previous link.
+        We read it from the stream tail so the row still chains: genesis (empty
+        hash, seq 1) when the stream is new, else the tail's chain_hash and the
+        next sequence. Best-effort and non-blocking; the caller treats a failure
+        as "no forensic twin" without affecting secret delivery.
+        """
+        last = await ForensicAuditLogEntry.objects.filter(
+            workspace_id=workspace_id, stream_id=stream_id
+        ).order_by("-stream_seq").afirst()
+        if last is None:
+            return "", 1
+        return (last.chain_hash or ""), (last.stream_seq or 0) + 1
+
+    @staticmethod
+    async def emit_env_delivery(
+        *,
+        workspace_id: Any,
+        workspace_name: str,
+        project_id: str | None,
+        environment: str,
+        keys: list[str],
+        allowlist: list[str],
+        agent_name: str,
+        token_id: str | None,
+        correlation_id: str,
+        duration_ms: int,
+        captured_at,
+        decision: str = "permitted",
+        layers: list[dict[str, Any]] | None = None,
+        first_failure_layer: str = "",
+    ) -> None:
+        """Emit the Tier-3 forensic twin for a headless env delivery, delivered
+        or refused.
+
+        Replay must reconstruct the exact state at the millisecond of execution
+        and the decision, including where it failed. This records the same four
+        decision blocks the resolver emits for a proxy call and the CLI emits for
+        `env`. `decision="permitted"` is a successful injection; any other value
+        is a refusal whose `first_failure_layer` names the layer that stopped it.
+        The row is validated and hashed by ingest_forensic_logs (server-
+        authoritative chain) exactly like resolver-ingested rows.
+
+        Env delivery is not an HTTP request, so the event carries no HTTP status
+        code; the outcome/decision fields carry the result.
+        """
+        permitted = decision == "permitted"
+        if layers is None:
+            layers = [
+                {
+                    "layer": "agent_capabilities",
+                    "result": "pass",
+                    "reason": "Workload token is valid and active",
+                },
+                {
+                    "layer": "workspace_containment",
+                    "result": "pass",
+                    "reason": "Project belongs to the token's workspace",
+                },
+                {
+                    "layer": "project_scope",
+                    "result": "pass",
+                    "reason": f"Delivered {len(keys)} secret(s) for environment '{environment}'",
+                },
+            ]
+        prev_chain_hash, stream_seq = await ForensicLogService.next_stream_link(
+            workspace_id=workspace_id
+        )
+        agent_identity = {
+            "token_name": agent_name,
+            "token_id": token_id,
+            "identity_level": IdentityLevel.ISSUED,
+            "process_verified": True,
+        }
+        entry = {
+            "workspace_id": str(workspace_id),
+            "project_id": project_id,
+            "correlation_id": correlation_id,
+            "stream_id": "control_plane",
+            "stream_seq": stream_seq,
+            "prev_chain_hash": prev_chain_hash,
+            "created_at": captured_at.isoformat(),
+            "event_json": {
+                "type": "env_delivery",
+                "environment": environment,
+                "key_name": ",".join(keys),
+                "method": "ENV",
+                "path": f"env:{environment}",
+                "outcome": "success" if permitted else "blocked",
+                "latency_ms": duration_ms,
+                "agent_identity": agent_identity,
+            },
+            "snapshot_json": {
+                "captured_at": captured_at.isoformat(),
+                "workspace": {
+                    "id": str(workspace_id),
+                    "name": workspace_name,
+                    "allowlist": allowlist,
+                    "allowlist_count": len(allowlist),
+                },
+                "project": {
+                    "id": project_id,
+                    "environment": environment,
+                },
+                "secrets_in_scope": keys,
+                "secrets_count": len(keys),
+                "proxy": {"version": "control-plane", "source": "cloud"},
+            },
+            "enforcement_json": {
+                "decision": decision,
+                "decided_by": "control_plane",
+                "layers_evaluated": layers,
+                "first_failure_layer": first_failure_layer,
+            },
+            "resolution_json": {
+                "credential_injected": permitted,
+                "injection_style": "env_inject" if permitted else "",
+                "response_scanned": False,
+                "redaction_triggered": False,
+                "ssrf_check_passed": True,
+            },
+        }
+        await ForensicLogService.ingest_forensic_logs(entries=[entry])
 

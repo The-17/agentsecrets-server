@@ -125,8 +125,14 @@ class AgentTokenCreateSchema(Schema):
 class AgentCapabilitiesSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
-    allowed_secrets: List[str] = []
-    denied_secrets: List[str] = []
+    # All fields are Optional so a caller can update a SUBSET of capabilities
+    # without clobbering the rest (the service merges non-None fields). This lets
+    # the CLI toggle scopes (can_env_read / can_proxy_resolve) independently of
+    # the granular secret allow/deny policy, and vice-versa.
+    allowed_secrets: Optional[List[str]] = None
+    denied_secrets: Optional[List[str]] = None
+    can_env_read: Optional[bool] = None
+    can_proxy_resolve: Optional[bool] = None
 
 
 class InternalAgentVerifySchema(Schema):

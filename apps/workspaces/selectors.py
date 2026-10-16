@@ -519,7 +519,8 @@ class AuditSelector:
 
         Primary path is the resolver-emitted correlation_id stored on both
         rows. Pre-linkage rows fall back to timestamp proximity (±2s within
-        the workspace); the resolver emits both rows within milliseconds.
+        the workspace), scoped to the audit row's own event type so an env
+        delivery can never resolve to an unrelated proxy decision.
         Raises NotFoundError when no forensic twin exists (e.g. CLI-origin
         events, whose forensic chain lives only in local SQLite).
         """
@@ -537,12 +538,19 @@ class AuditSelector:
                 correlation_id=log.correlation_id,
             ).afirst()
         if forensic is None and log.timestamp:
+            # Proximity fallback is only for genuine pre-linkage rows (emitted
+            # before correlation_id existed). Scope it to the event type the
+            # audit row actually is, so an env delivery can never bind to an
+            # unrelated proxy resolve that landed within ±2s in the same
+            # workspace and replay the wrong decision.
+            expected_type = "env_delivery" if (log.resolution_path or "") == "env" else "proxy_call"
             window_start = log.timestamp - timedelta(seconds=2)
             window_end = log.timestamp + timedelta(seconds=2)
             forensic = await ForensicAuditLogEntry.objects.filter(
                 workspace_id=log.workspace_id,
                 created_at__gte=window_start,
                 created_at__lte=window_end,
+                event_json__type=expected_type,
             ).order_by("created_at").afirst()
         if forensic is None:
             raise NotFoundError("No forensic record for this event")
@@ -652,6 +660,46 @@ class WorkloadSelector:
     """Selector for headless container workload secret deliveries."""
 
     @staticmethod
+    async def resolve_env_attribution(*, raw_token: str) -> dict[str, Any] | None:
+        """Best-effort workspace attribution for a refused env delivery.
+
+        resolve_env_payload validates the token strictly (unrevoked, unexpired,
+        capability granted, project contained). A refusal must still be
+        attributable to a workspace so the failure is auditable, so this looks up
+        the registration WITHOUT those gates. Returns None when no token matches
+        at all, in which case there is no tenant to file the refusal against."""
+        import hashlib
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        token = await AgentToken.objects.select_related(
+            "registration",
+            "registration__workspace",
+        ).filter(token_hash=token_hash).order_by("-created_at").afirst()
+        if not token or not token.registration or not token.registration.workspace_id:
+            return None
+        registration = token.registration
+        workspace = registration.workspace
+        environment = (
+            getattr(token, "environment", None)
+            or getattr(registration, "environment", None)
+            or "production"
+        )
+        allowlist = [
+            d
+            async for d in WorkspaceAllowlist.objects.filter(
+                workspace_id=registration.workspace_id
+            ).values_list("domain", flat=True)
+        ]
+        return {
+            "workspace_id": str(registration.workspace_id),
+            "workspace_name": workspace.name if workspace else "",
+            "agent_name": registration.name,
+            "project_id": str(registration.project_id) if registration.project_id else None,
+            "token_id": str(token.id),
+            "environment": environment,
+            "allowlist": allowlist,
+        }
+
+    @staticmethod
     async def resolve_env_payload(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
         import hashlib
         token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
@@ -700,14 +748,32 @@ class WorkloadSelector:
             )
 
         # Query secrets for this project & environment
-        from apps.secrets_app.models import Secret
+        from apps.secrets_app.models import Project, Secret
         from apps.common.services.encryption import EncryptionService
 
-        filter_kwargs = {"environment": env_name}
+        # Cross-workspace containment, fail closed, mirroring
+        # AgentService.verify_agent_token: a project-scoped agent may only read a
+        # project that lives in the token's own workspace.
+        if registration.project_id:
+            project_workspace_id = await Project.objects.filter(
+                id=registration.project_id
+            ).values_list("workspace_id", flat=True).afirst()
+            if project_workspace_id is None or str(project_workspace_id) != str(workspace.id):
+                logger.warning(
+                    "ENV_RESOLVE_WORKSPACE_MISMATCH: token=%s workspace=%s project=%s project_ws=%s",
+                    token.id,
+                    workspace.id,
+                    registration.project_id,
+                    project_workspace_id,
+                )
+                raise AuthorizationError("Agent project does not belong to the token's workspace")
+
+        # Always scope by the token's workspace, even when a project_id is set, so
+        # a dangling or cross-workspace project reference can never widen the
+        # query beyond the workspace the token belongs to.
+        filter_kwargs = {"environment": env_name, "project__workspace_id": workspace.id}
         if registration.project_id:
             filter_kwargs["project_id"] = registration.project_id
-        else:
-            filter_kwargs["project__workspace_id"] = workspace.id
 
         secrets_qs = Secret.objects.filter(**filter_kwargs).values("key", "value")
 
