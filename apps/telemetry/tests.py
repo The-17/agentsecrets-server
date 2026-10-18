@@ -10,6 +10,7 @@ from django.utils import timezone
 # Local
 from apps.accounts.models import User
 from apps.telemetry.models import TelemetrySnapshot, DailyMetricsAggregate
+from apps.workspaces.models import AuditLogEntry, ForensicAuditLogEntry, Workspace
 
 
 class TelemetryEndpointTests(TestCase):
@@ -249,3 +250,121 @@ class TelemetryEndpointTests(TestCase):
         self.assertEqual(fa["alias_usage"]["list-secrets"], 8)
         self.assertEqual(fa["command_usage"]["server"], 5)
         self.assertNotIn("server", fa["typos_usage"])
+
+
+class CommandPathClassificationTests(TestCase):
+    """One action must land in one bucket, whether it is reached through the
+    canonical noun-then-action tree or through a verb-noun shortcut."""
+
+    def test_path_and_shortcut_resolve_identically(self):
+        from apps.telemetry.commands import classify_command
+
+        cases = [
+            ("secrets pull", ("secrets", "pull")),
+            ("pull-secrets", ("secrets", "pull")),
+            ("agent token issue worker", ("agents", "issue_token")),
+            ("workspace allowlist add example.com", ("workspaces", "allowlist_add")),
+            ("workspace allowlist logs", ("workspaces", "allowlist_logs")),
+            ("environment copy", ("environment", "copy")),
+            ("proxy rotate-session", ("proxy", "rotate_session")),
+            ("mcp bridge", ("mcp", "bridge")),
+            ("server set https://api.example.com", ("server", "set")),
+            ("logs replay abc123", ("logs", "replay")),
+            # A trailing argument is not a subcommand and never a typo.
+            ("call POST", ("call", "general")),
+            ("secrets set STRIPE_KEY", ("secrets", "set")),
+        ]
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                domain, action, is_typo = classify_command(raw)
+                self.assertEqual((domain, action), want)
+                self.assertFalse(is_typo)
+
+    def test_unknown_head_is_typo_keyed_by_head_only(self):
+        from apps.telemetry.commands import classify_command
+
+        self.assertEqual(classify_command("bogus sub"), ("typos", "bogus", True))
+        self.assertEqual(classify_command("statut"), ("typos", "statut", True))
+
+    def test_aggregation_merges_paths_and_keeps_alias_table_clean(self):
+        from apps.telemetry.commands import process_command_executions
+
+        canonical, hierarchical, typos, aliases = process_command_executions(
+            {"secrets pull": 4, "pull-secrets": 2, "agent token issue": 3, "bogus": 1}
+        )
+
+        self.assertEqual(canonical["secrets"], 6)
+        self.assertEqual(canonical["agents"], 3)
+        self.assertEqual(hierarchical["secrets"]["actions"]["pull"], 6)
+        self.assertEqual(hierarchical["agents"]["actions"]["issue_token"], 3)
+        self.assertEqual(typos["bogus"], 1)
+        # Canonical paths are usage, not shortcut aliases.
+        self.assertEqual(aliases.get("pull-secrets"), 2)
+        self.assertNotIn("secrets pull", aliases)
+
+
+class CloudResolutionStatsTests(TestCase):
+    """Cloud counters come from the forensic twin, which records the real
+    decision and the number of secret handles in scope."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.user = User.objects.create_user(
+            email="metrics_cloud@example.com",
+            password="testpassword123",
+            first_name="Metrics",
+            last_name="Cloud",
+        )
+        self.workspace = Workspace.objects.create(name="Metrics Workspace", owner=self.user)
+
+    def _forensic(self, decision, secrets_count=0, redaction_triggered=False):
+        from uuid import uuid4
+
+        return ForensicAuditLogEntry.objects.create(
+            workspace=self.workspace,
+            correlation_id=f"corr_{uuid4().hex[:12]}",
+            enforcement_json={"decision": decision},
+            snapshot_json={"secrets_count": secrets_count},
+            resolution_json={"redaction_triggered": redaction_triggered},
+        )
+
+    def _audit(self, *, duration_ms=10, redacted=False):
+        return AuditLogEntry.objects.create(
+            workspace=self.workspace,
+            timestamp=timezone.now(),
+            credential_ref="",
+            injection_style="bearer",
+            target_domain="api.example.com",
+            target_url="https://api.example.com/v1",
+            target_path="/v1",
+            method="POST",
+            status_code=200,
+            duration_ms=duration_ms,
+            redacted=redacted,
+            resolution_path="direct_resolve",
+            caller_role="agent",
+        )
+
+    def test_blocked_calls_are_not_counted_as_redactions(self):
+        from apps.telemetry.aggregations import cloud_resolution_stats
+
+        self._forensic("permitted", secrets_count=2)
+        self._forensic("permitted", secrets_count=3)
+        self._forensic("permitted", secrets_count=1, redaction_triggered=True)
+        # A blocked call is written to the audit trail with redacted=True; it
+        # must count as a block, never as a redaction or a resolved secret.
+        self._forensic("blocked", secrets_count=0)
+
+        stats = cloud_resolution_stats()
+        self.assertEqual(stats["blocked"], 1)
+        self.assertEqual(stats["redacted"], 1)
+        self.assertEqual(stats["secrets_resolved"], 6)
+
+    def test_call_stats_use_the_resolver_duration_column(self):
+        from apps.telemetry.aggregations import cloud_call_stats
+
+        self._audit(duration_ms=10)
+        self._audit(duration_ms=32)
+
+        self.assertEqual(cloud_call_stats(), {"calls": 2, "duration_ms": 42})

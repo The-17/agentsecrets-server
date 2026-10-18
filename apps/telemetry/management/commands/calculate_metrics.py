@@ -19,6 +19,7 @@ from apps.workspaces.models import (
 )
 from apps.telemetry.models import TelemetrySnapshot, DailyMetricsAggregate
 from apps.telemetry.commands import process_command_executions
+from apps.telemetry.aggregations import cloud_call_stats, cloud_resolution_stats
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +222,8 @@ class Command(BaseCommand):
             total_log_verifications=Sum("log_chain_verifications"),
             total_tampering_alerts=Sum("tampering_detected"),
             # Node Metadata
-            total_headless_nodes=Count("id", filter=Q(is_headless_node=True)),
-            total_active_keychains=Count("id", filter=Q(keychain_initialized=True)),
+            total_headless_nodes=Count("user_id", distinct=True, filter=Q(is_headless_node=True)),
+            total_active_keychains=Count("user_id", distinct=True, filter=Q(keychain_initialized=True)),
             # Identity & Capabilities
             total_identity_anonymous_calls=Sum("identity_anonymous_calls"),
             total_identity_declared_calls=Sum("identity_declared_calls"),
@@ -246,24 +247,22 @@ class Command(BaseCommand):
             | Q(timestamp__isnull=True, recorded_at__date__lte=target_date),
             resolution_path="direct_resolve",
         )
-        cloud_stats = cloud_audit_qs.aggregate(
-            cloud_total=Count("id"),
-            cloud_redacted=Count("id", filter=Q(redacted=True)),
-            cloud_duration_ms=Sum("proxy_duration_ms"),
-        )
+        cloud_calls = cloud_call_stats(until_date=target_date)
+        cloud = cloud_resolution_stats(until_date=target_date)
 
         cli_proxy_calls = proxy_stats["total_calls"] or 0
-        cloud_proxy_calls = cloud_stats["cloud_total"] or 0
+        cloud_proxy_calls = cloud_calls["calls"]
         combined_total_proxy_calls = cli_proxy_calls + cloud_proxy_calls
 
+        cli_blocked = proxy_stats["total_blocked"] or 0
+        combined_blocked = cli_blocked + cloud["blocked"]
+
         cli_redacted = proxy_stats["total_redacted"] or 0
-        cloud_redacted = cloud_stats["cloud_redacted"] or 0
-        combined_redacted = cli_redacted + cloud_redacted
+        combined_redacted = cli_redacted + cloud["redacted"]
 
         cli_secrets = proxy_stats["total_secrets_resolved"] or 0
-        cloud_secrets = cloud_stats["cloud_total"] or 0
-        combined_secrets_resolved = cli_secrets + cloud_secrets
-        combined_proxy_duration_ms = (proxy_stats["total_proxy_duration_ms"] or 0) + (cloud_stats["cloud_duration_ms"] or 0)
+        combined_secrets_resolved = cli_secrets + cloud["secrets_resolved"]
+        combined_proxy_duration_ms = (proxy_stats["total_proxy_duration_ms"] or 0) + cloud_calls["duration_ms"]
 
         # ──────────────────────────────────────────────
         # 6. COMMAND USAGE & INTEGRATION ADOPTION IN LEAN PASS
@@ -337,7 +336,7 @@ class Command(BaseCommand):
                 "total_proxy_calls": combined_total_proxy_calls,
                 "total_proxy_calls_cli": cli_proxy_calls,
                 "total_proxy_calls_cloud": cloud_proxy_calls,
-                "total_proxy_blocked": proxy_stats["total_blocked"] or 0,
+                "total_proxy_blocked": combined_blocked,
                 "total_proxy_redacted": combined_redacted,
                 "command_usage": canonical_usage,
                 "alias_usage": alias_usage,
