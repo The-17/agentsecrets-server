@@ -100,6 +100,35 @@ class ActivityRetentionTests(ActivityTestBase):
         self.assertEqual((days, restricted), (3, True))
 
 
+class ResolverTierTests(ActivityTestBase):
+    """The retention gate confirms a Free mirror with the resolver."""
+
+    def _window(self):
+        from apps.workspaces.selectors import AuditSelector
+
+        return async_to_sync(AuditSelector.retention_window)(
+            workspace_id=str(self.workspace.id)
+        )
+
+    def test_active_pro_plan_overrides_a_free_mirror(self):
+        from unittest.mock import patch
+
+        async def fake_plan(**_kwargs):
+            return {"plan": "pro", "status": "active"}
+
+        with patch("apps.workspaces.selectors.resolver_plan", fake_plan):
+            self.assertEqual(self._window(), (30, False))
+
+    def test_inactive_pro_plan_stays_free(self):
+        from unittest.mock import patch
+
+        async def fake_plan(**_kwargs):
+            return {"plan": "pro", "status": "past_due"}
+
+        with patch("apps.workspaces.selectors.resolver_plan", fake_plan):
+            self.assertEqual(self._window(), (3, True))
+
+
 class ActivityFilterTests(ActivityTestBase):
     """Category and free-text filters run server-side over the whole stream."""
 
