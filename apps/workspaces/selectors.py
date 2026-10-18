@@ -34,6 +34,7 @@ from .models import (
     WorkspaceActivityLog,
     ForensicAuditLogEntry,
 )
+from .billing_source import plan_is_pro, resolver_plan
 
 logger = logging.getLogger("apps.workspaces")
 
@@ -375,14 +376,38 @@ class AuditSelector:
 
     @staticmethod
     async def retention_window(*, workspace_id: str) -> tuple[int | None, bool]:
-        """(days, restricted) for a workspace. restricted=False means pro/unknown."""
+        """(days, restricted) for a workspace. restricted=False means pro/unknown.
+
+        The resolver owns entitlement, so a cache miss confirms the local mirror
+        against the resolver before clamping a Free workspace. Without that, an
+        upgrade stayed clamped to 3 days until someone called the billing
+        reconcile endpoint by hand. A resolver miss falls back to the mirror and
+        re-checks after 60s instead of 5 minutes.
+        """
         try:
             cache_key = f"ws-tier:{workspace_id}"
             tier = await sync_to_async(cache.get)(cache_key)
             if tier is None:
-                ws = await Workspace.objects.filter(id=workspace_id).afirst()
-                tier = getattr(ws, "tier", None) if ws is not None else None
-                await sync_to_async(cache.set)(cache_key, tier or "unknown", 300)
+                ws = await Workspace.objects.filter(id=workspace_id).select_related("owner").afirst()
+                if ws is None:
+                    return None, False
+                db_tier = getattr(ws, "tier", None)
+                if db_tier == WorkspaceTier.PRO:
+                    # Only a resolver-confirmed reconcile can set the mirror to
+                    # Pro, so trust it. Confirm the other direction: a Free
+                    # mirror may be a paid workspace whose upgrade has not been
+                    # reconciled yet, and clamping it would be wrong.
+                    tier = db_tier
+                    ttl = 300
+                else:
+                    payload = await resolver_plan(billing_id=ws.effective_billing_id)
+                    if payload is None:
+                        tier = db_tier or "unknown"
+                        ttl = 60
+                    else:
+                        tier = WorkspaceTier.PRO if plan_is_pro(payload) else WorkspaceTier.FREE
+                        ttl = 300
+                await sync_to_async(cache.set)(cache_key, tier, ttl)
         except Exception:
             return None, False
         if tier == WorkspaceTier.PRO:
@@ -392,11 +417,16 @@ class AuditSelector:
         return None, False
 
     @staticmethod
-    async def apply_retention_floor(qs, *, workspace_id: str):
-        """Clamp a log queryset to the workspace's plan retention window."""
+    async def apply_retention_floor(qs, *, workspace_id: str, field: str = "timestamp"):
+        """Clamp a log queryset to the workspace's plan retention window.
+
+        Shared by every Tier-1/Tier-2/Tier-3 read so the billing promise (Free
+        3 days, Pro 30) has one implementation. ``field`` names the timestamp
+        column: audit rows carry ``timestamp``, activity rows ``created_at``.
+        """
         days, _ = await AuditSelector.retention_window(workspace_id=str(workspace_id))
         if days:
-            qs = qs.filter(timestamp__gte=timezone.now() - timedelta(days=days))
+            qs = qs.filter(**{f"{field}__gte": timezone.now() - timedelta(days=days)})
         return qs
 
     @staticmethod
@@ -808,6 +838,19 @@ class ActivityLogSelector:
     Pure read-only query selector layer for Workspace Activity Logs (Tier 1 Managerial).
     """
 
+    # Category -> queryset predicate. Categories are the dashboard's filter
+    # taxonomy, not raw columns: rotation lives under secrets by target_type but
+    # must be filterable on its own, and tokens span two target types.
+    CATEGORY_FILTERS = {
+        "secret": Q(action__startswith="secret.") & ~Q(action__startswith="secret.rotation"),
+        "rotation": Q(action__startswith="secret.rotation"),
+        "project": Q(target_type="project"),
+        "environment": Q(target_type="environment"),
+        "member": Q(target_type="member"),
+        "allowlist": Q(target_type="allowlist"),
+        "token": Q(target_type__in=["agent_token", "agent_token_family"]),
+    }
+
     @staticmethod
     def apply_filters(qs, params: dict[str, Any]):
         simple = {
@@ -822,6 +865,24 @@ class ActivityLogSelector:
             val = params.get(param)
             if val:
                 qs = qs.filter(**{field: val})
+
+        # Dashboard search: one box over the fields a reader recognises. Runs
+        # server-side so it reaches beyond the loaded page, matching the
+        # telemetry tab's behaviour.
+        query = (params.get("q") or "").strip()
+        if query:
+            qs = qs.filter(
+                Q(action__icontains=query)
+                | Q(target_name__icontains=query)
+                | Q(actor_email__icontains=query)
+                | Q(target_type__icontains=query)
+            )
+
+        category = (params.get("category") or "").strip().lower()
+        if category:
+            predicate = ActivityLogSelector.CATEGORY_FILTERS.get(category)
+            if predicate is not None:
+                qs = qs.filter(predicate)
 
         since = params.get("since")
         if since:
@@ -841,6 +902,11 @@ class ActivityLogSelector:
     ) -> list[dict[str, Any]]:
         qs = WorkspaceActivityLog.objects.filter(workspace_id=workspace_id)
         qs = ActivityLogSelector.apply_filters(qs, params)
+        # Plan retention applies to the managerial stream too: Free 3 days,
+        # Pro 30. Clamping before paging keeps page boundaries honest.
+        qs = await AuditSelector.apply_retention_floor(
+            qs, workspace_id=workspace_id, field="created_at"
+        )
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
 

@@ -8,6 +8,7 @@ import secrets as secrets_module
 import uuid
 from typing import Any
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction, models
 from django.db.models import Q
 from django.utils import timezone
@@ -171,10 +172,13 @@ class WorkspaceService:
             if getattr(ws, "tier", "free") != WorkspaceTier.PRO:
                 ws.tier = WorkspaceTier.PRO
                 await ws.asave(update_fields=["tier", "updated_at"])
+            # Drop the retention verdict so the next read sees Pro immediately.
+            await sync_to_async(cache.delete)(f"ws-tier:{workspace_id}")
             return {"tier": "pro", "billing_id": ws.billing_id, "status": "active"}
         if getattr(ws, "tier", "free") != WorkspaceTier.FREE:
             ws.tier = WorkspaceTier.FREE
             await ws.asave(update_fields=["tier", "updated_at"])
+        await sync_to_async(cache.delete)(f"ws-tier:{workspace_id}")
         return {"tier": "free", "billing_id": ws.billing_id, "status": remote_status or "inactive"}
 
 
@@ -262,6 +266,16 @@ class MemberService:
                         )
                         results.append({"email": invite.email, "error": ""})
                         any_created = True
+                        await ActivityLogService.record_target(
+                            user=user,
+                            workspace_id=workspace_id,
+                            project_id=None,
+                            action="member.invited",
+                            target_type="member",
+                            target_id=invitee.id,
+                            target_name=invite.email,
+                            metadata={"role": str(invite.role), "reactivated": True},
+                        )
                         continue
 
                     results.append({"email": invite.email, "error": "Already a member"})
@@ -288,6 +302,16 @@ class MemberService:
                 results.append({"email": invite.email, "error": ""})
                 any_created = True
                 seats += 1
+                await ActivityLogService.record_target(
+                    user=user,
+                    workspace_id=workspace_id,
+                    project_id=None,
+                    action="member.invited",
+                    target_type="member",
+                    target_id=invitee.id,
+                    target_name=invite.email,
+                    metadata={"role": str(invite.role)},
+                )
 
             except Exception as e:
                 logger.error(
@@ -319,8 +343,19 @@ class MemberService:
         if role == MembershipRole.OWNER:
             raise AuthorizationError("Cannot promote member to OWNER. Transfer ownership instead.")
 
+        old_role = tm.role
         tm.role = role
         await tm.asave(update_fields=["role", "updated_at"])
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.role_changed",
+            target_type="member",
+            target_id=tm.user_id,
+            target_name=tm.user.email,
+            metadata={"from": str(old_role), "to": str(role)},
+        )
         return {"user_id": str(target_user_id), "email": tm.user.email, "role": tm.role}
 
     @staticmethod
@@ -344,7 +379,17 @@ class MemberService:
         if um.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("You don't have permission to remove members")
         email = tm.user.email
+        member_user_id = tm.user_id
         await tm.adelete()
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.removed",
+            target_type="member",
+            target_id=member_user_id,
+            target_name=email,
+        )
         logger.warning(f"MEMBER_REMOVED: Member removed from workspace {workspace_id}")
         return email
 
@@ -380,6 +425,16 @@ class MemberService:
             tm.role = MembershipRole.ADMIN
 
         await tm.asave(update_fields=["role", "updated_at"])
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.promoted" if action == "promote" else "member.demoted",
+            target_type="member",
+            target_id=tm.user_id,
+            target_name=tm.user.email,
+            metadata={"role": str(tm.role)},
+        )
         return {"user_id": str(tm.user.id), "role": tm.role}
 
 
@@ -421,6 +476,17 @@ class AllowlistService:
         entries = await _insert_records()
         for e in entries:
             e.added_by = user
+        for e in entries:
+            await ActivityLogService.record_target(
+                user=user,
+                workspace_id=workspace_id,
+                project_id=None,
+                action="allowlist.added",
+                target_type="allowlist",
+                target_id=e.id,
+                target_name=e.domain,
+                metadata={"domain": e.domain},
+            )
         return [
             {
                 "id": str(e.id),
@@ -458,6 +524,16 @@ class AllowlistService:
                 )
 
         await _delete_and_log()
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="allowlist.removed",
+            target_type="allowlist",
+            target_id=entry.id,
+            target_name=domain.lower(),
+            metadata={"domain": domain.lower()},
+        )
 
 
 class AgentService:

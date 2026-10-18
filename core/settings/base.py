@@ -79,7 +79,8 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 
 import sys
-if 'test' in sys.argv:
+TESTING = 'test' in sys.argv
+if TESTING:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
