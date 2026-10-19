@@ -32,6 +32,7 @@ from apps.workspaces.models import (
 )
 from apps.secrets_app.models import Project, Secret
 from apps.telemetry.models import TelemetrySnapshot, DailyMetricsAggregate
+from apps.workspaces.selectors import AuditSelector
 from apps.common.services.encryption import EncryptionService
 
 logger = logging.getLogger("apps.common.health")
@@ -279,6 +280,10 @@ class SystemHealthService:
                         resolution_path="local",
                         caller_role="agent",
                     )
+                    # Same write-side invalidation as the ingest service: this
+                    # row is visible in the list, so the summary cards must not
+                    # keep counting without it.
+                    AuditSelector.invalidate_summary_cache(str(workspace.id))
 
                 run_step("audit_logging", step_audit_log)
 

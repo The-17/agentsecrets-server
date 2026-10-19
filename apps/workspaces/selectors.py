@@ -364,6 +364,18 @@ class AgentSelector:
         return due
 
 
+def cloud_source_q() -> Q:
+    """Rows that read as cloud-origin anywhere the dashboard counts them.
+
+    ``list_audit_logs`` coerces a missing or empty ``source`` to ``cloud`` at
+    read time (``log.get("source") or "cloud"``), so the summary's cloud
+    bucket and the ``source=cloud`` filter must coerce identically — otherwise
+    the card contradicts the Origin column over the very same rows. One
+    predicate, used by every read path, is what keeps them equal.
+    """
+    return Q(source="cloud") | Q(source="") | Q(source__isnull=True)
+
+
 class AuditSelector:
     """
     Pure read-only query selector layer for Audit Logs.
@@ -373,6 +385,30 @@ class AuditSelector:
     # Unknown tier fails open (no restriction).
     FREE_RETENTION_DAYS = 3
     PRO_RETENTION_DAYS = 30
+
+    SUMMARY_CACHE_TTL = 60
+    # Long enough that a version bump can never collide with an entry cached
+    # under the previous version; summaries themselves expire after 60s.
+    SUMMARY_VERSION_TTL = 7 * 24 * 3600
+
+    @staticmethod
+    def summary_version(workspace_id: str) -> int:
+        return cache.get(f"audit-summary:ver:{workspace_id}") or 1
+
+    @staticmethod
+    def invalidate_summary_cache(workspace_id) -> None:
+        """Version-bump every cached summary for this workspace.
+
+        Called wherever audit rows are written. The list reads the database
+        live while the summary serves a 60s cache, so without this the card
+        silently lags the table exactly when new events are landing — the
+        dashboard showed eight rows beside a card saying five.
+        """
+        key = f"audit-summary:ver:{workspace_id}"
+        try:
+            cache.incr(key)
+        except ValueError:
+            cache.set(key, 2, AuditSelector.SUMMARY_VERSION_TTL)
 
     @staticmethod
     async def retention_window(*, workspace_id: str) -> tuple[int | None, bool]:
@@ -438,12 +474,19 @@ class AuditSelector:
             "identity_level": "identity_level",
             "credential_ref": "credential_ref",
             "environment": "environment",
-            "source": "source",
         }
         for param, field in simple.items():
             val = params.get(param)
             if val:
                 qs = qs.filter(**{field: val})
+        # source is not a plain equality: the table's Origin column reads an
+        # empty/missing source as cloud, so filtering to Cloud has to select
+        # the same rows the reader already sees marked cloud.
+        source = params.get("source")
+        if source == "cloud":
+            qs = qs.filter(cloud_source_q())
+        elif source:
+            qs = qs.filter(source=source)
         resolution_path = params.get("resolution_path")
         if resolution_path:
             # Comma-separated allowed (e.g. ?resolution_path=env,direct_resolve).
@@ -607,8 +650,14 @@ class AuditSelector:
 
         # 60s cache-aside: dashboard polls summary on every navigation +
         # visibility return. Aggregates only — no secret material is cached.
+        # The version segment is bumped by invalidate_summary_cache on every
+        # audit write, so a landing row makes every cached count unreachable
+        # instead of letting the card contradict a live list for a minute.
         fingerprint = "&".join(f"{k}={params[k]}" for k in sorted(params))
-        cache_key = f"audit-summary:{workspace_id}:{start or 'all'}:{end or 'all'}:{fingerprint}"
+        cache_key = (
+            f"audit-summary:{workspace_id}:v{AuditSelector.summary_version(workspace_id)}:"
+            f"{start or 'all'}:{end or 'all'}:{fingerprint}"
+        )
         cached = await sync_to_async(cache.get)(cache_key)
         if cached is not None:
             return cached
@@ -632,7 +681,7 @@ class AuditSelector:
             errors=Count("id", filter=Q(status_code__gte=400)),
             failed=Count("id", filter=failed_q),
             redacted=Count("id", filter=Q(redacted=True)),
-            cloud=Count("id", filter=Q(source="cloud")),
+            cloud=Count("id", filter=cloud_source_q()),
             cli=Count("id", filter=Q(source="cli")),
             env=Count("id", filter=Q(resolution_path="env")),
             anon=Count("id", filter=Q(identity_level=IdentityLevel.ANONYMOUS)),
@@ -682,7 +731,7 @@ class AuditSelector:
             "anonymous_call_count": anon_count,
             "retention": {"days": retention_days, "restricted": retention_restricted},
         }
-        await sync_to_async(cache.set)(cache_key, result, 60)
+        await sync_to_async(cache.set)(cache_key, result, AuditSelector.SUMMARY_CACHE_TTL)
         return result
 
 

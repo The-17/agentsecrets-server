@@ -45,7 +45,7 @@ from .schemas import (
     AgentTokenCreateSchema,
     InternalAgentVerifySchema,
 )
-from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector
+from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector, AuditSelector
 
 logger = logging.getLogger("apps.workspaces")
 
@@ -1142,7 +1142,10 @@ class AgentService:
             if not mapped.get("timestamp"):
                 mapped["timestamp"] = timezone.now()
 
-            if "source" not in mapped:
+            # Normalize source at the boundary: an empty or missing source
+            # becomes the derived value, so no row is ever stored in a state
+            # the read paths would have to guess about.
+            if not str(mapped.get("source") or "").strip():
                 if mapped.get("resolution_path") in ("local proxy", "cli", "env"):
                     mapped["source"] = "cli"
                 else:
@@ -1181,6 +1184,11 @@ class AgentService:
             return 0, []
 
         created = await AuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
+        # Bump the summary cache version for every workspace we touched, so
+        # the dashboard's cards recount immediately instead of serving counts
+        # that predate the rows the list is already showing.
+        for touched_ws in {str(entry.workspace_id) for entry in model_entries}:
+            await sync_to_async(AuditSelector.invalidate_summary_cache)(touched_ws)
         return len(created), [str(log.id) for log in created]
 
 
