@@ -482,9 +482,9 @@ class AuditController:
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await WorkspaceSelector.get_membership(user=request.auth, workspace_id=uuid.UUID(workspace_id))
-        start = request.GET.get("start")
-        end = request.GET.get("end")
-        data = await AuditSelector.get_audit_log_summary(workspace_id=workspace_id, start=start, end=end)
+        data = await AuditSelector.get_audit_log_summary(
+            workspace_id=workspace_id, params=request.GET.dict()
+        )
         return CustomResponse.success(message="Audit log summary retrieved", data=data)
 
     @route.get("/export/", response={200: dict, 400: ErrorResponse})

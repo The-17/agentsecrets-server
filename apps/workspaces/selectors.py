@@ -590,17 +590,31 @@ class AuditSelector:
     async def get_audit_log_summary(
         *,
         workspace_id: str,
+        params: dict[str, Any] | None = None,
         start: str | None = None,
         end: str | None = None,
     ) -> dict[str, Any]:
+        """Aggregate the telemetry stream under the same filters as the list.
+
+        The dashboard shows these numbers next to a filtered table, so the
+        summary has to accept the list's query params; otherwise the cards
+        describe a different set of rows than the reader is looking at. Scope
+        is the plan retention window, never an arbitrary month boundary.
+        """
+        params = dict(params or {})
+        start = start or params.get("start") or None
+        end = end or params.get("end") or None
+
         # 60s cache-aside: dashboard polls summary on every navigation +
         # visibility return. Aggregates only — no secret material is cached.
-        cache_key = f"audit-summary:{workspace_id}:{start or 'all'}:{end or 'all'}"
+        fingerprint = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        cache_key = f"audit-summary:{workspace_id}:{start or 'all'}:{end or 'all'}:{fingerprint}"
         cached = await sync_to_async(cache.get)(cache_key)
         if cached is not None:
             return cached
 
         qs = AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER)
+        qs = AuditSelector.apply_filters(qs, params)
         if start:
             qs = qs.filter(timestamp__gte=start)
         if end:
@@ -608,14 +622,24 @@ class AuditSelector:
         qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
         retention_days, retention_restricted = await AuditSelector.retention_window(workspace_id=str(workspace_id))
 
+        # Same "failed" predicate the per-agent and per-domain breakdowns use, so
+        # the card and the breakdown can never disagree.
+        failed_q = Q(status_code__gte=400) | Q(error__isnull=False)
+
         # Single aggregate for totals instead of 3 separate COUNT scans.
         totals = await qs.aaggregate(
             total=Count("id"),
             errors=Count("id", filter=Q(status_code__gte=400)),
+            failed=Count("id", filter=failed_q),
+            redacted=Count("id", filter=Q(redacted=True)),
+            cloud=Count("id", filter=Q(source="cloud")),
+            cli=Count("id", filter=Q(source="cli")),
+            env=Count("id", filter=Q(resolution_path="env")),
             anon=Count("id", filter=Q(identity_level=IdentityLevel.ANONYMOUS)),
         )
         total_requests = totals["total"] or 0
         total_errors = totals["errors"] or 0
+        failed = totals["failed"] or 0
 
         by_agent = await sync_to_async(list)(
             qs.exclude(agent_id__isnull=True).exclude(agent_id="").values("agent_id").annotate(
@@ -640,6 +664,18 @@ class AuditSelector:
         result = {
             "period": {"start": start or "all", "end": end or "all"},
             "totals": {"requests": total_requests, "errors": total_errors},
+            # Counts the dashboard cards read. `blocked` uses the breakdown's
+            # failed predicate; `ok` is its complement over the same set.
+            "ok": max(0, total_requests - failed),
+            "blocked": failed,
+            "redacted": totals["redacted"] or 0,
+            # Quota meters cloud activity only: the resolver debits cloud proxy
+            # resolutions (TryConsumeUsage) and the control plane reports
+            # cloud-backed env deliveries (/v1/billing/record-usage). Local CLI
+            # calls reach neither path, so the dashboard must not add them in.
+            "cloud_requests": totals["cloud"] or 0,
+            "cli_requests": totals["cli"] or 0,
+            "env_requests": totals["env"] or 0,
             "by_agent": [{"agent_id": r["agent_id"], "count": r["count"], "failed": r["failed"]} for r in by_agent],
             "by_credential": [{"credential_ref": r["credential_ref"], "count": r["count"], "failed": r["failed"]} for r in by_credential],
             "by_domain": [{"domain": r["target_domain"], "count": r["count"], "failed": r["failed"]} for r in by_domain],

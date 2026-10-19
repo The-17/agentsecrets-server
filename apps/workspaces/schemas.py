@@ -389,6 +389,12 @@ class AuditLogItemSchema(Schema):
 class AuditSummaryResponseSchema(Schema):
     period: Dict[str, Any]
     totals: Dict[str, int]
+    ok: int = 0
+    blocked: int = 0
+    redacted: int = 0
+    cloud_requests: int = 0
+    cli_requests: int = 0
+    env_requests: int = 0
     by_agent: List[Dict[str, Any]]
     by_credential: List[Dict[str, Any]]
     by_domain: List[Dict[str, Any]]
