@@ -1,10 +1,26 @@
 import logging
+from django.http import JsonResponse
 from ninja_extra import api_controller, route
 
 from apps.common.response import CustomResponse
 from apps.common.selectors import HealthSelector
 
 logger = logging.getLogger("apps.common.status")
+
+
+def _is_fresh_request(request) -> bool:
+    return (
+        request.GET.get("fresh", "false").lower() == "true"
+        or request.headers.get("Cache-Control") == "no-cache"
+    )
+
+
+async def health(request):
+    """Root-level health alias for the CLI's ``/health`` probe."""
+    status_code, data = await HealthSelector.get_system_status(
+        fresh=_is_fresh_request(request)
+    )
+    return JsonResponse(data, status=status_code)
 
 
 @api_controller("/status", tags=["Status"], auth=None)
@@ -22,9 +38,7 @@ class StatusController:
         return await self._get_status_response(request)
 
     async def _get_status_response(self, request):
-        fresh = (
-            request.GET.get("fresh", "false").lower() == "true"
-            or request.headers.get("Cache-Control") == "no-cache"
+        status_code, data = await HealthSelector.get_system_status(
+            fresh=_is_fresh_request(request)
         )
-        status_code, data = await HealthSelector.get_system_status(fresh=fresh)
         return status_code, data

@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from django.test import TestCase
 from django.core.cache import cache
 
@@ -43,6 +43,34 @@ class StatusEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "healthy")
+
+    @patch(
+        "apps.common.views.HealthSelector.get_system_status",
+        new_callable=AsyncMock,
+    )
+    def test_root_health_alias(self, mock_status):
+        """
+        Verify the root /health probe used by the published CLI resolves.
+        """
+        mock_status.return_value = (200, {"status": "healthy"})
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "healthy")
+        mock_status.assert_awaited_once_with(fresh=False)
+
+    @patch(
+        "apps.common.views.HealthSelector.get_system_status",
+        new_callable=AsyncMock,
+    )
+    def test_root_health_alias_with_trailing_slash(self, mock_status):
+        """
+        Verify /health/ works for proxies that append a trailing slash.
+        """
+        mock_status.return_value = (200, {"status": "healthy"})
+        response = self.client.get("/health/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "healthy")
 
     @patch("django.db.connection.cursor")
     def test_status_database_failure(self, mock_cursor):
