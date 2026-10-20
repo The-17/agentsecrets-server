@@ -24,6 +24,7 @@ from apps.common.exceptions import (
     ConflictError,
 )
 from apps.common.services.encryption import EncryptionService as encryption_service
+from .vault import validate_vault, validate_vault_update
 from apps.workspaces.models import (
     Workspace,
     Membership,
@@ -235,13 +236,58 @@ class AccountService:
         new_password: str,
         key_salt: str,
         encrypted_private_key: str,
+        vault: dict | None = None,
+        expected_version: int | None = None,
     ) -> None:
-        if not user.check_password(current_password):
-            raise BodyValidationError("current_password", "Current password is incorrect")
-        user.set_password(new_password)
-        user.key_salt = encryption_service.encrypt(key_salt)
-        user.encrypted_private_key = encrypted_private_key
-        await user.asave()
+        if vault is not None and expected_version is None:
+            raise BodyValidationError("expected_version", "expected_version is required with vault")
+        if vault is not None:
+            validate_vault(vault, user_id=str(user.id))
+
+        def _apply() -> None:
+            with transaction.atomic():
+                db_user = User.objects.select_for_update().get(id=user.id)
+                if not db_user.check_password(current_password):
+                    raise BodyValidationError("current_password", "Current password is incorrect")
+                if vault is not None:
+                    if db_user.vault_version != expected_version:
+                        raise ConflictError("Vault version conflict")
+                    validate_vault_update(
+                        db_user.vault,
+                        vault,
+                        expected_version=expected_version,
+                        user_id=str(db_user.id),
+                    )
+                    db_user.vault = vault
+                    db_user.vault_version = expected_version + 1
+                db_user.set_password(new_password)
+                db_user.key_salt = encryption_service.encrypt(key_salt)
+                db_user.encrypted_private_key = encrypted_private_key
+                db_user.save()
+
+        await sync_to_async(_apply, thread_sensitive=True)()
+
+    @staticmethod
+    async def update_vault(*, user: User, expected_version: int, vault: dict) -> dict[str, Any]:
+        validate_vault(vault, user_id=str(user.id))
+
+        def _apply() -> None:
+            with transaction.atomic():
+                db_user = User.objects.select_for_update().get(id=user.id)
+                if db_user.vault_version != expected_version:
+                    raise ConflictError("Vault version conflict")
+                validate_vault_update(
+                    db_user.vault,
+                    vault,
+                    expected_version=expected_version,
+                    user_id=str(db_user.id),
+                )
+                db_user.vault = vault
+                db_user.vault_version = expected_version + 1
+                db_user.save(update_fields=["vault", "vault_version"])
+
+        await sync_to_async(_apply, thread_sensitive=True)()
+        return {"vault": vault, "vault_version": expected_version + 1}
 
     @staticmethod
     async def logout_user(*, refresh_token: str | None) -> None:
