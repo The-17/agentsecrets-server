@@ -1,6 +1,8 @@
 """Filtered telemetry summary: the dashboard cards must describe the same rows
 as the table, and the quota number must stay cloud-only."""
 
+from datetime import timedelta
+
 from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
@@ -99,6 +101,41 @@ class AuditSummaryFilterTests(TestCase):
             "retention",
         ):
             self.assertIn(field, data)
+
+    def _logs(self, query=""):
+        res = self.client.get(
+            f"/api/audit/logs/?workspace_id={self.workspace.id}{query}",
+            **self.headers,
+        )
+        self.assertEqual(res.status_code, 200)
+        return res.json()["data"]
+
+    def test_list_logs_offset_paging_serves_distinct_pages_in_order(self):
+        # The web client's infinite scroll pages with limit+1/offset
+        # (api-client.ts fetchRecentLogs). Each page must be disjoint and
+        # ordered newest-first, or "Load more" repeats or skips rows.
+        base = timezone.now()
+        for i in range(5):
+            AuditLogEntry.objects.create(
+                workspace=self.workspace,
+                timestamp=base - timedelta(minutes=i),
+                target_domain=f"paged{i}.pagetest.example.com",
+                method="GET",
+                status_code=200,
+                duration_ms=5,
+                source="cloud",
+                resolution_path="direct_resolve",
+            )
+
+        page1 = self._logs("&limit=2&offset=0&domain=pagetest.example.com")
+        page2 = self._logs("&limit=2&offset=2&domain=pagetest.example.com")
+        page3 = self._logs("&limit=2&offset=4&domain=pagetest.example.com")
+
+        ids = [row["id"] for row in page1 + page2 + page3]
+        self.assertEqual(len(ids), 5)
+        self.assertEqual(len(set(ids)), 5)
+        stamps = [row["timestamp"] for row in page1 + page2 + page3]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
 
     def test_summary_honours_the_list_filters(self):
         cloud_only = self._summary("&source=cloud")
