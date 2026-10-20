@@ -82,6 +82,24 @@ class AuditSummaryFilterTests(TestCase):
         self.assertEqual(data["cloud_requests"], 2)
         self.assertEqual(data["cli_requests"], 1)
 
+    def test_summary_carries_every_field_the_cards_read(self):
+        # The web client reads these keys directly and falls back to 0 (or
+        # null) when they are absent, so a missing key renders as a truthful
+        # looking zero on the card. The response contract has to carry all of
+        # them, otherwise the dashboard silently under-reports.
+        data = self._summary()
+
+        for field in (
+            "ok",
+            "blocked",
+            "redacted",
+            "cloud_requests",
+            "cli_requests",
+            "env_requests",
+            "retention",
+        ):
+            self.assertIn(field, data)
+
     def test_summary_honours_the_list_filters(self):
         cloud_only = self._summary("&source=cloud")
         self.assertEqual(cloud_only["totals"]["requests"], 2)

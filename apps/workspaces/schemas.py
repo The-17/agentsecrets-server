@@ -386,19 +386,34 @@ class AuditLogItemSchema(Schema):
     source: Optional[str] = "cloud"
 
 
+class AuditRetentionSchema(Schema):
+    days: Optional[int] = None
+    restricted: bool
+
+
 class AuditSummaryResponseSchema(Schema):
+    """Every field the dashboard cards read is required.
+
+    A default of 0 here would turn a producer that forgot a bucket into a
+    card that reports a confident zero. The client also defaults missing
+    keys to 0, so an omitted bucket is indistinguishable from an empty one.
+    Leaving these without defaults makes the omission fail response
+    validation instead of shipping a wrong number.
+    """
+
     period: Dict[str, Any]
     totals: Dict[str, int]
-    ok: int = 0
-    blocked: int = 0
-    redacted: int = 0
-    cloud_requests: int = 0
-    cli_requests: int = 0
-    env_requests: int = 0
+    ok: int
+    blocked: int
+    redacted: int
+    cloud_requests: int
+    cli_requests: int
+    env_requests: int
     by_agent: List[Dict[str, Any]]
     by_credential: List[Dict[str, Any]]
     by_domain: List[Dict[str, Any]]
     anonymous_call_count: int
+    retention: AuditRetentionSchema
 
 
 class WorkspaceActivityItemSchema(Schema):
