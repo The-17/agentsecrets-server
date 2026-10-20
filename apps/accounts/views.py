@@ -20,6 +20,8 @@ from .schemas import (
     TokenRefreshResponseDataSchema,
     UserPublicKeyResponseSchema,
     UserSummarySchema,
+    VaultUpdateSchema,
+    VaultResponseSchema,
 )
 from .selectors import AccountSelector
 from .services import AccountService
@@ -57,6 +59,8 @@ class AuthController:
                 "expires_at": expires_at,
                 "key_salt": key_salt,
                 "encrypted_private_key": user.encrypted_private_key,
+                "vault": user.vault,
+                "vault_version": user.vault_version,
                 "user": {
                     "id": str(user.id),
                     "email": user.email,
@@ -101,7 +105,7 @@ class AuthController:
         )
         return CustomResponse.success(message="Password reset successfully")
 
-    @route.patch("/change-password/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
+    @route.patch("/change-password/", response={200: SuccessResponse, 400: ErrorResponse, 422: ErrorResponse, 409: ErrorResponse}, auth=JWTAuth())
     async def change_password(self, request, data: ChangePasswordSchema):
         await AccountService.change_password(
             user=request.auth,
@@ -109,8 +113,29 @@ class AuthController:
             new_password=data.new_password,
             key_salt=data.key_salt,
             encrypted_private_key=data.encrypted_private_key,
+            vault=data.vault,
+            expected_version=data.expected_version,
         )
         return CustomResponse.success(message="Password changed successfully")
+
+    @route.get("/vault/", response={200: DataResponse[VaultResponseSchema]}, auth=JWTAuth())
+    async def get_vault(self, request):
+        from .models import User
+
+        user = await User.objects.aget(id=request.auth.id)
+        return CustomResponse.success(
+            message="Vault retrieved",
+            data={"vault": user.vault, "vault_version": user.vault_version},
+        )
+
+    @route.put("/vault/", response={200: DataResponse[VaultResponseSchema], 409: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def put_vault(self, request, data: VaultUpdateSchema):
+        result = await AccountService.update_vault(
+            user=request.auth,
+            expected_version=data.expected_version,
+            vault=data.vault,
+        )
+        return CustomResponse.success(message="Vault updated", data=result)
 
     @route.post("/logout/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
     async def logout(self, request, data: LogoutSchema = None):

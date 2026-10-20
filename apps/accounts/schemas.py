@@ -118,6 +118,8 @@ class ChangePasswordSchema(Schema):
     new_password: str
     key_salt: str
     encrypted_private_key: str
+    vault: Optional[dict] = None
+    expected_version: Optional[int] = None
 
     @field_validator("current_password")
     @classmethod
@@ -128,6 +130,13 @@ class ChangePasswordSchema(Schema):
     @classmethod
     def validate_new_password(cls, v: str) -> str:
         return sanitize_and_normalize_password(v, min_length=8)
+
+
+class VaultUpdateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int
+    vault: dict
 
 
 class RefreshTokenSchema(Schema):
@@ -170,8 +179,15 @@ class LoginResponseDataSchema(Schema):
     expires_at: str
     key_salt: Optional[str] = None
     encrypted_private_key: Optional[str] = None
+    vault: Optional[dict] = None
+    vault_version: Optional[int] = None
     user: UserSummarySchema
     workspaces: List[WorkspaceSummarySchema]
+
+
+class VaultResponseSchema(Schema):
+    vault: Optional[dict] = None
+    vault_version: int = 0
 
 
 class TokenRefreshResponseDataSchema(Schema):

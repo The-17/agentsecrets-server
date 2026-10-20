@@ -80,6 +80,18 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text="User's private key encrypted with their derived user_key (only they can decrypt)"
     )
 
+    # Additive v4 vault record. Null for legacy accounts; storing it never
+    # removes or rewrites the legacy key blob above.
+    vault = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Opaque client-side vault record: wrapped VK envelopes and proof"
+    )
+    vault_version = models.PositiveIntegerField(
+        default=0,
+        help_text="Optimistic concurrency version for the vault record"
+    )
+
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
