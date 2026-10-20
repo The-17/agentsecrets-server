@@ -739,6 +739,17 @@ class BillingAuthorizeTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["authorized"])
 
+    def test_owner_authorized_on_own_reserved_id(self):
+        # The owner's own workspace reserved a detached ws_bill_ id before the
+        # tier flip. Polar writes the subscription to that id, so the resolver's
+        # first read must be able to authorize it. The pooled id is a different
+        # account, and reading it shows Free/10k beside a paid subscription.
+        self.ws.billing_id = "ws_bill_owner_reserved"
+        self.ws.save(update_fields=["billing_id"])
+        resp = self._authorize(self.owner, "ws_bill_owner_reserved")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["authorized"])
+
     def test_admin_authorized_on_workspace_own_reserved_id(self):
         # Admin may manage the workspace's own reserved/detached ws_bill_ id.
         self.ws.billing_id = "ws_bill_test_reserved_admin"

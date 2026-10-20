@@ -49,6 +49,28 @@ from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector
 logger = logging.getLogger("apps.workspaces")
 
 
+def _bearer_for(user: User) -> str:
+    """Mint the short-lived credential the resolver re-verifies.
+
+    The resolver authorizes every billing read through the control plane
+    (`/api/internal/billing/authorize/`) and rejects a bare billing_id, so a
+    server-side read has to present an identity just like the browser does.
+    """
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    return str(RefreshToken.for_user(user).access_token)
+
+
+def _bearer_for_sync(user: User) -> str:
+    """`_bearer_for` for async callers.
+
+    SimpleJWT reads the user's last-login and password-change timestamps
+    through the ORM, which raises inside an async context. The mint therefore
+    runs on the sync thread pool.
+    """
+    return sync_to_async(_bearer_for)(user)
+
+
 class WorkspaceService:
     """
     Domain service layer for Workspace creation, updates, deletions, and memberships.
@@ -156,10 +178,20 @@ class WorkspaceService:
         try:
             qs = urllib.parse.urlencode({"billing_id": ws.billing_id})
             req = urllib.request.Request(f"{resolver_url}/v1/billing/subscription?{qs}", method="GET")
+            # The resolver authorizes every billing read through the control
+            # plane and refuses a bare billing_id, so the caller's own Bearer
+            # credential travels with the request.
+            req.add_header("Authorization", f"Bearer {await _bearer_for_sync(user)}")
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             remote_tier = (data.get("plan") or "free").lower()
             remote_status = (data.get("status") or "").lower()
+        except urllib.error.HTTPError as exc:
+            logger.error(
+                f"BILLING_RECONCILE_FAILED: resolver refused the read for workspace {workspace_id}: "
+                f"HTTP {exc.code} {exc.reason}"
+            )
+            return {"tier": getattr(ws, "tier", "free"), "billing_id": ws.billing_id, "status": "resolver_refused"}
         except Exception as exc:
             logger.error(f"BILLING_RECONCILE_FAILED: could not reach resolver for workspace {workspace_id}: {exc}")
             return {"tier": getattr(ws, "tier", "free"), "billing_id": ws.billing_id, "status": "resolver_unreachable"}
