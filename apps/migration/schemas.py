@@ -24,7 +24,6 @@ class SecretExportItemSchema(BaseModel):
 class ProjectExportItemSchema(BaseModel):
     id: str
     name: str
-    slug: str
     workspace_id: str
     created_at: Optional[str] = None
     secrets: List[SecretExportItemSchema] = Field(default_factory=list)
@@ -34,10 +33,9 @@ class AgentTokenExportItemSchema(BaseModel):
     id: str
     registration_id: str
     token_hash: str
-    token_prefix: str
-    label: str
+    label: Optional[str] = None
     environment: str
-    is_active: bool
+    revoked_at: Optional[str] = None
     expires_at: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -48,7 +46,6 @@ class AgentRegistrationExportItemSchema(BaseModel):
     project_id: Optional[str] = None
     name: str
     capabilities: Optional[Dict[str, Any]] = None
-    is_active: bool
     created_at: Optional[str] = None
     tokens: List[AgentTokenExportItemSchema] = Field(default_factory=list)
 
@@ -57,6 +54,7 @@ class WorkspaceMemberExportItemSchema(BaseModel):
     user_email: str
     role: str
     joined_at: Optional[str] = None
+    encrypted_workspace_key: Optional[str] = None
 
 
 class WorkspaceAllowlistExportItemSchema(BaseModel):
@@ -68,7 +66,7 @@ class WorkspaceAllowlistExportItemSchema(BaseModel):
 class WorkspaceExportItemSchema(BaseModel):
     id: str
     name: str
-    slug: str
+    type: Optional[str] = None
     owner_email: str
     members: List[WorkspaceMemberExportItemSchema] = Field(default_factory=list)
     allowlist: List[WorkspaceAllowlistExportItemSchema] = Field(default_factory=list)
@@ -81,6 +79,7 @@ class UserProfileExportItemSchema(BaseModel):
     first_name: str
     last_name: str
     password_hash: str
+    key_salt: Optional[str] = None
     public_key: Optional[str] = None
     encrypted_private_key: Optional[str] = None
 
