@@ -139,6 +139,35 @@ class VaultUpdateSchema(Schema):
     vault: dict
 
 
+class RecoveryChallengeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class RecoveryVerifySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    nonce: str
+    signature: str
+
+
+class RecoverPasswordSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str
+    key_salt: str
+    encrypted_private_key: str
+    vault: dict
+    expected_version: int
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=8)
+
+
 class RefreshTokenSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
@@ -186,6 +215,15 @@ class LoginResponseDataSchema(Schema):
 
 
 class VaultResponseSchema(Schema):
+    vault: Optional[dict] = None
+    vault_version: int = 0
+
+
+class RecoveryChallengeResponseSchema(Schema):
+    challenge: str
+    nonce: str
+    expires_at: str
+    user_id: str
     vault: Optional[dict] = None
     vault_version: int = 0
 

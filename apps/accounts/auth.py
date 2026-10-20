@@ -80,6 +80,7 @@ class JWTAuth(HttpBearer):
         self._jwt_auth = StatelessJWTAuthentication()
 
     def __call__(self, request):
+        request.recovery_session = False
         if hasattr(request, "user") and request.user and request.user.is_authenticated:
             return request.user
         return super().__call__(request)
@@ -89,6 +90,7 @@ class JWTAuth(HttpBearer):
             validated_token = self._jwt_auth.get_validated_token(token)
             user = self._jwt_auth.get_user(validated_token)
             request.user = user
+            request.recovery_session = bool(validated_token.get("recovery"))
             return user
         except (InvalidToken, TokenError, AuthenticationFailed):
             return None

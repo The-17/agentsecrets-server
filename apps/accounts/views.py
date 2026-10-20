@@ -14,6 +14,9 @@ from .schemas import (
     ResetPasswordSchema,
     SetNewPasswordSchema,
     ChangePasswordSchema,
+    RecoveryChallengeSchema,
+    RecoveryVerifySchema,
+    RecoverPasswordSchema,
     RefreshTokenSchema,
     RegisterResponseDataSchema,
     LoginResponseDataSchema,
@@ -22,7 +25,9 @@ from .schemas import (
     UserSummarySchema,
     VaultUpdateSchema,
     VaultResponseSchema,
+    RecoveryChallengeResponseSchema,
 )
+from apps.common.exceptions import AuthenticationError
 from .selectors import AccountSelector
 from .services import AccountService
 
@@ -136,6 +141,54 @@ class AuthController:
             vault=data.vault,
         )
         return CustomResponse.success(message="Vault updated", data=result)
+
+    @route.post("/recover/challenge/", response={200: DataResponse[RecoveryChallengeResponseSchema], 429: ErrorResponse})
+    async def recover_challenge(self, request, data: RecoveryChallengeSchema):
+        result = await AccountService.create_recovery_challenge(email=data.email)
+        return CustomResponse.success(message="Recovery challenge issued", data=result)
+
+    @route.post("/recover/verify/", response={200: DataResponse[LoginResponseDataSchema], 401: ErrorResponse})
+    async def recover_verify(self, request, data: RecoveryVerifySchema):
+        user, tokens, expires_at, key_salt = await AccountService.verify_recovery(
+            email=data.email,
+            nonce=data.nonce,
+            signature=data.signature,
+        )
+        workspaces = await AccountSelector.get_user_workspaces_data(user=user)
+        return CustomResponse.success(
+            message="Recovery verified",
+            data={
+                **tokens,
+                "expires_at": expires_at,
+                "key_salt": key_salt,
+                "encrypted_private_key": user.encrypted_private_key,
+                "vault": user.vault,
+                "vault_version": user.vault_version,
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "public_key": user.public_key,
+                    "billing_id": user.billing_id,
+                },
+                "workspaces": workspaces,
+            },
+        )
+
+    @route.patch("/recover/password/", response={200: SuccessResponse, 401: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def recover_password(self, request, data: RecoverPasswordSchema):
+        if not getattr(request, "recovery_session", False):
+            raise AuthenticationError("A recovery session is required to reset the password")
+        await AccountService.recover_password(
+            user=request.auth,
+            new_password=data.new_password,
+            key_salt=data.key_salt,
+            encrypted_private_key=data.encrypted_private_key,
+            vault=data.vault,
+            expected_version=data.expected_version,
+        )
+        return CustomResponse.success(message="Password reset successfully")
 
     @route.post("/logout/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
     async def logout(self, request, data: LogoutSchema = None):

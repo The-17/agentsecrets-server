@@ -339,3 +339,196 @@ class VaultEndpointTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.vault_version, 1)
         self.assertEqual(self.user.vault["vault_pubkey"], self.vault["vault_pubkey"])
+
+
+class VaultRecoveryEndpointTests(TestCase):
+    """Password-less recovery: prove vault-key possession, then reset."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="recover@example.com",
+            password="ForgottenPassword123!",
+            first_name="Recover",
+            last_name="Tester",
+        )
+        self.key = SigningKey.generate()
+        self.user_id = str(self.user.id)
+        self.vault = synthetic_vault(
+            self.key, version=1, recovery=True, confirmed=True, user_id=self.user_id
+        )
+        self.user.vault = self.vault
+        self.user.vault_version = 1
+        from apps.common.services.encryption import EncryptionService as encryption_service
+
+        self.user.key_salt = encryption_service.encrypt("legacy_salt")
+        self.user.encrypted_private_key = "legacy_blob"
+        self.user.save(
+            update_fields=["vault", "vault_version", "key_salt", "encrypted_private_key"]
+        )
+
+    def challenge(self, email="recover@example.com"):
+        return self.client.post(
+            "/api/auth/recover/challenge/",
+            data=json.dumps({"email": email}),
+            content_type="application/json",
+        )
+
+    def verify(self, challenge_data, *, key=None, email="recover@example.com"):
+        signature = b64(
+            (key or self.key).sign(challenge_data["challenge"].encode("utf-8")).signature
+        )
+        return self.client.post(
+            "/api/auth/recover/verify/",
+            data=json.dumps(
+                {
+                    "email": email,
+                    "nonce": challenge_data["nonce"],
+                    "signature": signature,
+                }
+            ),
+            content_type="application/json",
+        )
+
+    def next_vault(self, version=2, *, key=None, user_id=None):
+        return synthetic_vault(
+            key or self.key,
+            version=version,
+            recovery=True,
+            confirmed=True,
+            user_id=user_id or self.user_id,
+        )
+
+    def test_challenge_and_verify_issue_recovery_session(self):
+        res = self.challenge()
+        self.assertEqual(res.status_code, 200)
+        data = res.json()["data"]
+        self.assertEqual(data["user_id"], self.user_id)
+        self.assertEqual(data["vault_version"], 1)
+        self.assertIn("as-vault-recover-v1", data["challenge"])
+
+        # The unauthenticated challenge must not leak the password envelope.
+        challenge_vault = data["vault"]
+        self.assertEqual(
+            [envelope["type"] for envelope in challenge_vault["envelopes"]],
+            ["recovery"],
+        )
+        self.assertNotIn("proof", challenge_vault)
+        self.assertNotIn("bridge", challenge_vault)
+
+        verified = self.verify(data)
+        self.assertEqual(verified.status_code, 200)
+        payload = verified.json()["data"]
+        self.assertTrue(payload["access"])
+        self.assertEqual(payload["vault"]["vault_pubkey"], self.vault["vault_pubkey"])
+        # The authenticated response carries the full vault, including the
+        # password envelope needed to rewrap it.
+        self.assertIn(
+            "password", [envelope["type"] for envelope in payload["vault"]["envelopes"]]
+        )
+
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        self.assertTrue(AccessToken(payload["access"]).get("recovery"))
+
+    def test_bad_signature_rejected_and_nonce_burned(self):
+        data = self.challenge().json()["data"]
+        wrong = SigningKey.generate()
+        res = self.verify(data, key=wrong)
+        self.assertEqual(res.status_code, 401)
+
+        # The nonce was consumed by the failed attempt, so a retry fails too.
+        self.assertEqual(self.verify(data).status_code, 401)
+
+    def test_replayed_nonce_rejected(self):
+        data = self.challenge().json()["data"]
+        self.assertEqual(self.verify(data).status_code, 200)
+        self.assertEqual(self.verify(data).status_code, 401)
+
+    def test_unknown_email_gets_decoy_challenge(self):
+        res = self.challenge("nobody@example.com")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()["data"]
+        self.assertEqual(data["user_id"], "")
+        self.assertIsNone(data["vault"])
+
+    def test_recovery_password_requires_recovery_session(self):
+        normal = RefreshToken.for_user(self.user).access_token
+        res = self.client.patch(
+            "/api/auth/recover/password/",
+            data=json.dumps(
+                {
+                    "new_password": "RecoveredPassword123!",
+                    "key_salt": "new_salt",
+                    "encrypted_private_key": "new_blob",
+                    "vault": self.next_vault(),
+                    "expected_version": 1,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {normal}",
+        )
+        self.assertEqual(res.status_code, 401)
+
+    def test_recovery_password_sets_new_password_and_vault(self):
+        verified = self.verify(self.challenge().json()["data"])
+        self.assertEqual(verified.status_code, 200)
+        access = verified.json()["data"]["access"]
+
+        res = self.client.patch(
+            "/api/auth/recover/password/",
+            data=json.dumps(
+                {
+                    "new_password": "RecoveredPassword123!",
+                    "key_salt": "new_salt",
+                    "encrypted_private_key": "new_blob",
+                    "vault": self.next_vault(),
+                    "expected_version": 1,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("RecoveredPassword123!"))
+        self.assertFalse(self.user.check_password("ForgottenPassword123!"))
+        self.assertEqual(self.user.vault_version, 2)
+        self.assertEqual(self.user.encrypted_private_key, "new_blob")
+
+    def test_recovery_password_rejects_stale_version(self):
+        verified = self.verify(self.challenge().json()["data"])
+        access = verified.json()["data"]["access"]
+        res = self.client.patch(
+            "/api/auth/recover/password/",
+            data=json.dumps(
+                {
+                    "new_password": "RecoveredPassword123!",
+                    "key_salt": "new_salt",
+                    "encrypted_private_key": "new_blob",
+                    "vault": self.next_vault(),
+                    "expected_version": 0,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+        self.assertEqual(res.status_code, 409)
+
+    def test_recovery_password_rejects_a_different_vault_key(self):
+        verified = self.verify(self.challenge().json()["data"])
+        access = verified.json()["data"]["access"]
+        res = self.client.patch(
+            "/api/auth/recover/password/",
+            data=json.dumps(
+                {
+                    "new_password": "RecoveredPassword123!",
+                    "key_salt": "new_salt",
+                    "encrypted_private_key": "new_blob",
+                    "vault": self.next_vault(key=SigningKey.generate()),
+                    "expected_version": 1,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+        self.assertEqual(res.status_code, 422)

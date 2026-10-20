@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
+import datetime as dt
 from datetime import timedelta
 from typing import Any
 from django.conf import settings
@@ -22,9 +24,16 @@ from apps.common.exceptions import (
     NotFoundError,
     BodyValidationError,
     ConflictError,
+    RateLimitError,
 )
 from apps.common.services.encryption import EncryptionService as encryption_service
-from .vault import validate_vault, validate_vault_update
+from .vault import (
+    build_recovery_challenge,
+    recovery_view,
+    validate_vault,
+    validate_vault_update,
+    verify_recovery_signature,
+)
 from apps.workspaces.models import (
     Workspace,
     Membership,
@@ -32,7 +41,7 @@ from apps.workspaces.models import (
     MembershipRole,
     MembershipStatus,
 )
-from .models import User, OneTimePassword
+from .models import User, OneTimePassword, VaultRecoveryChallenge
 from .schemas import RegisterSchema
 
 logger = logging.getLogger("apps.accounts")
@@ -175,6 +184,155 @@ class AccountService:
         await AccountService.stamp_user_activity(user=user)
 
         return user, tokens, expires_at.isoformat(), key_salt
+
+    @staticmethod
+    async def create_recovery_challenge(*, email: str) -> dict[str, Any]:
+        """Issue a single-use challenge the client signs with the vault key.
+
+        Unknown, inactive, or vaultless accounts get a decoy challenge so the
+        endpoint does not confirm whether an email is registered. The decoy is
+        never stored, so it can never verify.
+        """
+        user = await User.objects.aget_or_none(email__iexact=email)
+        now = timezone.now()
+
+        recovery_envelopes = []
+        if user and user.vault:
+            envelopes = user.vault.get("envelopes")
+            if isinstance(envelopes, list):
+                recovery_envelopes = [
+                    envelope
+                    for envelope in envelopes
+                    if isinstance(envelope, dict) and envelope.get("type") == "recovery"
+                ]
+
+        if not user or not user.is_active or not recovery_envelopes:
+            nonce, challenge, expires = build_recovery_challenge(
+                "00000000-0000-0000-0000-000000000000"
+            )
+            return {
+                "challenge": challenge,
+                "nonce": nonce,
+                "expires_at": dt.datetime.fromtimestamp(expires, tz=dt.timezone.utc).isoformat(),
+                "user_id": "",
+                "vault": None,
+                "vault_version": 0,
+            }
+
+        recent = await VaultRecoveryChallenge.objects.filter(
+            user=user, created_at__gte=now - timedelta(minutes=15)
+        ).acount()
+        if recent >= 5:
+            raise RateLimitError("Too many recovery attempts. Try again in 15 minutes.")
+
+        # Keep the table bounded without a cron job.
+        await VaultRecoveryChallenge.objects.filter(
+            user=user, expires_at__lt=now
+        ).adelete()
+
+        nonce, challenge, expires = build_recovery_challenge(str(user.id))
+        await VaultRecoveryChallenge.objects.acreate(
+            user=user,
+            nonce_hash=hashlib.sha256(nonce.encode("utf-8")).hexdigest(),
+            challenge=challenge,
+            expires_at=dt.datetime.fromtimestamp(expires, tz=dt.timezone.utc),
+        )
+
+        return {
+            "challenge": challenge,
+            "nonce": nonce,
+            "expires_at": dt.datetime.fromtimestamp(expires, tz=dt.timezone.utc).isoformat(),
+            "user_id": str(user.id),
+            "vault": recovery_view(user.vault),
+            "vault_version": user.vault_version,
+        }
+
+    @staticmethod
+    async def verify_recovery(
+        *, email: str, nonce: str, signature: str
+    ) -> tuple[User, dict[str, Any], str, str | None]:
+        """Consume a challenge and verify the client's vault-key signature."""
+        user = await User.objects.aget_or_none(email__iexact=email)
+        if not user or not user.is_active or not user.vault:
+            raise AuthenticationError("Recovery failed")
+
+        nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+
+        def _consume():
+            with transaction.atomic():
+                try:
+                    record = VaultRecoveryChallenge.objects.select_for_update().get(
+                        user=user, nonce_hash=nonce_hash
+                    )
+                except VaultRecoveryChallenge.DoesNotExist:
+                    return None
+                if record.used_at is not None or record.expires_at <= timezone.now():
+                    return None
+                record.used_at = timezone.now()
+                record.save(update_fields=["used_at"])
+                return record
+
+        record = await sync_to_async(_consume, thread_sensitive=True)()
+        if record is None:
+            raise AuthenticationError("Recovery failed")
+
+        verify_recovery_signature(
+            user.vault.get("vault_pubkey"), record.challenge, signature
+        )
+
+        if not user.billing_id:
+            from .models import generate_billing_id
+
+            user.billing_id = generate_billing_id()
+            await user.asave(update_fields=["billing_id"])
+
+        tokens = await sync_to_async(user.tokens)(recovery=True)
+        key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
+        expires_at = timezone.now() + settings.SIMPLE_JWT.get(
+            "ACCESS_TOKEN_LIFETIME", timedelta(hours=6)
+        )
+        await AccountService.stamp_user_activity(user=user)
+
+        return user, tokens, expires_at.isoformat(), key_salt
+
+    @staticmethod
+    async def recover_password(
+        *,
+        user: User,
+        new_password: str,
+        key_salt: str,
+        encrypted_private_key: str,
+        vault: dict,
+        expected_version: int,
+    ) -> None:
+        """Set a new password from a recovery session, without the old one.
+
+        Callers must have proven vault-key possession first; the view enforces
+        the recovery-scoped token before it reaches here.
+        """
+        validate_vault(vault, user_id=str(user.id))
+
+        def _apply() -> None:
+            with transaction.atomic():
+                db_user = User.objects.select_for_update().get(id=user.id)
+                if db_user.vault is None:
+                    raise BodyValidationError("vault", "This account has no vault")
+                if db_user.vault_version != expected_version:
+                    raise ConflictError("Vault version conflict")
+                validate_vault_update(
+                    db_user.vault,
+                    vault,
+                    expected_version=expected_version,
+                    user_id=str(db_user.id),
+                )
+                db_user.vault = vault
+                db_user.vault_version = expected_version + 1
+                db_user.set_password(new_password)
+                db_user.key_salt = encryption_service.encrypt(key_salt)
+                db_user.encrypted_private_key = encrypted_private_key
+                db_user.save()
+
+        await sync_to_async(_apply, thread_sensitive=True)()
 
     @staticmethod
     async def verify_email(*, email: str, otp: int) -> None:

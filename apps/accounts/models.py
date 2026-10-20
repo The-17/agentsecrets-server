@@ -101,7 +101,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             self.billing_id = generate_billing_id()
         super().save(*args, **kwargs)
 
-    def tokens(self):
+    def tokens(self, recovery: bool = False):
         refresh = RefreshToken.for_user(self)
         refresh["email"] = self.email
         refresh["first_name"] = self.first_name
@@ -109,6 +109,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         refresh["billing_id"] = self.billing_id
         refresh["is_staff"] = self.is_staff
         refresh["is_superuser"] = self.is_superuser
+        if recovery:
+            # Marks a session opened by proof of vault-key possession rather
+            # than a password. Only such a session may reset the password
+            # without knowing the old one.
+            refresh["recovery"] = True
         return {
             'refresh': str(refresh),
             'access': str(refresh.access_token)
@@ -160,6 +165,31 @@ class OneTimePassword(models.Model):
     def __str__(self):
         return self.code
     
+
+class VaultRecoveryChallenge(models.Model):
+    """A single-use nonce a client signs to prove it holds the vault key.
+
+    The challenge text is stored verbatim so the server verifies exactly the
+    bytes the client signed. Only the nonce hash is indexed for lookup; the
+    nonce itself is returned to the client once and never stored.
+    """
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="vault_recovery_challenges"
+    )
+    nonce_hash = models.CharField(max_length=64, unique=True)
+    challenge = models.TextField()
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "created_at"])]
+
+    def __str__(self):
+        return f"vault-recovery challenge for {self.user.email}"
+
 
 # class RecoveryCode(models.Model):
 #     id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)

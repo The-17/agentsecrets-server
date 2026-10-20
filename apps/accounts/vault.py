@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import secrets
+import time
 from typing import Any
 
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
-from apps.common.exceptions import BodyValidationError
+from apps.common.exceptions import AuthenticationError, BodyValidationError
 
 VAULT_VERSION = 1
 AAD_VERSION = 1
+RECOVERY_CHALLENGE_TTL = 300
 MIN_ARGON_MEMORY = 64 * 1024
 MIN_ARGON_TIME = 3
 MIN_ARGON_THREADS = 4
@@ -86,6 +89,62 @@ def verify_proof(vault: dict[str, Any], user_id: str, pinned_pubkey: str | None 
         VerifyKey(public_key).verify(signature + proof_payload(vault, user_id).encode("utf-8"))
     except BadSignatureError:
         _fail("vault proof signature is invalid")
+
+
+def recovery_view(vault: dict[str, Any]) -> dict[str, Any]:
+    """Return the minimum material a client needs to unlock with a recovery key.
+
+    The challenge endpoint is unauthenticated, so this view omits the password
+    envelope. Exposing it would hand an attacker the password-wrapped vault key
+    for offline guessing. The recovery envelope is protected by a 256-bit key.
+    The proof is omitted because it covers the full envelope set.
+    """
+    if not isinstance(vault, dict):
+        _fail("vault is required")
+    envelopes = vault.get("envelopes")
+    if not isinstance(envelopes, list):
+        _fail("envelopes must be a list")
+    recovery = [
+        envelope
+        for envelope in envelopes
+        if isinstance(envelope, dict) and envelope.get("type") == "recovery"
+    ]
+    if not recovery:
+        _fail("vault has no recovery envelope")
+    return {
+        "version": vault.get("version", VAULT_VERSION),
+        "vault_version": vault.get("vault_version", 1),
+        "vault_pubkey": vault.get("vault_pubkey"),
+        "private_key": vault.get("private_key"),
+        "envelopes": recovery,
+    }
+
+
+def build_recovery_challenge(user_id: str) -> tuple[str, str, int]:
+    """Return (nonce, challenge_text, expiry_unix).
+
+    The text is what the client signs verbatim. Its layout is fixed so a client
+    that predates a formatting change cannot silently sign different bytes.
+    """
+    nonce = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+    expires = int(time.time()) + RECOVERY_CHALLENGE_TTL
+    challenge = (
+        f"as-vault-recover-v1\n"
+        f"user:{user_id}\n"
+        f"nonce:{nonce}\n"
+        f"expires:{expires}\n"
+    )
+    return nonce, challenge, expires
+
+
+def verify_recovery_signature(public_key_b64: str, challenge: str, signature_b64: str) -> None:
+    """Verify a detached Ed25519 signature over the exact challenge bytes."""
+    public_key = _b64(public_key_b64, "vault_pubkey", length=32)
+    signature = _b64(signature_b64, "signature", length=64)
+    try:
+        VerifyKey(public_key).verify(signature + challenge.encode("utf-8"))
+    except BadSignatureError:
+        raise AuthenticationError("Recovery failed")
 
 
 def _envelope_types(vault: dict[str, Any]) -> tuple[bool, int]:

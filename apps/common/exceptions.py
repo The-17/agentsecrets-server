@@ -108,6 +108,11 @@ class QuotaExceededError(RequestError):
         super().__init__("quota_exceeded", err_msg, 429)
 
 
+class RateLimitError(RequestError):
+    def __init__(self, err_msg: str = "Too many attempts. Try again later."):
+        super().__init__("rate_limited", err_msg, 429)
+
+
 # ==========================================
 # EXCEPTION HANDLERS
 # ==========================================
