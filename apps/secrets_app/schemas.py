@@ -5,6 +5,7 @@ from ninja import Schema
 from pydantic import ConfigDict, field_validator, EmailStr
 
 from apps.common.schemas import EnvironmentType
+from .environment import parse_environment
 
 
 # ==========================================
@@ -56,6 +57,11 @@ class SecretItemSchema(Schema):
     key: str
     value: str
 
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        return parse_environment(value)
+
 
 class ProjectInviteSchema(Schema):
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +79,11 @@ class SecretBulkUpsertSchema(Schema):
     project_id: uuid.UUID
     environment: EnvironmentType = "development"
     secrets: Dict[str, str]
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        return parse_environment(value)
 
     @field_validator("secrets")
     @classmethod
@@ -167,16 +178,22 @@ class EnvironmentCountItemSchema(Schema):
     secret_count: int
 
 
+class EnvironmentInventoryItemSchema(Schema):
+    name: str
+    is_standard: bool
+    secret_count: int
+
+
 class ProjectEnvironmentsResponseDataSchema(Schema):
     project_id: str
-    environments: Dict[str, EnvironmentCountItemSchema]
+    environments: List[EnvironmentInventoryItemSchema]
+    counts: Dict[str, EnvironmentCountItemSchema]
 
 
 class SecretCoverageItemSchema(Schema):
+    """`environments` always carries the three standard names, plus any custom environment holding the key."""
     key_name: str
-    development: bool
-    staging: bool
-    production: bool
+    environments: Dict[str, bool]
 
 
 class ProjectSecretsCoverageResponseDataSchema(Schema):
