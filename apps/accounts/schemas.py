@@ -281,6 +281,9 @@ class LoginResponseDataSchema(Schema):
     encrypted_private_key: Optional[str] = None
     vault: Optional[dict] = None
     vault_version: Optional[int] = None
+    # Present only on OPAQUE login: proof the client and server derived the
+    # same key exchange secret.
+    session_key: Optional[str] = None
     user: UserSummarySchema
     workspaces: List[WorkspaceSummarySchema]
 

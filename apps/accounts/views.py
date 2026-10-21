@@ -57,12 +57,12 @@ class OpaqueController:
         manager = OpaqueService()
         reg_response = await manager.register_user_start_async(
             cred_id=data.credential_id,
-            reg_request=manager.decode_base64(data.reg_request),
+            reg_request=data.reg_request,
         )
         return CustomResponse.success(
             message="Registration response generated",
             data={
-                "reg_response": manager.encode_base64(reg_response),
+                "reg_response": reg_response,
                 "credential_id": data.credential_id,
             },
         )
@@ -73,7 +73,7 @@ class OpaqueController:
         record = await manager.register_user_finish_async(
             user=request.auth,
             cred_id=data.credential_id,
-            reg_record=manager.decode_base64(data.reg_record),
+            reg_record=data.reg_record,
         )
         return CustomResponse.success(
             message="OPAQUE enrollment complete; password login is now disabled for this account",
@@ -85,14 +85,14 @@ class OpaqueController:
         manager = OpaqueService()
         ke2, server_state = await manager.login_start_async(
             cred_id=data.credential_id,
-            ke1=manager.decode_base64(data.ke1),
-            stored_record=manager.decode_base64(data.record),
+            ke1=data.ke1,
+            stored_record=data.record,
             email=data.email,
         )
         return CustomResponse.success(
             message="Login challenge issued",
             data={
-                "ke2": manager.encode_base64(ke2),
+                "ke2": ke2,
                 "server_state": server_state,
                 "credential_id": data.credential_id,
             },
@@ -104,7 +104,7 @@ class OpaqueController:
         result = await manager.login_finish_async(
             request=request,
             cred_id=data.credential_id,
-            ke3=manager.decode_base64(data.ke3),
+            ke3=data.ke3,
             server_state=data.server_state,
             email=data.email,
         )

@@ -168,14 +168,18 @@ class AccountService:
         """
         Authenticates a user, issues JWT tokens, stamps activity, and returns credentials.
         """
+        # Look the account up first: enrollment removes the password hash, so
+        # authenticating first would surface a generic "Invalid Credentials"
+        # and send the user hunting for a password that cannot work.
+        existing = await User.objects.filter(email__iexact=email).afirst()
+        if existing is not None and getattr(existing, "opaque_registered_at", None):
+            from apps.common.exceptions import PasswordLoginDisabledError
+
+            raise PasswordLoginDisabledError()
+
         user = await aauthenticate(request, email=email, password=password)
         if not user:
             raise AuthenticationError("Invalid Credentials")
-
-        # OPAQUE enrollment check: if user is enrolled via OPAQUE, password login is disabled.
-        if getattr(user, "opaque_registered_at", None):
-            from apps.accounts.exceptions import OpaquedError
-            raise OpaquedError("Password login is disabled for this account. Use OPAQUE authentication.")
 
         if not user.billing_id:
             from .models import generate_billing_id
@@ -415,8 +419,10 @@ class AccountService:
 
                 # OPAQUE enrollment check: password change disabled for opaque-enrolled accounts.
                 if getattr(db_user, "opaque_registered_at", None):
-                    from apps.accounts.exceptions import OpaquedError
-                    raise OpaquedError("Password change is disabled for this account. Re-enroll via OPAQUE recovery.")
+                    from apps.common.exceptions import PasswordLoginDisabledError
+                    raise PasswordLoginDisabledError(
+                        "Password change is disabled for this account. Re-enroll via OPAQUE recovery."
+                    )
 
                 if vault is not None:
                     if db_user.vault_version != expected_version:

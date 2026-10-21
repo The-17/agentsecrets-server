@@ -63,21 +63,23 @@ class OpaqueService:
 
     # -- registration ---------------------------------------------------
 
-    async def register_user_start_async(self, *, cred_id: str, reg_request: bytes) -> bytes:
+    async def register_user_start_async(self, *, cred_id: str, reg_request: str) -> str:
+        # The sidecar speaks base64 on the wire, exactly like the client. Decoding
+        # here would double-decode, so strings pass through untouched.
         try:
             result = await sync_to_async(self.sidecar.register_start)(reg_request, cred_id)
         except SidecarError as exc:
             logger.error("OPAQUE register start failed: %s", exc)
             raise OpaqueUnavailableError(str(exc)) from exc
-        return self.sidecar.decode_base64(result["reg_response"])
+        return result["reg_response"]
 
-    async def register_user_finish_async(self, *, user, cred_id: str, reg_record: bytes) -> str:
+    async def register_user_finish_async(self, *, user, cred_id: str, reg_record: str) -> str:
         return await sync_to_async(self._store_record)(user.id, cred_id, reg_record)
 
     async def reenroll_after_recovery(self, *, user, cred_id: str, reg_record: bytes) -> str:
         return await sync_to_async(self._store_record)(user.id, cred_id, reg_record)
 
-    def _store_record(self, user_id, cred_id: str, reg_record: bytes) -> str:
+    def _store_record(self, user_id, cred_id: str, reg_record: str) -> str:
         try:
             result = self.sidecar.register_finish(reg_record, cred_id)
         except SidecarError as exc:
@@ -100,8 +102,8 @@ class OpaqueService:
     # -- login ----------------------------------------------------------
 
     async def login_start_async(
-        self, *, cred_id: str, ke1: bytes, stored_record: bytes, email: str
-    ) -> tuple[bytes, str]:
+        self, *, cred_id: str, ke1: str, stored_record: str, email: str
+    ) -> tuple[str, str]:
         user = await sync_to_async(self._enrolled_user)(email)
         await self._guard_challenge(user.id)
         try:
@@ -109,16 +111,22 @@ class OpaqueService:
         except SidecarError as exc:
             logger.error("OPAQUE login start failed: %s", exc)
             raise OpaqueUnavailableError(str(exc)) from exc
-        return self.sidecar.decode_base64(result["ke2"]), result["server_state"]
+        return result["ke2"], result["server_state"]
 
     async def login_finish_async(
-        self, *, request, cred_id: str, ke3: bytes, server_state: str, email: str
+        self, *, request, cred_id: str, ke3: str, server_state: str, email: str
     ):
         try:
-            session_key = await sync_to_async(self.sidecar.login_finish)(ke3, server_state, cred_id)
+            result = await sync_to_async(self.sidecar.login_finish)(ke3, server_state, cred_id)
         except SidecarError as exc:
             logger.error("OPAQUE login finish failed: %s", exc)
             raise OpaqueUnavailableError(str(exc)) from exc
+        session_key = result.get("session_key") if isinstance(result, dict) else None
+        if isinstance(session_key, dict):
+            session_key = session_key.get("session_key")
+        if not session_key:
+            logger.error("OPAQUE sidecar returned no session key: %r", result)
+            raise OpaqueUnavailableError("OPAQUE sidecar returned no session key")
 
         from apps.common.exceptions import AuthenticationError
 

@@ -60,7 +60,8 @@ class AuthMethodStateTests(TestCase):
             data={"email": self.user.email, "password": "correct-horse-battery"},
             content_type="application/json",
         )
-        self.assertIn(response.status_code, (400, 401, 403, 423))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "password_login_disabled")
         self.assertNotIn("access", response.json().get("data") or {})
 
 

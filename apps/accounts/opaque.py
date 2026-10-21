@@ -53,42 +53,28 @@ class Sidecar:
 
     # -- endpoints ------------------------------------------------------
 
-    def register_start(self, reg_request: bytes, credential_id: str) -> dict:
+    def register_start(self, reg_request: str, credential_id: str) -> dict:
         return self._post(
             "/v1/register/response",
-            {
-                "reg_request": self.encode_base64(reg_request),
-                "credential_id": credential_id,
-            },
+            {"reg_request": reg_request, "credential_id": credential_id},
         )
 
-    def register_finish(self, reg_record: bytes, credential_id: str) -> dict:
+    def register_finish(self, reg_record: str, credential_id: str) -> dict:
         return self._post(
             "/v1/register/finish",
-            {
-                "reg_record": self.encode_base64(reg_record),
-                "credential_id": credential_id,
-            },
+            {"reg_record": reg_record, "credential_id": credential_id},
         )
 
-    def login_start(self, ke1: bytes, record: bytes, credential_id: str) -> dict:
+    def login_start(self, ke1: str, record: str, credential_id: str) -> dict:
         return self._post(
             "/v1/login/start",
-            {
-                "ke1": self.encode_base64(ke1),
-                "record": self.encode_base64(record),
-                "credential_id": credential_id,
-            },
+            {"ke1": ke1, "record": record, "credential_id": credential_id},
         )
 
-    def login_finish(self, ke3: bytes, server_state: str, credential_id: str) -> dict:
+    def login_finish(self, ke3: str, server_state: str, credential_id: str) -> dict:
         return self._post(
             "/v1/login/finish",
-            {
-                "ke3": self.encode_base64(ke3),
-                "server_state": server_state,
-                "credential_id": credential_id,
-            },
+            {"ke3": ke3, "server_state": server_state, "credential_id": credential_id},
         )
 
     def check_health(self) -> bool:
