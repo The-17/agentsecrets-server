@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM golang:1.26-bookworm AS sidecar
 
 ARG OPAQUE_SIDECAR_REPO=https://github.com/The-17/agentsecrets.git
-ARG OPAQUE_SIDECAR_REF=18a6f61
+ARG OPAQUE_SIDECAR_REF=5f08717
 
 RUN git clone --filter=blob:none "$OPAQUE_SIDECAR_REPO" /src && \
     cd /src && git checkout "$OPAQUE_SIDECAR_REF"
