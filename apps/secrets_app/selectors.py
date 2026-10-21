@@ -8,6 +8,7 @@ from apps.accounts.models import User
 from apps.common.exceptions import NotFoundError, AuthorizationError, BodyValidationError
 from apps.common.services.encryption import EncryptionService as encryption_service
 from apps.workspaces.models import Membership, MembershipRole, MembershipStatus
+from .environment import STANDARD_ENVIRONMENTS, is_standard, parse_environment, query_environment
 from .models import Project, Secret
 
 
@@ -110,30 +111,50 @@ class ProjectSelector:
 
     @staticmethod
     async def get_environment_counts(*, project: Project) -> dict[str, Any]:
-        counts = {"development": 0, "staging": 0, "production": 0}
+        counts: dict[str, int] = {name: 0 for name in STANDARD_ENVIRONMENTS}
         async for row in Secret.objects.filter(project=project).values("environment").annotate(count=Count("id")):
-            if row["environment"] in counts:
-                counts[row["environment"]] = row["count"]
+            counts[row["environment"]] = row["count"]
         return {
             "project_id": str(project.id),
             "environments": {env: {"secret_count": c} for env, c in counts.items()},
         }
 
     @staticmethod
+    async def get_environments(*, project: Project) -> dict[str, Any]:
+        """Standard environments in canonical order, then custom ones that hold secrets."""
+        counts = await ProjectSelector.get_environment_counts(project=project)
+        declared = counts["environments"]
+        names = list(STANDARD_ENVIRONMENTS) + sorted(
+            name for name in declared if name not in STANDARD_ENVIRONMENTS
+        )
+        return {
+            "project_id": str(project.id),
+            "environments": [
+                {
+                    "name": name,
+                    "is_standard": is_standard(name),
+                    "secret_count": declared[name]["secret_count"],
+                }
+                for name in names
+            ],
+            "counts": declared,
+        }
+
+    @staticmethod
     async def get_secrets_coverage(*, project: Project) -> list[dict[str, Any]]:
-        cov: dict[str, dict[str, Any]] = {}
+        cov: dict[str, dict[str, bool]] = {}
         async for s in Secret.objects.filter(project=project).only("key", "environment"):
             if s.key not in cov:
-                cov[s.key] = {"key_name": s.key, "development": False, "staging": False, "production": False}
-            if s.environment in cov[s.key]:
-                cov[s.key][s.environment] = True
-        return sorted(cov.values(), key=lambda x: x["key_name"])
+                cov[s.key] = {name: False for name in STANDARD_ENVIRONMENTS}
+            cov[s.key][s.environment] = True
+        return [
+            {"key_name": key, "environments": flags} for key, flags in sorted(cov.items())
+        ]
 
     @staticmethod
     async def get_secrets_diff(*, project: Project, from_env: str, to_env: str) -> dict[str, Any]:
-        valid = ["development", "staging", "production"]
-        if from_env not in valid or to_env not in valid:
-            raise BodyValidationError("environment", "Invalid from/to environment")
+        from_env = query_environment(from_env)
+        to_env = query_environment(to_env)
 
         from_keys = set()
         to_keys = set()
@@ -156,13 +177,12 @@ class SecretSelector:
     """
 
     @staticmethod
-    def validate_env(environment: str) -> None:
-        if environment not in ["development", "staging", "production"]:
-            raise BodyValidationError("environment", f"Invalid environment '{environment}'.")
+    def validate_env(environment: str) -> str:
+        return parse_environment(environment)
 
     @staticmethod
     async def list_project_secrets(*, project: Project, environment: str) -> list[dict[str, Any]]:
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
         secrets: list[dict[str, Any]] = []
         async for s in Secret.objects.filter(project=project, environment=environment).values("id", "key", "value", "policy"):
             try:
@@ -187,7 +207,7 @@ class SecretSelector:
 
     @staticmethod
     async def get_secret_by_key(*, project: Project, key: str, environment: str) -> Secret:
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
         secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
         if not secret:
             raise NotFoundError(f"Secret '{key.upper()}' does not exist in this project")

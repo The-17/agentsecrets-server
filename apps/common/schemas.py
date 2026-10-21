@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Any, Generic, TypeVar
+from typing import Optional, Generic, TypeVar
 from ninja import Schema
 
 T = TypeVar("T")
@@ -7,7 +7,10 @@ T = TypeVar("T")
 # SHARED TYPES
 # ==========================================
 
-EnvironmentType = Literal["development", "staging", "production"]
+# Environment names are validated slugs, not a closed set. A project owns the three
+# standard names plus any custom name it has stored secrets under. The rule lives in
+# apps.secrets_app.environment; the resolver, not this control plane, decides entitlement.
+EnvironmentType = str
 
 
 # ==========================================

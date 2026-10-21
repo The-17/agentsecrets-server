@@ -423,7 +423,7 @@ class SecretService:
         )
         if role == MembershipRole.READ_ONLY:
             raise AuthorizationError("You don't have permission to modify secrets")
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
 
         secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
         if not secret:
@@ -465,7 +465,7 @@ class SecretService:
         )
         if role == MembershipRole.READ_ONLY:
             raise AuthorizationError("You don't have permission to modify secrets")
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
 
         secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
         if not secret:
@@ -506,7 +506,7 @@ class SecretService:
         )
         if role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace owners and admins can modify policy")
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
 
         secret = await Secret.objects.filter(project=project, key=key.upper(), environment=environment).afirst()
         if not secret:
@@ -528,7 +528,7 @@ class SecretService:
         )
         if role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace owners and admins can clean an environment")
-        SecretSelector.validate_env(environment)
+        environment = SecretSelector.validate_env(environment)
 
         @sync_to_async
         def _execute_clean():

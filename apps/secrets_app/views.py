@@ -25,6 +25,7 @@ from .schemas import (
     SecretListResponseDataSchema,
 )
 from .selectors import ProjectSelector, SecretSelector
+from .environment import query_environment
 from .services import ProjectService, SecretService
 
 logger = logging.getLogger("apps.secrets_app")
@@ -49,6 +50,18 @@ class ProjectController:
             data=project_data,
             status_code=201,
         )
+
+    # --- Environment inventory ---
+
+    @route.get("/{project_id}/environments/", response={200: DataResponse[ProjectEnvironmentsResponseDataSchema], 404: ErrorResponse})
+    async def environments(self, request, project_id: uuid.UUID):
+        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
+        result = await ProjectSelector.get_environments(project=project)
+        return CustomResponse.success(message="Environment counts retrieved", data=result)
+
+    # --- Name-keyed project endpoints ---
+    # These must stay below the fixed path segments above: a route registered earlier
+    # that also matches /{project_id}/environments/ wins, since the path takes priority.
 
     @route.get("/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 404: ErrorResponse})
     async def get_project(self, request, project_name: str):
@@ -149,11 +162,7 @@ class ProjectController:
 
     # --- Environment info ---
 
-    @route.get("/{project_id}/environments/", response={200: DataResponse[ProjectEnvironmentsResponseDataSchema], 404: ErrorResponse})
-    async def environments(self, request, project_id: uuid.UUID):
-        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
-        result = await ProjectSelector.get_environment_counts(project=project)
-        return CustomResponse.success(message="Environment counts retrieved", data=result)
+    # --- Environment info ---
 
     @route.get("/{project_id}/secrets/coverage/", response={200: DataResponse[ProjectSecretsCoverageResponseDataSchema], 404: ErrorResponse})
     async def secrets_coverage(self, request, project_id: uuid.UUID):
@@ -197,8 +206,9 @@ class SecretsController:
     async def bulk_upsert_alias(self, request, data: SecretBulkUpsertSchema):
         return await self.bulk_upsert(request, data)
 
-    @route.get("/{project_id}/", response={200: DataResponse[SecretListResponseDataSchema], 404: ErrorResponse})
+    @route.get("/{project_id}/", response={200: DataResponse[SecretListResponseDataSchema], 404: ErrorResponse, 422: ErrorResponse})
     async def list_secrets(self, request, project_id: uuid.UUID, environment: str = "development"):
+        environment = query_environment(environment)
         project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
         secrets = await SecretSelector.list_project_secrets(project=project, environment=environment)
         return CustomResponse.success(
