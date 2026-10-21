@@ -57,7 +57,7 @@ class ProjectController:
     async def environments(self, request, project_id: uuid.UUID):
         project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
         result = await ProjectSelector.get_environments(project=project)
-        return CustomResponse.success(message="Environment counts retrieved", data=result)
+        return CustomResponse.success(message="Environments retrieved", data=result)
 
     # --- Name-keyed project endpoints ---
     # These must stay below the fixed path segments above: a route registered earlier
