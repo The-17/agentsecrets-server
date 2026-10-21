@@ -113,6 +113,20 @@ class RateLimitError(RequestError):
         super().__init__("rate_limited", err_msg, 429)
 
 
+class OpaqueUnavailableError(RequestError):
+    """OPAQUE is unconfigured or its sidecar is down. Fail closed, never downgrade."""
+
+    def __init__(self, err_msg: str = "OPAQUE authentication is temporarily unavailable"):
+        super().__init__("opaque_unavailable", err_msg, 503)
+
+
+class PasswordLoginDisabledError(RequestError):
+    """This account is enrolled in OPAQUE, so it has no password factor."""
+
+    def __init__(self, err_msg: str = "Password login is disabled for this account. Use OPAQUE login."):
+        super().__init__("password_login_disabled", err_msg, 401)
+
+
 # ==========================================
 # EXCEPTION HANDLERS
 # ==========================================

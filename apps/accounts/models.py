@@ -92,9 +92,46 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text="Optimistic concurrency version for the vault record"
     )
 
+    # OPAQUE enrollment. After confirmation, password login is disabled for the account.
+    # opaque_record is the SerializedRegistrationRecord sent by the client.
+    opaque_record = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Opaque SerializedRegistrationRecord from the client (RFC 9807 client-side)"
+    )
+    opaque_registered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when OPAQUE enrollment was confirmed (credentials now unusable via password)"
+    )
+
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
+
+    @property
+    def auth_methods(self) -> set[str]:
+        """Enabled auth methods for this account.
+
+        Password and OPAQUE are alternatives, not a boolean: an enrolled
+        account has ``opaque`` only, so no code path can silently downgrade to
+        password. OAuth identities never unlock the vault and stay unaffected.
+        """
+        methods: set[str] = set()
+        provider = (self.auth_provider or "email").lower()
+        if provider == "google":
+            methods.add("oauth_google")
+        elif provider == "github":
+            methods.add("oauth_github")
+        elif self.has_usable_password():
+            methods.add("password")
+        if self.opaque_record and self.opaque_registered_at:
+            methods.add("opaque")
+        return methods
+
+    @property
+    def password_login_allowed(self) -> bool:
+        return "password" in self.auth_methods
 
     def save(self, *args, **kwargs):
         if not self.billing_id:
@@ -129,6 +166,57 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     def __str__(self):
         return self.full_name
+
+
+class OpaqueLoginChallenge(BaseModel):
+    """
+    Short-lived server state for each OPAQUE login request (TTL 120s).
+    Stored to prevent replay: the client consumes the challenge when it returns
+    and we safely delete the record after login_finish.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="opaque_login_challenges",
+        help_text="User performing OPAQUE login"
+    )
+    challenge_id = models.CharField(
+        max_length=64,
+        unique=True,
+        help_text="Unique challenge ID"
+    )
+    expires_at = models.DateTimeField(
+        help_text="Challenge expiration (120s from creation)"
+    )
+    used_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the challenge was consumed"
+    )
+    # oss server_state returned on /v1/login/start, stored for consumption on /v1/login/finish
+    server_state = models.BinaryField(
+        help_text="Server state blob to prevent replay"
+    )
+
+    class Meta:
+        verbose_name = _("OPAQUE Login Challenge")
+        verbose_name_plural = _("OPAQUE Login Challenges")
+        indexes = [
+            models.Index(fields=["user", "expires_at"]),
+            models.Index(fields=["challenge_id"]),
+        ]
+
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+
+        return timezone.now() > self.expires_at
+
+    def consume(self) -> None:
+        from django.utils import timezone
+
+        self.used_at = timezone.now()
+        self.save(update_fields=["used_at"])
+
 
 class OAuthAuthorizationCode(BaseModel):
     """

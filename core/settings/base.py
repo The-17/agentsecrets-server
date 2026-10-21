@@ -199,6 +199,14 @@ OAUTH_ISSUER_BASE_URL = config(
 )
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
 
+# OPAQUE (RFC 9807) server crypto runs in the Go sidecar (cmd/opaque-sidecar in
+# the CLI repo): the only implementation wire-compatible with the CLI client is
+# the Go one. Empty URL or token disables the feature, and OPAQUE endpoints then
+# fail closed with 503 rather than falling back to password login.
+OPAQUE_SIDECAR_URL = config("OPAQUE_SIDECAR_URL", default="")
+OPAQUE_SIDECAR_TOKEN = config("OPAQUE_SIDECAR_TOKEN", default="")
+OPAQUE_TIMEOUT_SECONDS = config("OPAQUE_TIMEOUT_SECONDS", default=5, cast=int)
+
 # Browser dashboard origins allowed to call this API directly (custom
 # endpoints bypass the hosted dashboard's same-origin proxy, so a
 # self-hosted server must explicitly allow the dashboard origin here).

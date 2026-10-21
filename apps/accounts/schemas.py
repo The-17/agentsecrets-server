@@ -83,6 +83,77 @@ class VerifyOtpSchema(Schema):
     otp: int
 
 
+class OpaqueCapabilitySchema(Schema):
+    """Report which auth methods the server supports."""
+
+    password: bool = True
+    oauth_github: bool = False
+    oauth_google: bool = False
+    email_link: bool = False
+    # OPAQUE is reported only when OPAQUE_SIDECAR_URL is configured and a sidecar is reachable.
+    opaque: bool = False  # Set dynamically by the endpoint.
+
+
+class OpaqueRegisterStartSchema(Schema):
+    """Registration start: client sends reg_request + credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    reg_request: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueRegisterFinishSchema(Schema):
+    """Registration finish: Django sends reg_record + credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    reg_record: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueLoginStartSchema(Schema):
+    """Login start: client sends email, ke1, stored record, credential id."""
+    model_config = ConfigDict(extra="forbid")
+    email: EmailStr
+    ke1: str  # Base64 (no padding)
+    record: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueLoginFinishSchema(Schema):
+    """Login finish: client sends email, ke3, server_state, credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    email: EmailStr
+    ke3: str  # Base64 (no padding)
+    server_state: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueFinishResponseSchema(Schema):
+    """Response OPAQUE endpoints expect to return."""
+    model_config = ConfigDict(extra="forbid")
+    record: str  # opaque_record (opaque base64 dataset) for registration finish
+    ke2: str  # Server KE2 for login start
+    server_state: str  # Server state for login finish
+    session_key: str  # Session key for login finish
+
+
+class OpaqueRegisterStartResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    reg_response: str
+    credential_id: str
+
+
+class OpaqueRegisterFinishResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    record: str
+    credential_id: str
+
+
+class OpaqueLoginStartResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    ke2: str
+    server_state: str
+    credential_id: str
+
+
 class ResendOtpSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 

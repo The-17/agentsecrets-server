@@ -172,6 +172,11 @@ class AccountService:
         if not user:
             raise AuthenticationError("Invalid Credentials")
 
+        # OPAQUE enrollment check: if user is enrolled via OPAQUE, password login is disabled.
+        if getattr(user, "opaque_registered_at", None):
+            from apps.accounts.exceptions import OpaquedError
+            raise OpaquedError("Password login is disabled for this account. Use OPAQUE authentication.")
+
         if not user.billing_id:
             from .models import generate_billing_id
             user.billing_id = generate_billing_id()
@@ -407,6 +412,12 @@ class AccountService:
                 db_user = User.objects.select_for_update().get(id=user.id)
                 if not db_user.check_password(current_password):
                     raise BodyValidationError("current_password", "Current password is incorrect")
+
+                # OPAQUE enrollment check: password change disabled for opaque-enrolled accounts.
+                if getattr(db_user, "opaque_registered_at", None):
+                    from apps.accounts.exceptions import OpaquedError
+                    raise OpaquedError("Password change is disabled for this account. Re-enroll via OPAQUE recovery.")
+
                 if vault is not None:
                     if db_user.vault_version != expected_version:
                         raise ConflictError("Vault version conflict")

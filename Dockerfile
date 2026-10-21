@@ -21,6 +21,21 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# OPAQUE sidecar build stage. The CLI repo is fetched at a pinned commit so the
+# binary matches the client library exactly; the sidecar owns all OPAQUE server
+# math and is started by entrypoint.sh next to gunicorn.
+FROM golang:1.26-bookworm AS sidecar
+
+ARG OPAQUE_SIDECAR_REPO=https://github.com/The-17/agentsecrets.git
+ARG OPAQUE_SIDECAR_REF=18a6f61
+
+RUN git clone --filter=blob:none "$OPAQUE_SIDECAR_REPO" /src && \
+    cd /src && git checkout "$OPAQUE_SIDECAR_REF"
+
+WORKDIR /src
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/opaque-sidecar ./cmd/opaque-sidecar
+
 # Final runtime stage
 FROM python:3.12-slim-bookworm AS runner
 
@@ -39,6 +54,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
+
+# OPAQUE sidecar binary. It binds loopback only and is reached over
+# OPAQUE_SIDECAR_URL (default http://127.0.0.1:8790).
+COPY --from=sidecar /out/opaque-sidecar /usr/local/bin/opaque-sidecar
 
 # Copy entrypoint and application code
 COPY entrypoint.sh /app/entrypoint.sh

@@ -2,10 +2,20 @@ import logging
 from typing import Any
 from ninja_extra import api_controller, route
 
+from django.conf import settings
+
 from .auth import JWTAuth
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from .schemas import (
+    OpaqueRegisterStartSchema,
+    OpaqueRegisterFinishSchema,
+    OpaqueLoginStartSchema,
+    OpaqueLoginFinishSchema,
+    OpaqueRegisterStartResponseSchema,
+    OpaqueRegisterFinishResponseSchema,
+    OpaqueLoginStartResponseSchema,
+    OpaqueCapabilitySchema,
     RegisterSchema,
     LoginSchema,
     LogoutSchema,
@@ -30,8 +40,75 @@ from .schemas import (
 from apps.common.exceptions import AuthenticationError
 from .selectors import AccountSelector
 from .services import AccountService
+from .opaque_services import OpaqueService
 
 logger = logging.getLogger("apps.accounts")
+
+
+@api_controller("/auth/opaque", tags=["Auth OPAQUE"], auth=None)
+class OpaqueController:
+    """
+    OPAQUE (RFC 9807) registration and login. Crypto lives in the Go sidecar;
+    these endpoints forward blobs and own per-account enforcement.
+    """
+
+    @route.post("/register/start/", response={200: DataResponse[OpaqueRegisterStartResponseSchema], 503: ErrorResponse, 422: ErrorResponse})
+    async def register_start(self, request, data: OpaqueRegisterStartSchema):
+        manager = OpaqueService()
+        reg_response = await manager.register_user_start_async(
+            cred_id=data.credential_id,
+            reg_request=manager.decode_base64(data.reg_request),
+        )
+        return CustomResponse.success(
+            message="Registration response generated",
+            data={
+                "reg_response": manager.encode_base64(reg_response),
+                "credential_id": data.credential_id,
+            },
+        )
+
+    @route.post("/register/finish/", response={200: DataResponse[OpaqueRegisterFinishResponseSchema], 401: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def register_finish(self, request, data: OpaqueRegisterFinishSchema):
+        manager = OpaqueService()
+        record = await manager.register_user_finish_async(
+            user=request.auth,
+            cred_id=data.credential_id,
+            reg_record=manager.decode_base64(data.reg_record),
+        )
+        return CustomResponse.success(
+            message="OPAQUE enrollment complete; password login is now disabled for this account",
+            data={"record": record, "credential_id": data.credential_id},
+        )
+
+    @route.post("/login/start/", response={200: DataResponse[OpaqueLoginStartResponseSchema], 401: ErrorResponse, 429: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse})
+    async def login_start(self, request, data: OpaqueLoginStartSchema):
+        manager = OpaqueService()
+        ke2, server_state = await manager.login_start_async(
+            cred_id=data.credential_id,
+            ke1=manager.decode_base64(data.ke1),
+            stored_record=manager.decode_base64(data.record),
+            email=data.email,
+        )
+        return CustomResponse.success(
+            message="Login challenge issued",
+            data={
+                "ke2": manager.encode_base64(ke2),
+                "server_state": server_state,
+                "credential_id": data.credential_id,
+            },
+        )
+
+    @route.post("/login/finish/", response={200: DataResponse[LoginResponseDataSchema], 401: ErrorResponse, 409: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse})
+    async def login_finish(self, request, data: OpaqueLoginFinishSchema):
+        manager = OpaqueService()
+        result = await manager.login_finish_async(
+            request=request,
+            cred_id=data.credential_id,
+            ke3=manager.decode_base64(data.ke3),
+            server_state=data.server_state,
+            email=data.email,
+        )
+        return CustomResponse.success(message="Login successful!", data=result)
 
 
 @api_controller("/auth", tags=["Auth"], auth=None)
@@ -227,6 +304,21 @@ class AuthController:
         return CustomResponse.success(
             message="Token refreshed successfully",
             data=result,
+        )
+
+    @route.get("/capabilities/", response={200: DataResponse[OpaqueCapabilitySchema]})
+    async def capabilities(self, request):
+        """Which auth methods this server supports. Public and side-effect free."""
+        opaque = await OpaqueService().healthy()
+        return CustomResponse.success(
+            message="Capabilities retrieved",
+            data=OpaqueCapabilitySchema(
+                password=True,
+                oauth_github=bool(getattr(settings, "OAUTH_GITHUB_ENABLED", False)),
+                oauth_google=bool(getattr(settings, "OAUTH_GOOGLE_ENABLED", False)),
+                email_link=bool(getattr(settings, "EMAIL_LINK_ENABLED", False)),
+                opaque=opaque,
+            ),
         )
 
 
