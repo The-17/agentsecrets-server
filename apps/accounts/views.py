@@ -86,7 +86,6 @@ class OpaqueController:
         ke2, server_state = await manager.login_start_async(
             cred_id=data.credential_id,
             ke1=data.ke1,
-            stored_record=data.record,
             email=data.email,
         )
         return CustomResponse.success(

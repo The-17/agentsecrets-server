@@ -102,12 +102,16 @@ class OpaqueService:
     # -- login ----------------------------------------------------------
 
     async def login_start_async(
-        self, *, cred_id: str, ke1: str, stored_record: str, email: str
+        self, *, cred_id: str, ke1: str, email: str
     ) -> tuple[str, str]:
         user = await sync_to_async(self._enrolled_user)(email)
         await self._guard_challenge(user.id)
         try:
-            result = await sync_to_async(self.sidecar.login_start)(ke1, stored_record, cred_id)
+            # The record is server state. Reading it here is what lets a second
+            # device log in with nothing but the password.
+            result = await sync_to_async(self.sidecar.login_start)(
+                ke1, user.opaque_record, cred_id
+            )
         except SidecarError as exc:
             logger.error("OPAQUE login start failed: %s", exc)
             raise OpaqueUnavailableError(str(exc)) from exc

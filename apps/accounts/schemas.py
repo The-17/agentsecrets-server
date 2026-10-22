@@ -109,11 +109,14 @@ class OpaqueRegisterFinishSchema(Schema):
 
 
 class OpaqueLoginStartSchema(Schema):
-    """Login start: client sends email, ke1, stored record, credential id."""
+    """Login start: client sends email, ke1, credential id.
+
+    The registration record is server-side state. It is read from the account,
+    never accepted from the client, so any device can log in once enrolled.
+    """
     model_config = ConfigDict(extra="forbid")
     email: EmailStr
     ke1: str  # Base64 (no padding)
-    record: str  # Base64 (no padding)
     credential_id: str  # UUID
 
 

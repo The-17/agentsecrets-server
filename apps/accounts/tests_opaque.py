@@ -78,7 +78,6 @@ class OpaqueUnavailableTests(TestCase):
             data={
                 "email": "nobody@example.com",
                 "ke1": "AAAA",
-                "record": "AAAA",
                 "credential_id": "c1",
             },
             content_type="application/json",
