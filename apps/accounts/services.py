@@ -337,6 +337,14 @@ class AccountService:
                 db_user.vault = vault
                 db_user.vault_version = expected_version + 1
                 db_user.set_password(new_password)
+                # Recovery replaces the credential, so an OPAQUE enrollment for
+                # the forgotten password must not survive it. Leaving the flag
+                # set refuses password login while the stored record still only
+                # matches the old password, which locks the account out of both
+                # paths. Clearing both restores password login; the client
+                # re-enrolls on its next login.
+                db_user.opaque_record = None
+                db_user.opaque_registered_at = None
                 db_user.key_salt = encryption_service.encrypt(key_salt)
                 db_user.encrypted_private_key = encrypted_private_key
                 db_user.save()

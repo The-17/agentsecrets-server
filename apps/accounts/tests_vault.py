@@ -495,6 +495,46 @@ class VaultRecoveryEndpointTests(TestCase):
         self.assertEqual(self.user.vault_version, 2)
         self.assertEqual(self.user.encrypted_private_key, "new_blob")
 
+    def test_recovery_password_clears_opaque_enrollment(self):
+        from django.utils import timezone
+
+        self.user.opaque_record = "record-for-the-forgotten-password"
+        self.user.opaque_registered_at = timezone.now()
+        self.user.save()
+
+        verified = self.verify(self.challenge().json()["data"])
+        self.assertEqual(verified.status_code, 200)
+        access = verified.json()["data"]["access"]
+
+        res = self.client.patch(
+            "/api/auth/recover/password/",
+            data=json.dumps(
+                {
+                    "new_password": "RecoveredPassword123!",
+                    "key_salt": "new_salt",
+                    "encrypted_private_key": "new_blob",
+                    "vault": self.next_vault(),
+                    "expected_version": 1,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {access}",
+        )
+        self.assertEqual(res.status_code, 200)
+
+        self.user.refresh_from_db()
+        self.assertIsNone(self.user.opaque_record)
+        self.assertIsNone(self.user.opaque_registered_at)
+
+        # The new password authenticates: recovery must not leave the account
+        # enrolled against the password the user no longer knows.
+        login = self.client.post(
+            "/api/auth/login/",
+            data={"email": self.user.email, "password": "RecoveredPassword123!"},
+            content_type="application/json",
+        )
+        self.assertEqual(login.status_code, 200)
+
     def test_recovery_password_rejects_stale_version(self):
         verified = self.verify(self.challenge().json()["data"])
         access = verified.json()["data"]["access"]
