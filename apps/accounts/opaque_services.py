@@ -91,12 +91,14 @@ class OpaqueService:
 
         with transaction.atomic():
             db_user = User.objects.select_for_update().get(id=user_id)
-            # The record and the removal of the password hash land together:
-            # an account is never left with neither, or with both.
+            # The password hash is deliberately kept. A CLI that predates
+            # OPAQUE cannot perform this exchange, and those installs cannot be
+            # updated, so removing the password would make the account
+            # unreachable from every already-deployed client. OPAQUE becomes
+            # the preferred method, not the only one.
             db_user.opaque_record = stored
             db_user.opaque_registered_at = timezone.now()
-            db_user.set_unusable_password()
-            db_user.save(update_fields=["opaque_record", "opaque_registered_at", "password"])
+            db_user.save(update_fields=["opaque_record", "opaque_registered_at"])
         return stored
 
     # -- login ----------------------------------------------------------
