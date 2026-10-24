@@ -31,21 +31,20 @@ class AuthMethodStateTests(TestCase):
         self.assertEqual(self.user.auth_methods, {"password"})
         self.assertTrue(self.user.password_login_allowed)
 
-    def test_enrolled_account_keeps_password_for_old_clients(self):
+    def test_enrolled_account_is_opaque_only(self):
         self.user.opaque_record = "record-blob"
         self.user.opaque_registered_at = timezone.now()
+        self.user.set_unusable_password()
         self.user.save()
 
-        # A CLI that predates OPAQUE cannot do the exchange and cannot be
-        # updated, so the password must keep working or the account becomes
-        # unreachable from every already-installed client.
-        self.assertTrue(self.user.has_usable_password())
-        self.assertEqual(self.user.auth_methods, {"password", "opaque"})
-        self.assertTrue(self.user.password_login_allowed)
+        # Enrollment clears the password: only the new CLI enrolls, so a
+        # record means the user upgraded deliberately. The account is
+        # unreachable by password from then on, by design.
+        self.assertFalse(self.user.has_usable_password())
+        self.assertEqual(self.user.auth_methods, {"opaque"})
+        self.assertFalse(self.user.password_login_allowed)
         self.assertTrue(self.user.opaque_login_allowed)
-        self.assertIsNotNone(
-            dj_authenticate(email=self.user.email, password="correct-horse-battery")
-        )
+        self.assertIsNone(dj_authenticate(email=self.user.email, password="correct-horse-battery"))
 
     def test_record_without_timestamp_is_not_enrollment(self):
         # Half-written state must not claim OPAQUE, or the account would have
@@ -55,9 +54,10 @@ class AuthMethodStateTests(TestCase):
         self.assertEqual(self.user.auth_methods, {"password"})
         self.assertFalse(self.user.opaque_login_allowed)
 
-    def test_enrolled_account_can_still_use_password_login_endpoint(self):
+    def test_enrolled_account_rejects_password_login_endpoint(self):
         self.user.opaque_record = "record-blob"
         self.user.opaque_registered_at = timezone.now()
+        self.user.set_unusable_password()
         self.user.save()
 
         response = self.client.post(
@@ -65,14 +65,11 @@ class AuthMethodStateTests(TestCase):
             data={"email": self.user.email, "password": "correct-horse-battery"},
             content_type="application/json",
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("access", response.json().get("data") or {})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "password_login_disabled")
+        self.assertNotIn("access", response.json().get("data") or {})
 
-    def test_enrolled_account_still_rejects_a_wrong_password(self):
-        self.user.opaque_record = "record-blob"
-        self.user.opaque_registered_at = timezone.now()
-        self.user.save()
-
+    def test_wrong_password_on_unenrolled_account_is_generic(self):
         response = self.client.post(
             "/api/auth/login/",
             data={"email": self.user.email, "password": "not-the-password"},

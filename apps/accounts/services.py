@@ -168,6 +168,17 @@ class AccountService:
         """
         Authenticates a user, issues JWT tokens, stamps activity, and returns credentials.
         """
+        # Look the account up first: enrollment removes the password hash, so
+        # authenticating first would surface a generic "Invalid Credentials"
+        # and send the user hunting for a password that cannot work. New
+        # clients switch to the OPAQUE exchange on this error; old clients
+        # surface it as a login failure, which is the release-note behaviour.
+        existing = await User.objects.filter(email__iexact=email).afirst()
+        if existing is not None and getattr(existing, "opaque_registered_at", None):
+            from apps.common.exceptions import PasswordLoginDisabledError
+
+            raise PasswordLoginDisabledError()
+
         user = await aauthenticate(request, email=email, password=password)
         if not user:
             raise AuthenticationError("Invalid Credentials")

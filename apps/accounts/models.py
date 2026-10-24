@@ -113,14 +113,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     def auth_methods(self) -> set[str]:
         """Enabled auth methods for this account.
 
-        ``opaque`` is advertised only when the account also still has a usable
-        password. That is deliberate: a CLI that predates OPAQUE cannot perform
-        the exchange, so the server must keep accepting its password or the
-        account becomes unreachable from every already-installed client. The
-        password hash stays on the account for exactly that reason, and OPAQUE
-        is the preferred method rather than the only one.
-
-        OAuth identities never unlock the vault and stay unaffected.
+        Password and OPAQUE are alternatives: an enrolled account has
+        ``opaque`` only, because enrollment clears the password hash. Only the
+        new CLI enrolls, so a record means the user upgraded deliberately. Old
+        clients keep working on accounts that never enrolled, and need to know
+        nothing about OPAQUE. OAuth identities never unlock the vault and stay
+        unaffected.
         """
         methods: set[str] = set()
         provider = (self.auth_provider or "email").lower()
@@ -130,7 +128,7 @@ class User(AbstractBaseUser, PermissionsMixin):
             methods.add("oauth_github")
         elif self.has_usable_password():
             methods.add("password")
-        if self.opaque_record and self.opaque_registered_at and self.has_usable_password():
+        if self.opaque_record and self.opaque_registered_at:
             methods.add("opaque")
         return methods
 
