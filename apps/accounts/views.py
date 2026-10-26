@@ -1,5 +1,6 @@
 import logging
 from typing import Any
+from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
 
 from django.conf import settings
@@ -32,6 +33,8 @@ from .schemas import (
     LoginResponseDataSchema,
     TokenRefreshResponseDataSchema,
     UserPublicKeyResponseSchema,
+    AccountProbeSchema,
+    AccountProbeResponseSchema,
     UserSummarySchema,
     VaultUpdateSchema,
     VaultResponseSchema,
@@ -326,6 +329,26 @@ class UserController:
     """
     Public user endpoints for key discovery.
     """
+
+    @route.post("/probe/", response={200: DataResponse[AccountProbeResponseSchema], 422: ErrorResponse, 429: ErrorResponse})
+    async def probe_account(self, request, data: AccountProbeSchema):
+        """Report whether an email is registered, as a bare boolean.
+
+        The auth UI asks this on email submit so it can show the password step
+        or the signup step. It is enumeration by design and therefore paced per
+        IP; see apps/accounts/probe_limit.py. The response carries no message
+        that names existence, and an unknown address is not an error: 200 with
+        exists=false is the answer, so a 404 body cannot leak the distinction.
+        """
+        from apps.accounts.probe_limit import enforce_probe_limit
+
+        await sync_to_async(enforce_probe_limit)(request)
+
+        exists = await AccountSelector.account_exists(email=data.email)
+        return CustomResponse.success(
+            message="Probe complete",
+            data={"exists": exists},
+        )
 
     @route.get("/{email}/public-key/", response={200: DataResponse[UserPublicKeyResponseSchema], 404: ErrorResponse})
     async def get_public_key(self, request, email: str):

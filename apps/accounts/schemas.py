@@ -314,3 +314,16 @@ class TokenRefreshResponseDataSchema(Schema):
 class UserPublicKeyResponseSchema(Schema):
     email: str
     public_key: str
+
+
+class AccountProbeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class AccountProbeResponseSchema(Schema):
+    # A bare boolean on purpose. The auth UI needs to know which step to render,
+    # but the response must never say "this account exists", because that is the
+    # enumeration this endpoint is rate-limited against.
+    exists: bool

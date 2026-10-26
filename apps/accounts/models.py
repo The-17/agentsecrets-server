@@ -286,6 +286,27 @@ class VaultRecoveryChallenge(models.Model):
         return f"vault-recovery challenge for {self.user.email}"
 
 
+class AccountProbe(models.Model):
+    """One public account-existence probe, kept only long enough to pace them.
+
+    The auth UI has to ask whether an email is registered before it can show the
+    right step, which is enumeration by design. This table is what makes the
+    answer rate-limited, and it stores a hashed IP rather than the address so it
+    cannot become a record of who checked which account.
+    """
+
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)
+    ip_hash = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["ip_hash", "created_at"])]
+
+    def __str__(self):
+        return f"account probe at {self.created_at:%Y-%m-%d %H:%M:%S}"
+
+
 # class RecoveryCode(models.Model):
 #     id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)
 #     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='recovery_codes')

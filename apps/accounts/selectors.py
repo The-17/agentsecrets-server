@@ -31,6 +31,17 @@ class AccountSelector:
         return user.public_key
 
     @staticmethod
+    async def account_exists(*, email: str) -> bool:
+        """Whether an account with this email exists, regardless of its keys.
+
+        The probe must answer about the ACCOUNT. Testing the public key instead
+        would report an account without one as non-existent, and the UI would
+        offer signup for an address that is already taken.
+        """
+        user = await AccountSelector.get_user_by_email(email=email)
+        return user is not None
+
+    @staticmethod
     async def get_user_workspaces_data(*, user: User) -> list[dict[str, Any]]:
         workspaces_data: list[dict[str, Any]] = []
         async for m in Membership.objects.filter(
