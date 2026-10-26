@@ -78,6 +78,26 @@ class AuthMethodStateTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertNotIn("access", response.json().get("data") or {})
 
+    def test_login_returns_vault_so_the_console_can_unlock_it(self):
+        # The web console reads the vault from the login response and unwraps
+        # the private key with it. If this field is dropped or renamed, every
+        # vault-enabled account silently falls back to the legacy blob, and a
+        # future password removal would strand the console.
+        vault = {"version": 1, "vault_version": 1, "envelopes": []}
+        self.user.vault = vault
+        self.user.vault_version = 1
+        self.user.save()
+
+        response = self.client.post(
+            "/api/auth/login/",
+            data={"email": self.user.email, "password": "correct-horse-battery"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(data["vault"], vault)
+        self.assertEqual(data["vault_version"], 1)
+
 
 class OpaqueUnavailableTests(TestCase):
     def test_endpoints_fail_closed_when_unconfigured(self):

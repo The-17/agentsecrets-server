@@ -1,0 +1,56 @@
+{
+  "user_id": "11111111-2222-3333-4444-555555555555",
+  "password": "correct horse battery staple",
+  "private_key": "oneWaekxtE9hn382Y0OA0zlyQ/ak4JAHgKuOt/Bfjss=",
+  "vault": {
+    "version": 1,
+    "vault_version": 1,
+    "vault_pubkey": "3TpepJQORyRn8Qrwt+N5Ewxajx0Mvquez1NB/wlwA38=",
+    "private_key": {
+      "nonce": "Ax+ShMkpsxRNR7Eg",
+      "ciphertext": "AXnzFPlE+3r0QSCVNGiMvR60ABheZUM5U/0bnJshShItxLbffdtkHL2NokSfP5ee",
+      "aad_version": 1
+    },
+    "bridge": {
+      "kdf": "hkdf-sha256",
+      "salt": "rCZXL2GZDf+GeqXfua9XHPg13b5EhRNDcE326f0mk3A=",
+      "nonce": "RFyp7xOgrNFZe9+r",
+      "ciphertext": "P4Vn1AaoIjfdQeQ1UZj7OmLXwIMPlztw8Shpbikfr4nc+uojUlaQAnL2Cfumlv2z",
+      "aad_version": 1
+    },
+    "envelopes": [
+      {
+        "id": "env_904599c31cad78ac",
+        "type": "password",
+        "kdf": "argon2id",
+        "params": {
+          "m": 65536,
+          "t": 3,
+          "p": 4
+        },
+        "salt": "hxOmxrq4qclOxFijdfHVifTSBOGgCdlopcD88KOQ3M0=",
+        "nonce": "REj6zUXIyBuM5jqC",
+        "ciphertext": "2xiytnxIc9oR5XiqyXouWB1f0rkKHKvMmRzILl2XST2NpTZr9lgdfw1VRy87SVf+",
+        "aad_version": 1,
+        "created_at": "2026-10-26T13:00:41.602Z"
+      },
+      {
+        "id": "env_8be7992ccaa35521",
+        "type": "recovery",
+        "kdf": "hkdf-sha256",
+        "salt": "vO+xiXGwxrzr3l+30QTnj59JQm/kaHckljjfboH87n8=",
+        "nonce": "8zPD16DAz9v+T+8S",
+        "ciphertext": "h9Oa86d3ab4vF4XaHg0VQfrl/UWUWcGWZJFw6f9FUaQlrdMigRx3pktERNQLSAiQ",
+        "aad_version": 1,
+        "created_at": "2026-10-26T13:00:41.605Z"
+      }
+    ],
+    "recovery_confirmed": false,
+    "proof": {
+      "signature": "Xr82lPqdqy6OuCIqmRtHOciWFdmtIX9EnNNcsdUwMxbnUQeCk6B1DiQiBssXG3P71Ywi4250N1C9MyGy59mhCA==",
+      "timestamp": 1793019641,
+      "nonce": "bzDKi5ta27+uqhMfoZW9SA=="
+    }
+  },
+  "recovery_key": "F00ECDG-JPRRKGX-Y1Z2H9M-BEFBQA5-W7RG1X5-Y08K5XN-V0FB1F9-DQGKQA0"
+}
