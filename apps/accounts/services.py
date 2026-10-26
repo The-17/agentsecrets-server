@@ -176,8 +176,21 @@ class AccountService:
         existing = await User.objects.filter(email__iexact=email).afirst()
         if existing is not None and getattr(existing, "opaque_registered_at", None):
             from apps.common.exceptions import PasswordLoginDisabledError
+            from .opaque_gate import opaque_sidecar_password_gate
 
-            raise PasswordLoginDisabledError()
+            if not opaque_sidecar_password_gate():
+                raise PasswordLoginDisabledError()
+            # Break-glass: OPAQUE_ALLOW_PASSWORD=true re-opens the password
+            # path for enrolled accounts when the sidecar is down or a record
+            # is corrupt. Loud on purpose (every use logs a warning) and it
+            # only succeeds when the account still HAS a usable hash, which an
+            # enrolled account does not unless an operator restored one with
+            # set_password. Mutating the in-memory copy lets aauthenticate run
+            # without persisting anything: the account stays enrolled.
+            logger.warning(
+                "OPAQUE_ALLOW_PASSWORD break-glass used for account %s", existing.id
+            )
+            existing.opaque_registered_at = None
 
         user = await aauthenticate(request, email=email, password=password)
         if not user:
