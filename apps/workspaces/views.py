@@ -171,6 +171,23 @@ class WorkspaceController:
         result = await WorkspaceService.reconcile_workspace_billing(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Workspace billing reconciled", data=result)
 
+    @route.get("/{workspace_id}/billing/status/", response={200: DataResponse[Dict[str, Any]], 404: ErrorResponse})
+    async def get_billing_status(self, request, workspace_id: uuid.UUID):
+        """Report the workspace plan as the resolver sees it. Read-only.
+
+        Any member may call it, because a member needs to know whether a custom
+        environment is available to them. The control plane only *reports* the
+        plan and never denies a feature, which keeps billing policy out of this
+        open-source server. Clients ask here instead of reading the local
+        mirror, so a fresh upgrade is not reported as Free.
+        """
+        await WorkspaceSelector.get_membership(user=request.auth, workspace_id=workspace_id)
+        tier = await WorkspaceSelector.resolve_tier(workspace_id=str(workspace_id))
+        return CustomResponse.success(
+            message="Billing status retrieved successfully",
+            data={"tier": tier},
+        )
+
     @route.patch("/{workspace_id}/", response={200: DataResponse[WorkspaceSimpleSchema], 403: ErrorResponse})
     async def update_workspace(self, request, workspace_id: uuid.UUID, data: WorkspaceUpdateSchema):
         result = await WorkspaceService.update_workspace(

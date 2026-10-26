@@ -108,6 +108,39 @@ class WorkspaceSelector:
         return member
 
     @staticmethod
+    async def resolve_tier(*, workspace_id: str) -> str:
+        """The workspace's plan, confirmed against the resolver and cached.
+
+        The only owner of "is this workspace Pro". The local ``tier`` mirror is
+        rewritten only by an explicit reconcile, so reading it alone reports a
+        fresh upgrade as Free. A Pro mirror can be trusted, because only a
+        resolver-confirmed reconcile ever sets it. A Free mirror is the
+        ambiguous direction, so it is confirmed with the resolver. An
+        unreachable resolver falls back to the mirror and re-checks after 60s
+        instead of 300.
+        """
+        cache_key = f"ws-tier:{workspace_id}"
+        tier = await sync_to_async(cache.get)(cache_key)
+        if tier is not None:
+            return tier
+
+        ws = await Workspace.objects.filter(id=workspace_id).select_related("owner").afirst()
+        if ws is None:
+            return "unknown"
+        db_tier = getattr(ws, "tier", None)
+        if db_tier == WorkspaceTier.PRO:
+            tier, ttl = db_tier, 300
+        else:
+            payload = await resolver_plan(billing_id=ws.effective_billing_id)
+            if payload is None:
+                tier, ttl = db_tier or "unknown", 60
+            else:
+                tier = WorkspaceTier.PRO if plan_is_pro(payload) else WorkspaceTier.FREE
+                ttl = 300
+        await sync_to_async(cache.set)(cache_key, tier, ttl)
+        return tier
+
+    @staticmethod
     async def list_user_workspaces(*, user: User) -> list[dict[str, Any]]:
         memberships = Membership.objects.filter(
             user=user, status=MembershipStatus.ACTIVE
@@ -417,33 +450,10 @@ class AuditSelector:
         The resolver owns entitlement, so a cache miss confirms the local mirror
         against the resolver before clamping a Free workspace. Without that, an
         upgrade stayed clamped to 3 days until someone called the billing
-        reconcile endpoint by hand. A resolver miss falls back to the mirror and
-        re-checks after 60s instead of 5 minutes.
+        reconcile endpoint by hand.
         """
         try:
-            cache_key = f"ws-tier:{workspace_id}"
-            tier = await sync_to_async(cache.get)(cache_key)
-            if tier is None:
-                ws = await Workspace.objects.filter(id=workspace_id).select_related("owner").afirst()
-                if ws is None:
-                    return None, False
-                db_tier = getattr(ws, "tier", None)
-                if db_tier == WorkspaceTier.PRO:
-                    # Only a resolver-confirmed reconcile can set the mirror to
-                    # Pro, so trust it. Confirm the other direction: a Free
-                    # mirror may be a paid workspace whose upgrade has not been
-                    # reconciled yet, and clamping it would be wrong.
-                    tier = db_tier
-                    ttl = 300
-                else:
-                    payload = await resolver_plan(billing_id=ws.effective_billing_id)
-                    if payload is None:
-                        tier = db_tier or "unknown"
-                        ttl = 60
-                    else:
-                        tier = WorkspaceTier.PRO if plan_is_pro(payload) else WorkspaceTier.FREE
-                        ttl = 300
-                await sync_to_async(cache.set)(cache_key, tier, ttl)
+            tier = await WorkspaceSelector.resolve_tier(workspace_id=str(workspace_id))
         except Exception:
             return None, False
         if tier == WorkspaceTier.PRO:
