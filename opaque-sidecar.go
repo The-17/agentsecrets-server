@@ -11,7 +11,7 @@
 // It never generates key material. A record registered under one key set
 // cannot authenticate under another, so a deployment that silently invented
 // keys would strand accounts.
-package main
+package handler
 
 import (
 	"net/http"
@@ -52,4 +52,3 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	handler.ServeHTTP(w, r)
 }
 
-func main() {}
