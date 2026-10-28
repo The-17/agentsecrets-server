@@ -15,6 +15,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/The-17/agentsecrets/pkg/sidecar"
@@ -45,9 +46,9 @@ func initSidecar() {
 // Handler is the Vercel entry point.
 //
 // Vercel delivers the original request URI, so on the deployment the mux sees
-// /opaque-sidecar/... while it registers bare /v1/... and /healthz. Strip the
-// mount prefix so the same mux serves both this function (mounted under its
-// route prefix) and the loopback binary (mounted at root).
+// /opaque-sidecar/... while it registers bare /v1/... and /healthz. Requests
+// carrying the mount prefix are stripped; anything else passes through so the
+// loopback binary and the function keep serving one route table.
 func Handler(w http.ResponseWriter, r *http.Request) {
 	once.Do(initSidecar)
 	if initErr != nil {
@@ -55,6 +56,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const mount = "/opaque-sidecar"
-	http.StripPrefix(mount, handler).ServeHTTP(w, r)
+	if strings.HasPrefix(r.URL.Path, mount) {
+		http.StripPrefix(mount, handler).ServeHTTP(w, r)
+		return
+	}
+	handler.ServeHTTP(w, r)
 }
 
