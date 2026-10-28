@@ -392,6 +392,79 @@ class AccountService:
             raise BodyValidationError("email", "Email already verified")
 
     @staticmethod
+    async def request_email_change(*, user, new_email: str) -> None:
+        """Store a pending email and send a verification code to it.
+
+        The code is stored in the existing OneTimePassword row for the user.
+        Actual delivery goes through Brevo; until BREVO_API_KEY is configured on
+        the host, delivery is a no-op and the flow fails closed with a clear
+        message. This is the "groundwork" state: the endpoint and CLI exist, the
+        real send will land when Brevo is wired.
+        """
+        from apps.common.email.brevo import send as brevo_send
+        from apps.common.exceptions import RequestError
+        from django.conf import settings
+
+        # request.auth can carry deferred fields; touching them in an async
+        # context would trigger a synchronous refresh. Re-fetch with the async
+        # ORM so every field used below is loaded on the async connection.
+        user = await User.objects.aget(pk=user.pk)
+
+        if user.pending_email == new_email and user.pending_email:
+            raise BodyValidationError("email", "A change to that address is already pending")
+
+        if new_email == user.email:
+            raise BodyValidationError("email", "That is already your email")
+
+        if await User.objects.aget_or_none(email=new_email):
+            raise ConflictError("Email already registered")
+        pending_taken = await User.objects.filter(
+            pending_email=new_email
+        ).exclude(pk=user.pk).aexists()
+        if pending_taken:
+            raise ConflictError("Email already registered")
+
+        import secrets as _secrets
+
+        code = f"{_secrets.randbelow(1_000_000):06d}"
+        await OneTimePassword.objects.aupdate_or_create(user=user, defaults={"code": code})
+        user.pending_email = new_email
+        await user.asave(update_fields=["pending_email"])
+
+        delivered = brevo_send(
+            to=new_email,
+            subject="Your AgentSecrets email change code",
+            text=f"Your verification code is {code}. It expires shortly.",
+        )
+        if not delivered and not settings.DEBUG:
+            raise RequestError(
+                "Email delivery is not configured on this server; "
+                "the email change cannot complete yet."
+            )
+
+    @staticmethod
+    async def confirm_email_change(*, user, new_email: str, otp: int) -> None:
+        """Swap the account email once the code sent to the new address matches."""
+        # Re-fetch for the same deferred-field reason as request_email_change.
+        user = await User.objects.aget(pk=user.pk)
+
+        if user.pending_email != new_email:
+            raise BodyValidationError("email", "No pending change to that address")
+
+        record = await OneTimePassword.objects.filter(user=user).afirst()
+        if record is None or record.code != str(otp):
+            raise AuthenticationError("Invalid or expired code")
+
+        if await User.objects.aget_or_none(email=new_email):
+            raise ConflictError("Email already registered")
+
+        user.email = new_email
+        user.is_email_verified = True
+        user.pending_email = None
+        await user.asave(update_fields=["email", "is_email_verified", "pending_email"])
+        await OneTimePassword.objects.filter(user=user).adelete()
+
+    @staticmethod
     async def confirm_password_reset(*, uidb64: str, token: str) -> User:
         user_id = smart_str(urlsafe_base64_decode(uidb64))
         user = await User.objects.aget_or_none(id=user_id)

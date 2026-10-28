@@ -83,6 +83,23 @@ class VerifyOtpSchema(Schema):
     otp: int
 
 
+class UpdateEmailRequestSchema(Schema):
+    """Request a verified email change. A code is sent to the new address."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_email: EmailStr
+
+
+class ConfirmEmailSchema(Schema):
+    """Confirm the pending email change with the code sent to the new address."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_email: EmailStr
+    otp: int
+
+
 class OpaqueCapabilitySchema(Schema):
     """Report which auth methods the server supports."""
 

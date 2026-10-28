@@ -195,6 +195,12 @@ ROTATION_TOKEN = config("ROTATION_TOKEN", default="")
 # holds the private half; no shared secret exists (ADR 008).
 RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
+
+# Brevo transactional email (groundwork). When BREVO_API_KEY is unset, the email
+# client is a no-op and flows that require delivery fail closed with a clear
+# message. Set both on a host to enable real email verification / email change.
+BREVO_API_KEY = config("BREVO_API_KEY", default="")
+BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
 # Public base URL advertised in OAuth discovery metadata
 # (/.well-known/oauth-authorization-server). MUST be the real public domain —
 # never localhost — or agent clients cannot complete login. Honors the

@@ -22,6 +22,8 @@ from .schemas import (
     LogoutSchema,
     VerifyOtpSchema,
     ResendOtpSchema,
+    UpdateEmailRequestSchema,
+    ConfirmEmailSchema,
     ResetPasswordSchema,
     SetNewPasswordSchema,
     ChangePasswordSchema,
@@ -201,6 +203,26 @@ class AuthController:
             expected_version=data.expected_version,
         )
         return CustomResponse.success(message="Password changed successfully")
+
+    @route.post(
+        "/update-email/",
+        response={200: SuccessResponse, 400: ErrorResponse, 409: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def update_email(self, request, data: UpdateEmailRequestSchema):
+        await AccountService.request_email_change(user=request.auth, new_email=data.new_email)
+        return CustomResponse.success(message="Verification code sent to your new address")
+
+    @route.post(
+        "/update-email/confirm/",
+        response={200: SuccessResponse, 400: ErrorResponse, 409: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def confirm_email(self, request, data: ConfirmEmailSchema):
+        await AccountService.confirm_email_change(
+            user=request.auth, new_email=data.new_email, otp=data.otp
+        )
+        return CustomResponse.success(message="Email updated")
 
     @route.get("/vault/", response={200: DataResponse[VaultResponseSchema]}, auth=JWTAuth())
     async def get_vault(self, request):
