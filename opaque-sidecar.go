@@ -43,12 +43,18 @@ func initSidecar() {
 }
 
 // Handler is the Vercel entry point.
+//
+// Vercel delivers the original request URI, so on the deployment the mux sees
+// /opaque-sidecar/... while it registers bare /v1/... and /healthz. Strip the
+// mount prefix so the same mux serves both this function (mounted under its
+// route prefix) and the loopback binary (mounted at root).
 func Handler(w http.ResponseWriter, r *http.Request) {
 	once.Do(initSidecar)
 	if initErr != nil {
 		http.Error(w, "opaque sidecar unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	handler.ServeHTTP(w, r)
+	const mount = "/opaque-sidecar"
+	http.StripPrefix(mount, handler).ServeHTTP(w, r)
 }
 

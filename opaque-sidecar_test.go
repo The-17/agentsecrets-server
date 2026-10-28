@@ -84,3 +84,27 @@ func TestHandlerEntryServesTheSameRoutes(t *testing.T) {
 		t.Fatalf("Handler entrypoint: expected 200 for healthz, got %d", rr.Code)
 	}
 }
+
+// On the deployment Vercel delivers the original URI, so the entrypoint sees
+// /opaque-sidecar/healthz, not /healthz. That mismatch is exactly what 404'd
+// the function once it was configured: unconfigured requests hit the
+// fail-closed 503 for every path, so the routing bug hid until the first live
+// switch-on. These cases pin the strip.
+func TestHandlerStripsTheDeployedMountPrefix(t *testing.T) {
+	t.Setenv("OPAQUE_SIDECAR_TOKEN", "test-token")
+	t.Setenv("OPAQUE_SERVER_KEY_MATERIAL", material(t))
+	reset()
+
+	health := httptest.NewRecorder()
+	Handler(health, httptest.NewRequest(http.MethodGet, "/opaque-sidecar/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("prefixed healthz: expected 200, got %d", health.Code)
+	}
+
+	ungated := httptest.NewRecorder()
+	Handler(ungated, httptest.NewRequest(
+		http.MethodPost, "/opaque-sidecar/v1/register/response", nil))
+	if ungated.Code != http.StatusUnauthorized {
+		t.Fatalf("prefixed protocol route without bearer: expected 401, got %d", ungated.Code)
+	}
+}
