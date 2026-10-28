@@ -10,6 +10,10 @@
             }
         },
         {
+            "src": "opaque-sidecar.go",
+            "use": "@vercel/go"
+        },
+        {
             "src": "build_files.sh",
             "use": "@vercel/static-build",
             "config": {
@@ -18,6 +22,10 @@
         }
     ],
     "routes": [
+        {
+            "src": "/opaque-sidecar",
+            "dest": "/opaque-sidecar"
+        },
         {
             "src": "/(.*)",
             "dest": "core/wsgi.py"
