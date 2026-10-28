@@ -23,8 +23,8 @@
     ],
     "routes": [
         {
-            "src": "/opaque-sidecar",
-            "dest": "/opaque-sidecar"
+            "src": "/opaque-sidecar(.*)",
+            "dest": "/opaque-sidecar.go"
         },
         {
             "src": "/(.*)",
