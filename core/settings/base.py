@@ -187,6 +187,9 @@ ENCRYPTION_KEY = config("ENCRYPTION_KEY")
 # Second key for platform rotation: as soon as it is set, writes move to
 # versioned ciphertext (v2: prefix) and the sweep re-encrypts old rows.
 ENCRYPTION_KEY_NEXT = config("ENCRYPTION_KEY_NEXT", default="")
+# Operator bearer for the platform key rotation sweep endpoint. Unset means
+# the endpoint refuses every call.
+ROTATION_TOKEN = config("ROTATION_TOKEN", default="")
 # Ed25519 public key (hex) the control plane trusts for resolver-originated
 # state-changing internal RPCs (rotation execute/family-revoke). The resolver
 # holds the private half; no shared secret exists (ADR 008).
