@@ -131,7 +131,15 @@ class WorkspaceSelector:
         if db_tier == WorkspaceTier.PRO:
             tier, ttl = db_tier, 300
         else:
-            payload = await resolver_plan(billing_id=ws.effective_billing_id)
+            # Query the workspace's own dedicated account first. A workspace that
+            # has been upgraded owns a ws_bill_* account (ws.billing_id) whose plan
+            # the resolver stores; asking effective_billing_id instead resolves to
+            # the owner's pool for a free workspace and reports a fresh upgrade as
+            # Free. Genuinely free workspaces have no dedicated account, so fall
+            # back to effective_billing_id (free_ws_*), which resolver_plan treats
+            # as Free.
+            query_billing_id = ws.billing_id or ws.effective_billing_id
+            payload = await resolver_plan(billing_id=query_billing_id)
             if payload is None:
                 tier, ttl = db_tier or "unknown", 60
             else:
