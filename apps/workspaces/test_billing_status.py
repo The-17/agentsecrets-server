@@ -128,6 +128,43 @@ class BillingStatusProMirrorTests(BillingStatusTestBase):
             self.assertEqual(self._tier(), "pro")
 
 
+class BillingStatusDedicatedAccountTests(BillingStatusTestBase):
+    """BIL-402 regression: an upgraded workspace owns a ws_bill_* account.
+
+    The dashboard shows Pro because reconcile reads ws.billing_id. The CLI's
+    billing_status used effective_billing_id (the owner pool) and saw Free.
+    resolve_tier must ask the dedicated account, never the owner pool.
+    """
+
+    def test_upgraded_workspace_resolves_pro_from_its_own_account(self):
+        Workspace.objects.filter(id=self.workspace.id).update(
+            billing_id="ws_bill_01BIL402REGRESSION",
+        )
+
+        async def fake_plan(**kwargs):
+            # Resolver returns Pro only for the workspace's own account. If
+            # resolve_tier had passed effective_billing_id (owner pool) this
+            # would return None and the assertion below would see "free".
+            if kwargs.get("billing_id") == "ws_bill_01BIL402REGRESSION":
+                return {"plan": "pro", "status": "active"}
+            return None
+
+        with patch("apps.workspaces.selectors.resolver_plan", fake_plan):
+            self.assertEqual(self._tier(), "pro")
+
+    def test_unset_dedicated_account_falls_back_to_owner_pool(self):
+        # No dedicated account: must behave exactly as before. A free workspace's
+        # effective_billing_id is free_ws_*, which resolver_plan treats as Free.
+        Workspace.objects.filter(id=self.workspace.id).update(billing_id=None)
+
+        async def fake_plan(**kwargs):
+            self.assertTrue(str(kwargs.get("billing_id", "")).startswith("free_ws_"))
+            return None
+
+        with patch("apps.workspaces.selectors.resolver_plan", fake_plan):
+            self.assertEqual(self._tier(), "free")
+
+
 class BillingStatusAccessTests(BillingStatusTestBase):
     """Any member may ask; nobody else may."""
 
