@@ -115,23 +115,31 @@ class User(AbstractBaseUser, PermissionsMixin):
     def auth_methods(self) -> set[str]:
         """Enabled auth methods for this account.
 
-        Password and OPAQUE are alternatives: an enrolled account has
-        ``opaque`` only, because enrollment clears the password hash. Only the
-        new CLI enrolls, so a record means the user upgraded deliberately. Old
-        clients keep working on accounts that never enrolled, and need to know
-        nothing about OPAQUE. OAuth identities never unlock the vault and stay
-        unaffected.
+        Auth state is a method SET, not a single provider. An account can hold
+        a password and one or more social identities at once, so signing in with
+        Google never removes the password path. Password and OPAQUE stay
+        alternatives: enrollment clears the password hash, so an enrolled
+        account has ``opaque`` only. OAuth identities never unlock the vault.
         """
         methods: set[str] = set()
+        if self.has_usable_password():
+            methods.add("password")
+        if self.opaque_record and self.opaque_registered_at:
+            methods.add("opaque")
+
+        # Legacy single-provider accounts predate SocialIdentity.
         provider = (self.auth_provider or "email").lower()
         if provider == "google":
             methods.add("oauth_google")
         elif provider == "github":
             methods.add("oauth_github")
-        elif self.has_usable_password():
-            methods.add("password")
-        if self.opaque_record and self.opaque_registered_at:
-            methods.add("opaque")
+
+        if self.pk:
+            for social_provider in self.social_identities.values_list("provider", flat=True):
+                if social_provider == "google":
+                    methods.add("oauth_google")
+                elif social_provider == "github":
+                    methods.add("oauth_github")
         return methods
 
     @property
@@ -182,6 +190,43 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     def __str__(self):
         return self.full_name
+
+
+class SocialIdentity(BaseModel):
+    """A linked social login (Google or GitHub) for an account.
+
+    Separate from ``User.auth_provider`` so an account can hold a password and
+    one or more social identities at the same time. Linking a provider adds a
+    row; it never clears the password factor.
+    """
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="social_identities",
+        help_text="Account this social identity signs in to",
+    )
+    provider = models.CharField(max_length=20, choices=AUTH_PROVIDERS)
+    provider_user_id = models.CharField(
+        max_length=255,
+        help_text="Stable subject id from the provider (Google sub, GitHub id)",
+    )
+
+    class Meta:
+        verbose_name = _("Social Identity")
+        verbose_name_plural = _("Social Identities")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_user_id"],
+                name="uniq_social_identity_provider_subject",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["provider", "provider_user_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.provider_user_id}"
 
 
 class OpaqueLoginChallenge(BaseModel):

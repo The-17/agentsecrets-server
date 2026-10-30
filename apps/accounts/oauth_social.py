@@ -264,32 +264,41 @@ def _github_identity(code: str, redirect_uri: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _resolve_user(provider: str, identity: dict[str, Any]) -> User:
-    """Find the account for this social identity, or create one.
+    """Find or create the account for this social identity.
 
-    Runs inside ``sync_to_async``: plain ORM, no awaits.
+    Runs inside ``sync_to_async``: plain ORM, no awaits. Linking is additive:
+    an existing email+password account gains a SocialIdentity row and keeps its
+    password method.
     """
-    user = (
-        User.objects.filter(
-            auth_provider=provider,
+    from .models import SocialIdentity
+
+    linked = (
+        SocialIdentity.objects.filter(
+            provider=provider,
             provider_user_id=identity["provider_user_id"],
         )
-        .order_by("created_at")
+        .select_related("user")
         .first()
     )
-    if user is not None:
-        if not user.is_active:
+    if linked is not None:
+        if not linked.user.is_active:
             raise AuthenticationError("Account is inactive")
-        return user
+        return linked.user
 
     email = identity["email"].strip().lower()
     existing = User.objects.filter(email__iexact=email).first()
     if existing is not None:
-        # Do not re-point an existing account: the single auth_provider column
-        # would drop its current login method. Ask the user to use it instead.
-        raise ConflictError(
-            "An account with this email already exists. Sign in with your "
-            "existing method, then link this provider from settings."
+        if not existing.is_active:
+            raise AuthenticationError("Account is inactive")
+        SocialIdentity.objects.get_or_create(
+            provider=provider,
+            provider_user_id=identity["provider_user_id"],
+            defaults={"user": existing},
         )
+        if not existing.is_email_verified:
+            existing.is_email_verified = True
+            existing.save(update_fields=["is_email_verified"])
+        return existing
 
     user = User(
         email=email,
@@ -302,6 +311,11 @@ def _resolve_user(provider: str, identity: dict[str, Any]) -> User:
     )
     user.set_unusable_password()
     user.save()
+    SocialIdentity.objects.create(
+        user=user,
+        provider=provider,
+        provider_user_id=identity["provider_user_id"],
+    )
     return user
 
 

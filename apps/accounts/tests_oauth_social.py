@@ -101,14 +101,29 @@ class ResolveUserTests(TestCase):
         self.assertEqual(first.pk, again.pk)
         self.assertEqual(User.objects.count(), 1)
 
-    def test_refuses_to_link_existing_email_account(self):
-        User.objects.create_user(
+    def test_links_existing_email_account_and_keeps_password(self):
+        existing = User.objects.create_user(
             first_name="Old", last_name="User", email="taken@example.com", password="password123"
         )
-        with self.assertRaises(ConflictError):
-            oauth_social._resolve_user(
-                "github", self._identity(email="taken@example.com")
-            )
+        existing.is_email_verified = True
+        existing.save()
+
+        linked = oauth_social._resolve_user(
+            "github", self._identity(email="taken@example.com")
+        )
+
+        self.assertEqual(linked.pk, existing.pk)
+        self.assertTrue(linked.has_usable_password())
+        self.assertEqual(linked.auth_methods, {"password", "oauth_github"})
+
+    def test_linked_account_signs_in_by_social_identity(self):
+        existing = User.objects.create_user(
+            first_name="Old", last_name="User", email="taken@example.com", password="password123"
+        )
+        oauth_social._resolve_user("github", self._identity(email="taken@example.com"))
+        again = oauth_social._resolve_user("github", self._identity(email="taken@example.com"))
+        self.assertEqual(again.pk, existing.pk)
+        self.assertEqual(User.objects.count(), 1)
 
 
 class ExchangeAndLoginTests(TestCase):
