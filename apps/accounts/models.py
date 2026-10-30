@@ -2,6 +2,7 @@
 import uuid
 
 # Django
+from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
 from django.utils.translation import gettext_lazy as _
@@ -163,6 +164,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         refresh["billing_id"] = self.billing_id
         refresh["is_staff"] = self.is_staff
         refresh["is_superuser"] = self.is_superuser
+        # Connect (v6) extensibility hooks, A4: structured, versioned claims.
+        # These are additive and safe for older clients, which ignore them.
+        refresh["iss"] = getattr(settings, "OAUTH_ISSUER_BASE_URL", "") or "agentsecrets"
+        refresh["sub"] = str(self.id)
+        refresh["principal_type"] = "human"
+        refresh["jti"] = uuid.uuid4().hex
+        refresh["claims_version"] = 1
+        refresh["on_behalf_of"] = None
         if recovery:
             # Marks a session opened by proof of vault-key possession rather
             # than a password. Only such a session may reset the password

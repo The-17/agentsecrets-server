@@ -189,6 +189,22 @@ class ExchangeAndLoginTests(TestCase):
                 )
 
 
+class TokenClaimsTests(TestCase):
+    def test_tokens_carry_connect_claims(self):
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        user = User.objects.create_user(
+            first_name="Claim", last_name="User", email="claim@example.com", password="password123"
+        )
+        access = user.tokens()["access"]
+        payload = AccessToken(access)
+        self.assertEqual(payload["sub"], str(user.id))
+        self.assertEqual(payload["principal_type"], "human")
+        self.assertEqual(payload["claims_version"], 1)
+        self.assertIn("jti", payload)
+        self.assertIsNone(payload["on_behalf_of"])
+
+
 class OAuthEndpointTests(TestCase):
     @override_settings(**GOOGLE_ON)
     def test_authorize_endpoint_returns_url_and_state(self):
