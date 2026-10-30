@@ -164,6 +164,75 @@ class AccountService:
         return resp
 
     @staticmethod
+    async def initialize_keys(
+        *,
+        user: User,
+        public_key: str,
+        encrypted_private_key: str,
+        key_salt: str,
+        password: str | None = None,
+    ) -> dict[str, Any]:
+        """Set encryption keys on an account that has none, and create its
+        personal workspace.
+
+        Exists for social sign-up: a Google/GitHub account is created without
+        keys, a workspace, or a password factor. The client calls this once,
+        when the user chooses a master vault password during onboarding. The
+        password, when provided, becomes the account's password factor; the
+        keys are stored exactly as registration would have stored them.
+        """
+        from .models import User as UserModel
+
+        def _apply() -> dict[str, Any]:
+            with transaction.atomic():
+                db_user = UserModel.objects.select_for_update().get(id=user.id)
+                if db_user.public_key:
+                    raise ConflictError(
+                        "Encryption keys are already set up for this account"
+                    )
+                if password:
+                    if db_user.opaque_record and db_user.opaque_registered_at:
+                        raise ConflictError(
+                            "This account signs in with OPAQUE and cannot add a password"
+                        )
+                    db_user.set_password(password)
+                db_user.public_key = public_key
+                db_user.encrypted_private_key = encrypted_private_key
+                db_user.key_salt = encryption_service.encrypt(key_salt) if key_salt else None
+                db_user.save()
+
+                workspace = Workspace.objects.create(
+                    name=f"{db_user.first_name}'s Workspace",
+                    owner=db_user,
+                    type=WorkspaceType.PERSONAL,
+                )
+                workspace_key = Fernet.generate_key()
+                try:
+                    pk_bytes = base64.b64decode(public_key)
+                    sealed = SealedBox(PublicKey(pk_bytes))
+                    ewk = base64.b64encode(sealed.encrypt(workspace_key)).decode("utf-8")
+                except Exception as e:
+                    logger.error("Failed to encrypt workspace key: %s", type(e).__name__)
+                    ewk = base64.b64encode(workspace_key).decode("utf-8")
+                Membership.objects.create(
+                    user=db_user,
+                    workspace=workspace,
+                    role=MembershipRole.OWNER,
+                    status=MembershipStatus.ACTIVE,
+                    encrypted_workspace_key=ewk,
+                )
+                return {
+                    "workspace": {
+                        "id": str(workspace.id),
+                        "name": workspace.name,
+                        "type": workspace.type,
+                    },
+                    "public_key": public_key,
+                }
+
+        return await sync_to_async(_apply, thread_sensitive=True)()
+
+    @staticmethod
     async def authenticate_user(*, request: Any, email: str, password: str) -> tuple[User, dict[str, Any], str, str | None]:
         """
         Authenticates a user, issues JWT tokens, stamps activity, and returns credentials.

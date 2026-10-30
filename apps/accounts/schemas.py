@@ -247,6 +247,41 @@ class VaultUpdateSchema(Schema):
     vault: dict
 
 
+class InitializeKeysSchema(Schema):
+    """First-time key setup for accounts created without keys (social sign-up).
+
+    The client generates the keypair locally and sends the public key plus the
+    private key sealed under the master vault password. ``password`` is
+    optional; when present it becomes the account's password factor.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    public_key: str
+    encrypted_private_key: str
+    key_salt: str
+    password: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return sanitize_and_normalize_password(v, min_length=8)
+
+
+class KeyMaterialResponseSchema(Schema):
+    """Key material a JWT-authenticated session needs to unlock its own vault.
+
+    The ciphertext is sealed under the master password (or the vault's
+    password envelope), so holding it without the password decrypts nothing.
+    """
+    public_key: Optional[str] = None
+    encrypted_private_key: Optional[str] = None
+    key_salt: Optional[str] = None
+    vault: Optional[dict] = None
+    vault_version: int = 0
+
+
 class RecoveryChallengeSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 

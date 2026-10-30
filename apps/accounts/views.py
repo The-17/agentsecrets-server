@@ -41,8 +41,11 @@ from .schemas import (
     VaultUpdateSchema,
     VaultResponseSchema,
     RecoveryChallengeResponseSchema,
+    InitializeKeysSchema,
+    KeyMaterialResponseSchema,
 )
 from apps.common.exceptions import AuthenticationError
+from apps.common.services.encryption import EncryptionService as encryption_service
 from .selectors import AccountSelector
 from .services import AccountService
 from .opaque_services import OpaqueService
@@ -242,6 +245,56 @@ class AuthController:
             vault=data.vault,
         )
         return CustomResponse.success(message="Vault updated", data=result)
+
+    @route.post(
+        "/keys/initialize/",
+        response={200: DataResponse[dict], 409: ErrorResponse, 422: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def initialize_keys(self, request, data: InitializeKeysSchema):
+        """First-time key setup for accounts created without keys.
+
+        Social sign-up creates an account with no keypair, workspace, or
+        password factor. The client calls this once, during onboarding, after
+        the user chooses a master vault password. It is a no-op-with-409 for
+        accounts that already have keys.
+        """
+        result = await AccountService.initialize_keys(
+            user=request.auth,
+            public_key=data.public_key,
+            encrypted_private_key=data.encrypted_private_key,
+            key_salt=data.key_salt,
+            password=data.password,
+        )
+        return CustomResponse.success(message="Encryption keys initialized", data=result)
+
+    @route.get(
+        "/keymaterial/",
+        response={200: DataResponse[KeyMaterialResponseSchema]},
+        auth=JWTAuth(),
+    )
+    async def get_key_material(self, request):
+        """Return this session's own key material so it can unlock locally.
+
+        A social login returns no key material by design (identity-only). To
+        unlock the vault afterwards, the client fetches the ciphertexts here
+        and decrypts them with the master password the user types. The server
+        never sees that password, and the ciphertext alone decrypts nothing.
+        """
+        from .models import User
+
+        user = await User.objects.aget(id=request.auth.id)
+        key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
+        return CustomResponse.success(
+            message="Key material retrieved",
+            data={
+                "public_key": user.public_key,
+                "encrypted_private_key": user.encrypted_private_key,
+                "key_salt": key_salt,
+                "vault": user.vault,
+                "vault_version": user.vault_version or 0,
+            },
+        )
 
     @route.post("/recover/challenge/", response={200: DataResponse[RecoveryChallengeResponseSchema], 429: ErrorResponse})
     async def recover_challenge(self, request, data: RecoveryChallengeSchema):
