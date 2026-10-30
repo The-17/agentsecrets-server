@@ -70,6 +70,23 @@ class LoginSchema(Schema):
         return sanitize_and_normalize_password(v, min_length=0)
 
 
+class SocialExchangeSchema(Schema):
+    """Exchange an OAuth authorization code for a login token pair."""
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    redirect_uri: str
+    state: str
+
+
+class SocialAuthorizeResponseSchema(Schema):
+    """Authorize URL plus the signed state the client must echo on exchange."""
+    model_config = ConfigDict(extra="forbid")
+
+    authorize_url: str
+    state: str
+
+
 class LogoutSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 

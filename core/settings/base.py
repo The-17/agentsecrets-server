@@ -209,6 +209,16 @@ BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
 OAUTH_ISSUER_BASE_URL = config(
     "OAUTH_ISSUER_BASE_URL", default=config("PUBLIC_BASE_URL", default="")
 )
+
+# Social login (Google / GitHub) — v4 identity providers. Fail closed: when the
+# provider's client id/secret are unset OR the feature flag is False, the
+# /auth/oauth endpoints return 503 and never fall back to password login.
+OAUTH_GOOGLE_ENABLED = config("OAUTH_GOOGLE_ENABLED", default=False, cast=bool)
+OAUTH_GITHUB_ENABLED = config("OAUTH_GITHUB_ENABLED", default=False, cast=bool)
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="")
+GOOGLE_CLIENT_SECRET = config("GOOGLE_CLIENT_SECRET", default="")
+GITHUB_CLIENT_ID = config("GITHUB_CLIENT_ID", default="")
+GITHUB_CLIENT_SECRET = config("GITHUB_CLIENT_SECRET", default="")
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
 
 # OPAQUE (RFC 9807) server crypto runs in the Go sidecar (cmd/opaque-sidecar in

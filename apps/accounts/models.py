@@ -24,6 +24,7 @@ def slugify_two_fields(self):
 
 AUTH_PROVIDERS = [
         ('google', 'Google'),
+        ('github', 'GitHub'),
         ('email', 'Email')
     ]
 
@@ -170,6 +171,13 @@ class User(AbstractBaseUser, PermissionsMixin):
         indexes = [
             models.Index(fields=['last_active_at']),
             models.Index(fields=['billing_id']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['auth_provider', 'provider_user_id'],
+                condition=models.Q(provider_user_id__isnull=False),
+                name='uniq_auth_provider_provider_user_id'
+            )
         ]
     
     def __str__(self):
