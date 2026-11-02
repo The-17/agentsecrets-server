@@ -25,6 +25,7 @@ from apps.common.exceptions import (
     BodyValidationError,
     ConflictError,
     RateLimitError,
+    EmailChangeDisabledError,
 )
 from apps.common.services.encryption import EncryptionService as encryption_service
 from .vault import (
@@ -479,6 +480,11 @@ class AccountService:
         # ORM so every field used below is loaded on the async connection.
         user = await User.objects.aget(pk=user.pk)
 
+        # The account email is the OPAQUE credential identifier, so a change
+        # would invalidate the registered record and lock the account out.
+        if getattr(user, "opaque_registered_at", None):
+            raise EmailChangeDisabledError()
+
         if user.pending_email == new_email and user.pending_email:
             raise BodyValidationError("email", "A change to that address is already pending")
 
@@ -516,6 +522,11 @@ class AccountService:
         """Swap the account email once the code sent to the new address matches."""
         # Re-fetch for the same deferred-field reason as request_email_change.
         user = await User.objects.aget(pk=user.pk)
+
+        # Defense in depth: the account could have enrolled between request and
+        # confirm. The credential identifier would change, so refuse.
+        if getattr(user, "opaque_registered_at", None):
+            raise EmailChangeDisabledError()
 
         if user.pending_email != new_email:
             raise BodyValidationError("email", "No pending change to that address")

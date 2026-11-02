@@ -6,7 +6,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import OneTimePassword, User
 from apps.accounts.services import AccountService
-from apps.common.exceptions import AuthenticationError, ConflictError
+from apps.common.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    EmailChangeDisabledError,
+)
 
 
 class EmailChangeTests(TestCase):
@@ -84,6 +88,29 @@ class EmailChangeTests(TestCase):
             async_to_sync(AccountService.confirm_email_change)(
                 user=self.user, new_email="new@example.com", otp=111111
             )
+
+    @override_settings(DEBUG=True)
+    def test_request_rejected_for_opaque_enrolled_account(self):
+        # The email is the OPAQUE credential identifier; changing it would
+        # invalidate the registered record and lock the account out.
+        self.user.opaque_registered_at = "2026-01-01T00:00:00Z"
+        self.user.save(update_fields=["opaque_registered_at"])
+        with self.assertRaises(EmailChangeDisabledError):
+            async_to_sync(AccountService.request_email_change)(
+                user=self.user, new_email="new@example.com"
+            )
+        self.user.refresh_from_db()
+        self.assertIsNone(self.user.pending_email)
+
+    def test_confirm_rejected_for_opaque_enrolled_account(self):
+        self.user.opaque_registered_at = "2026-01-01T00:00:00Z"
+        self.user.save(update_fields=["opaque_registered_at"])
+        with self.assertRaises(EmailChangeDisabledError):
+            async_to_sync(AccountService.confirm_email_change)(
+                user=self.user, new_email="new@example.com", otp=123456
+            )
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "old@example.com")
 
     def test_route_requires_jwt(self):
         # No auth header: the JWTAuth wall must reject.

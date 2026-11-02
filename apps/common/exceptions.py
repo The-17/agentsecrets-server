@@ -127,6 +127,18 @@ class PasswordLoginDisabledError(RequestError):
         super().__init__("password_login_disabled", err_msg, 401)
 
 
+class EmailChangeDisabledError(RequestError):
+    """Email change is refused while OPAQUE is enrolled.
+
+    The account email is the OPAQUE credential identifier, so changing it would
+    invalidate the registered record and lock the account out (the password
+    factor is removed once enrolled). Refuse rather than strand the user.
+    """
+
+    def __init__(self, err_msg: str = "Email change is not available for OPAQUE-enrolled accounts."):
+        super().__init__("email_change_disabled", err_msg, 409)
+
+
 # ==========================================
 # EXCEPTION HANDLERS
 # ==========================================
