@@ -72,6 +72,33 @@ def _bearer_for_sync(user: User) -> str:
     return sync_to_async(_bearer_for)(user)
 
 
+async def _sync_subscription(billing_id: str, bearer: str) -> dict | None:
+    """Ask the resolver to reconcile this account from Polar's API.
+
+    The pull-based heal for a missed webhook: the resolver fetches the live
+    subscription from Polar and activates the store only when Polar reports an
+    active/trialing plan. Returns the resolver's subscription payload, or None
+    when the resolver predates ``/v1/billing/sync`` or is unreachable, so the
+    caller keeps the read it already has.
+    """
+    import urllib.parse
+    import urllib.request
+
+    base = getattr(settings, "RESOLVER_URL", "https://resolver.agentsecrets.tech").rstrip("/")
+    query = urllib.parse.urlencode({"billing_id": billing_id})
+
+    def _do() -> dict | None:
+        req = urllib.request.Request(f"{base}/v1/billing/sync?{query}", method="POST")
+        req.add_header("Authorization", f"Bearer {bearer}")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    return await sync_to_async(_do, thread_sensitive=False)()
+
+
 class WorkspaceService:
     """
     Domain service layer for Workspace creation, updates, deletions, and memberships.
@@ -196,6 +223,16 @@ class WorkspaceService:
         except Exception as exc:
             logger.error(f"BILLING_RECONCILE_FAILED: could not reach resolver for workspace {workspace_id}: {exc}")
             return {"tier": getattr(ws, "tier", "free"), "billing_id": ws.billing_id, "status": "resolver_unreachable"}
+
+        # A missed webhook leaves the store reporting Free even though Polar has
+        # a live subscription. Ask the resolver to reconcile from Polar before
+        # trusting the read. Best effort: an older resolver without the sync
+        # endpoint, or a Polar hiccup, leaves the read above untouched.
+        if not (remote_tier == "pro" and remote_status == "active"):
+            healed = await _sync_subscription(ws.billing_id, await _bearer_for_sync(user))
+            if healed:
+                remote_tier = (healed.get("plan") or remote_tier).lower()
+                remote_status = (healed.get("status") or remote_status).lower()
 
         # Mirror only a resolver-confirmed active Pro account. Anything else
         # (free, cancelled, past_due, unreachable) leaves the workspace free so it

@@ -476,6 +476,71 @@ class WorkloadEnvRevocationAndBillingMirrorTests(TestCase):
         self.ws.refresh_from_db()
         self.assertEqual(self.ws.tier, "free")
 
+    def test_reconcile_heals_stale_store_from_polar_sync(self):
+        # A missed webhook leaves the resolver store reporting Free while Polar
+        # has a live subscription. Reconcile must ask the resolver to sync from
+        # Polar, then mirror the healed Pro plan.
+        import json as _json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from django.test import override_settings
+
+        init = self.client.post(
+            f"/api/workspaces/{self.ws.id}/billing/initialize/",
+            content_type="application/json",
+            **self.auth_headers,
+        )
+        self.assertEqual(init.status_code, 200)
+
+        calls = []
+
+        class ResolverHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, payload):
+                body = _json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                calls.append(("GET", self.path))
+                # Stale store: the webhook was missed, so the read says Free.
+                self._send({"plan": "free", "status": "active"})
+
+            def do_POST(self):
+                calls.append(("POST", self.path))
+                # The resolver pulled the live subscription from Polar.
+                self._send({"plan": "pro", "status": "active"})
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ResolverHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with override_settings(RESOLVER_URL=f"http://127.0.0.1:{port}"):
+                rec = self.client.post(
+                    f"/api/workspaces/{self.ws.id}/billing/reconcile/",
+                    content_type="application/json",
+                    **self.auth_headers,
+                )
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+        self.assertEqual(rec.status_code, 200)
+        self.assertEqual(rec.json()["data"]["tier"], "pro")
+        self.assertTrue(
+            any(method == "POST" and "/v1/billing/sync" in path for method, path in calls),
+            f"reconcile did not call the resolver sync endpoint: {calls}",
+        )
+
+        self.ws.refresh_from_db()
+        self.assertEqual(self.ws.tier, "pro")
+
 
 class AuditIngestWorkspaceBindingTests(TestCase):
     """Phase C-4: audit/forensic ingest must be scoped to the caller's own workspaces
