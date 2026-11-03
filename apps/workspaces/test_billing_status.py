@@ -153,12 +153,15 @@ class BillingStatusDedicatedAccountTests(BillingStatusTestBase):
             self.assertEqual(self._tier(), "pro")
 
     def test_unset_dedicated_account_falls_back_to_owner_pool(self):
-        # No dedicated account: must behave exactly as before. A free workspace's
-        # effective_billing_id is free_ws_*, which resolver_plan treats as Free.
+        # No dedicated account: the read must go to the owner's pool, never to a
+        # ws_bill_* account. Users carry a mandatory billing_id, so the pool id is
+        # the owner's usr_* value rather than the free_ws_* placeholder.
         Workspace.objects.filter(id=self.workspace.id).update(billing_id=None)
+        owner_pool_id = self.owner.billing_id
 
         async def fake_plan(**kwargs):
-            self.assertTrue(str(kwargs.get("billing_id", "")).startswith("free_ws_"))
+            self.assertEqual(kwargs.get("billing_id"), owner_pool_id)
+            self.assertFalse(str(kwargs.get("billing_id", "")).startswith("ws_bill_"))
             return None
 
         with patch("apps.workspaces.selectors.resolver_plan", fake_plan):
