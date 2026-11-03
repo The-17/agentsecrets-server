@@ -9,7 +9,6 @@ from apps.accounts.services import AccountService
 from apps.common.exceptions import (
     AuthenticationError,
     ConflictError,
-    EmailChangeDisabledError,
 )
 
 
@@ -90,27 +89,31 @@ class EmailChangeTests(TestCase):
             )
 
     @override_settings(DEBUG=True)
-    def test_request_rejected_for_opaque_enrolled_account(self):
-        # The email is the OPAQUE credential identifier; changing it would
-        # invalidate the registered record and lock the account out.
+    def test_request_allowed_for_opaque_enrolled_account(self):
+        # The email is the OPAQUE credential id, but the client re-enrolls OPAQUE
+        # under the new email after confirmation, so the change is allowed.
         self.user.opaque_registered_at = "2026-01-01T00:00:00Z"
         self.user.save(update_fields=["opaque_registered_at"])
-        with self.assertRaises(EmailChangeDisabledError):
-            async_to_sync(AccountService.request_email_change)(
-                user=self.user, new_email="new@example.com"
-            )
+        async_to_sync(AccountService.request_email_change)(
+            user=self.user, new_email="new@example.com"
+        )
         self.user.refresh_from_db()
-        self.assertIsNone(self.user.pending_email)
+        self.assertEqual(self.user.pending_email, "new@example.com")
 
-    def test_confirm_rejected_for_opaque_enrolled_account(self):
+    @override_settings(DEBUG=True)
+    def test_confirm_allowed_for_opaque_enrolled_account(self):
         self.user.opaque_registered_at = "2026-01-01T00:00:00Z"
         self.user.save(update_fields=["opaque_registered_at"])
-        with self.assertRaises(EmailChangeDisabledError):
-            async_to_sync(AccountService.confirm_email_change)(
-                user=self.user, new_email="new@example.com", otp=123456
-            )
+        async_to_sync(AccountService.request_email_change)(
+            user=self.user, new_email="new@example.com"
+        )
+        otp = OneTimePassword.objects.get(user=self.user)
+        async_to_sync(AccountService.confirm_email_change)(
+            user=self.user, new_email="new@example.com", otp=int(otp.code)
+        )
         self.user.refresh_from_db()
-        self.assertEqual(self.user.email, "old@example.com")
+        self.assertEqual(self.user.email, "new@example.com")
+        self.assertIsNone(self.user.pending_email)
 
     def test_route_requires_jwt(self):
         # No auth header: the JWTAuth wall must reject.

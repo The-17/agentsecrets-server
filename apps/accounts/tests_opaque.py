@@ -156,3 +156,39 @@ class ChallengeLifecycleTests(TestCase):
             service._issue_challenge(self.user.id)
         with self.assertRaises(Exception):
             service._issue_challenge(self.user.id)
+
+
+class EnrollmentClearsLegacyBlobTests(TestCase):
+    """Enrollment must clear the legacy encrypted_private_key/key_salt blob.
+
+    That blob is an independent offline-attack surface: a database copy plus
+    the password would decrypt the account key without the OPAQUE export key,
+    which defeats the v2 split-share vault. Clearing it is a prerequisite for
+    the v2 security property to hold.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="clearblob@example.com",
+            first_name="Clear",
+            last_name="Blob",
+            password="correct-horse-battery",
+            terms_agreement=True,
+        )
+        self.user.encrypted_private_key = "legacy-enc-blob"
+        self.user.key_salt = "legacy-salt"
+        self.user.save(update_fields=["encrypted_private_key", "key_salt"])
+
+    def test_store_record_clears_legacy_blob(self):
+        # _apply_enrollment is the atomic write that _store_record performs once
+        # the sidecar returns the record, so it exercises the clearing directly
+        # without needing a live sidecar.
+        OpaqueService()._apply_enrollment(self.user.id, "new-opaque-record")
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.opaque_record, "new-opaque-record")
+        self.assertIsNotNone(self.user.opaque_registered_at)
+        self.assertFalse(self.user.has_usable_password())
+        # The legacy blob is gone in the same transaction that removes the password.
+        self.assertEqual(self.user.encrypted_private_key, "")
+        self.assertEqual(self.user.key_salt, "")

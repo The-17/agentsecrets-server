@@ -87,6 +87,11 @@ class OpaqueService:
             raise OpaqueUnavailableError(str(exc)) from exc
 
         stored = result["record"]
+        self._apply_enrollment(user_id, stored)
+        return stored
+
+    def _apply_enrollment(self, user_id, stored: str) -> None:
+        """Write the OPAQUE record and remove the password + legacy blob atomically."""
         from .models import User
 
         with transaction.atomic():
@@ -98,8 +103,23 @@ class OpaqueService:
             db_user.opaque_record = stored
             db_user.opaque_registered_at = timezone.now()
             db_user.set_unusable_password()
-            db_user.save(update_fields=["opaque_record", "opaque_registered_at", "password"])
-        return stored
+            # The legacy encrypted_private_key/key_salt blob is an independent
+            # offline-attack surface: a database copy plus the password (or a
+            # weak password) would decrypt the account key from it without the
+            # OPAQUE export key, which would defeat the v2 split-share vault.
+            # Enrollment is the moment the vault supersedes that blob, so clear
+            # it in the same transaction that removes the password.
+            db_user.encrypted_private_key = ""
+            db_user.key_salt = ""
+            db_user.save(
+                update_fields=[
+                    "opaque_record",
+                    "opaque_registered_at",
+                    "password",
+                    "encrypted_private_key",
+                    "key_salt",
+                ]
+            )
 
     # -- login ----------------------------------------------------------
 
