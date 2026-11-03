@@ -19,6 +19,10 @@ from nacl.signing import VerifyKey
 from apps.common.exceptions import AuthenticationError, BodyValidationError
 
 VAULT_VERSION = 1
+# Version 2 splits the Vault Key into a password share and an OPAQUE-share
+# envelope. Accepting it is additive: the server never rewrites a stored vault,
+# so existing v1 records and older clients are unaffected.
+SUPPORTED_VAULT_VERSIONS = (1, 2)
 AAD_VERSION = 1
 RECOVERY_CHALLENGE_TTL = 300
 MIN_ARGON_MEMORY = 64 * 1024
@@ -32,6 +36,9 @@ ENVELOPE_KDFS = {
     "password": "argon2id",
     "recovery": "hkdf-sha256",
     "passkey": "hkdf-sha256",
+    # The OPAQUE-share envelope wraps a share under a KEK derived from the
+    # OPAQUE export key. It is client-held, never sent, and never escrowed.
+    "opaque": "hkdf-sha256",
 }
 
 
@@ -203,7 +210,7 @@ def _validate_envelope(envelope: Any, seen_ids: set[str]) -> None:
 def validate_vault(vault: Any, *, user_id: str) -> None:
     if not isinstance(vault, dict):
         _fail("vault must be an object")
-    if vault.get("version") != VAULT_VERSION:
+    if vault.get("version") not in SUPPORTED_VAULT_VERSIONS:
         _fail("unsupported vault version")
     vault_version = vault.get("vault_version")
     if not isinstance(vault_version, int) or isinstance(vault_version, bool) or vault_version < 1:
@@ -243,6 +250,15 @@ def validate_vault(vault: Any, *, user_id: str) -> None:
         _fail("vault has no usable factor")
     if vault["recovery_confirmed"] and invisible == 0:
         _fail("recovery cannot be confirmed without a recovery factor")
+    if vault.get("version") == 2:
+        # A split-share vault without both shares can never be unlocked, and
+        # it must name the minimum client so an older CLI fails with a clear
+        # upgrade message instead of a parse error.
+        types = {envelope["type"] for envelope in envelopes}
+        if "password" not in types or "opaque" not in types:
+            _fail("version 2 vault needs a password and an opaque envelope")
+        if not vault.get("min_client_version"):
+            _fail("version 2 vault must set min_client_version")
     if vault.get("min_client_version") is not None:
         value = vault["min_client_version"]
         if not isinstance(value, str) or len(value) > 32:
@@ -275,6 +291,12 @@ def validate_vault_update(
 
     if current.get("vault_pubkey") != next_vault.get("vault_pubkey"):
         _fail("vault public key is immutable")
+
+    # Regression guard: a vault may upgrade (v1 -> v2) but never downgrade.
+    # Combined with the proof check, this makes it impossible for an old or
+    # buggy client to overwrite a v2 vault with v1 semantics.
+    if next_vault.get("version", 1) < current.get("version", 1):
+        _fail("vault format version cannot decrease")
     current_password, _ = _envelope_types(current)
     next_password, next_invisible = _envelope_types(next_vault)
 

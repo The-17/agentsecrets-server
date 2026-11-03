@@ -126,6 +126,9 @@ class OpaqueUnavailableTests(TestCase):
         data = body.get("data", body)
         self.assertFalse(data["opaque"])
         self.assertTrue(data["password"])
+        # The v2 split-share vault is accepted additively; clients gate the
+        # v1 -> v2 migration on this capability so it can be paused in rollout.
+        self.assertTrue(data["vault_v2"])
 
 
 class ChallengeLifecycleTests(TestCase):

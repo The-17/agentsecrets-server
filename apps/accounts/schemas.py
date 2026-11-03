@@ -126,6 +126,10 @@ class OpaqueCapabilitySchema(Schema):
     email_link: bool = False
     # OPAQUE is reported only when OPAQUE_SIDECAR_URL is configured and a sidecar is reachable.
     opaque: bool = False  # Set dynamically by the endpoint.
+    # Whether the server accepts the v2 split-share vault. Clients gate the
+    # v1 -> v2 migration on this, so migration can be paused during rollout
+    # without shipping a client change.
+    vault_v2: bool = True
 
 
 class OpaqueRegisterStartSchema(Schema):

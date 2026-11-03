@@ -395,6 +395,7 @@ class AuthController:
                 oauth_google=bool(getattr(settings, "OAUTH_GOOGLE_ENABLED", False)),
                 email_link=bool(getattr(settings, "EMAIL_LINK_ENABLED", False)),
                 opaque=opaque,
+                vault_v2=True,
             ),
         )
 
