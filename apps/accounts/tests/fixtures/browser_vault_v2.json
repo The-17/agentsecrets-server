@@ -1,0 +1,68 @@
+{
+  "user_id": "11111111-2222-3333-4444-555555555555",
+  "password": "correct horse battery staple",
+  "export_key": "L7ZacRpuSjZEa1tO6wkMO4BZthPQQETlgycxXFRdg0M=",
+  "private_key": "xCLbC87x9jsj/c8hSnKjzOq2ayA0P9BEXnZqb2ySoKo=",
+  "vault": {
+    "version": 2,
+    "vault_version": 1,
+    "vault_pubkey": "k1wcfFIWYYucHiAXQ3EopJBTigHIZ7xyT1B8AifoE7M=",
+    "private_key": {
+      "nonce": "+giJbwzZz/oKiGKT",
+      "ciphertext": "p3bIJBQoS4HEIMNYhSnU/T1itiXBHbUPHJeQoqksYAYmHjOFnBn6TNA1YlTcwZd0",
+      "aad_version": 1
+    },
+    "bridge": {
+      "kdf": "hkdf-sha256",
+      "salt": "z8Dw8VmEULuRUtwZSkjhK2BCg++NIZS7oKOtNB/XJ+o=",
+      "nonce": "88YBY2JTooPzaRwI",
+      "ciphertext": "Li2mJ0T0CE7jAi8hwZyLDxXmaLtlKXAdJeiputEI2DM63aLL0KMxxeZ8F3uyiBI9",
+      "aad_version": 1
+    },
+    "envelopes": [
+      {
+        "id": "env_650d8408f73e5bb2",
+        "type": "password",
+        "kdf": "argon2id",
+        "params": {
+          "m": 65536,
+          "t": 3,
+          "p": 4
+        },
+        "salt": "iNEdpJvkWQFN1+rNSWLKcvwDIDoJIa/8J3utTGZoLXk=",
+        "nonce": "uk+pXUHw5MLajzgs",
+        "ciphertext": "yOzExqgbfMBEK7BgDcwzZRlDTWX0fUsuPTwBM568b9wO5vRb7PMryf9WbJqHzoYo",
+        "aad_version": 1,
+        "created_at": "2026-11-03T07:42:24.576Z"
+      },
+      {
+        "id": "env_8da9c2f8821a5caf",
+        "type": "opaque",
+        "kdf": "hkdf-sha256",
+        "salt": "BQ5GJphyd7ExXG5e7TqMb4t9Y7u7GvJG6oK+ObbxEEs=",
+        "nonce": "/XKAC0BUMwcKFip4",
+        "ciphertext": "9sJbm8YAqME5z8oO2gm4Hg71xk/mZXSuLx3XDlGHUhB4nb4IkXtjsgivKRGL2Rj1",
+        "aad_version": 1,
+        "created_at": "2026-11-03T07:42:24.880Z"
+      },
+      {
+        "id": "env_7845eca631cdf161",
+        "type": "recovery",
+        "kdf": "hkdf-sha256",
+        "salt": "XapRe7/wv5+yc/aSp40VMWkwZhgaJFgTDub1JKDu8Ok=",
+        "nonce": "JAqkGcaHXzhvZOZk",
+        "ciphertext": "5YAYzZ3TxyOL/29wqhOKms3hur0tNhdZicFvHkF6Hli8OAyoueSn0GhcvETe7PEA",
+        "aad_version": 1,
+        "created_at": "2026-11-03T07:42:24.887Z"
+      }
+    ],
+    "recovery_confirmed": false,
+    "min_client_version": "4.1.0",
+    "proof": {
+      "signature": "RIHgUPpGweHuJyYOAJBCGTn/wfgu69naWnGIo7+ifEKUOuafhlDGkk3SgyHnLvf2rw4v3o4/Em7F53M2uWE0DQ==",
+      "timestamp": 1793691744,
+      "nonce": "Rx4HDoBFeEH5H1bCdG7HEg=="
+    }
+  },
+  "recovery_key": "R993NED-N4C7MH5-9CE6531-1XAFX0K-417Y1T9-2NDF416-5D0XEMD-8H08MZ0"
+}
