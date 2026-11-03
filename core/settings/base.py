@@ -3,6 +3,23 @@ from decouple import config
 from datetime import timedelta
 import os
 
+
+def _env_bool(name, default=False):
+    """Read an environment boolean, failing closed on any unrecognized value.
+
+    decouple's cast=bool raises ValueError on a non-boolean string, which would
+    crash the entire build if an env var is mis-set (e.g. a copy of the key name
+    used as its own value). For a feature flag the safe behaviour is to disable
+    the feature rather than abort the deploy.
+    """
+    raw = config(name, default=None, cast=str)
+    if raw is None:
+        return default
+    raw = raw.strip().lower()
+    if raw in ("1", "true", "yes", "on", "t", "y"):
+        return True
+    return False
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SECRET_KEY = config("SECRET_KEY")
@@ -213,8 +230,8 @@ OAUTH_ISSUER_BASE_URL = config(
 # Social login (Google / GitHub) — v4 identity providers. Fail closed: when the
 # provider's client id/secret are unset OR the feature flag is False, the
 # /auth/oauth endpoints return 503 and never fall back to password login.
-OAUTH_GOOGLE_ENABLED = config("OAUTH_GOOGLE_ENABLED", default=False, cast=bool)
-OAUTH_GITHUB_ENABLED = config("OAUTH_GITHUB_ENABLED", default=False, cast=bool)
+OAUTH_GOOGLE_ENABLED = _env_bool("OAUTH_GOOGLE_ENABLED", default=False)
+OAUTH_GITHUB_ENABLED = _env_bool("OAUTH_GITHUB_ENABLED", default=False)
 GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="")
 GOOGLE_CLIENT_SECRET = config("GOOGLE_CLIENT_SECRET", default="")
 GITHUB_CLIENT_ID = config("GITHUB_CLIENT_ID", default="")
