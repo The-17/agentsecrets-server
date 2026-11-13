@@ -42,8 +42,8 @@ production key set. It must never be rotated.
 
 A normal deployment needs **one** credential in its host environment: the
 workload token in `AGENTSECRETS_TOKEN`. This was true before CLI commit
-`6996470` and it is still true for a token minted with `--no-pop` and for every
-token minted before that commit.
+`6996470`. Tokens minted before that commit carry no `cnf_key` and still work
+with one value. Tokens minted after it are proof-of-possession bound.
 
 The resolver's rule is in `internal/server/pop.go`:
 
@@ -66,36 +66,32 @@ So the accurate statement is:
 
 | Token | Values needed on the host | Works today |
 |---|---|---|
-| Pre-PoP or `--no-pop` | `AGENTSECRETS_TOKEN` | yes |
-| Default PoP-bound | `AGENTSECRETS_TOKEN` + `AGENTSECRETS_POP_SEED` | yes |
-| Default PoP-bound | `AGENTSECRETS_TOKEN` alone | **no, 401** |
+| Pre-`6996470` (no `cnf_key`) | `AGENTSECRETS_TOKEN` | yes |
+| PoP-bound (default since `6996470`) | `AGENTSECRETS_TOKEN` + `AGENTSECRETS_POP_SEED` | yes |
+| PoP-bound | `AGENTSECRETS_TOKEN` alone | **no, 401** |
 
-An earlier note in this conversation said two credentials were unavoidable.
-That was wrong. One is enough with an unbound token. It is only PoP-bound
-tokens that need the seed, and the seed cannot be fetched from AgentSecrets
-because fetching it already requires the proof.
+The `--no-pop` escape hatch was removed. `agent create` now always binds the
+token and prints `AGENTSECRETS_POP_SEED` next to the token; the host copies that
+seed into its platform secret manager beside the token. The seed cannot be
+fetched from AgentSecrets because fetching it already requires the proof, so a
+static second secret on the host is the current delivery mechanism. One value
+is enough only for legacy unbound tokens.
 
-### Regression to fix
+### Regression (closed)
 
-Default-on PoP broke the standard raw-injection path: mint an agent on a
-laptop, put `AGENTSECRETS_TOKEN` in CI or a server, run `env --cloud`. The
-documented "CLI-only for now, raw injection deferred" decision assumed raw
-tokens stay unbound. Default-on PoP made every newly minted token bound, so
-the deferred case now fails rather than merely being deferred.
+Default-on PoP broke the raw-injection path: mint an agent on a laptop, put
+`AGENTSECRETS_TOKEN` in CI or a server, run `env --cloud`. With no seed on the
+host, `pop.AttachProof` sent no proof and the resolver returned 401. The fix is
+the printed seed: the host holds the token and `AGENTSECRETS_POP_SEED`, and
+`LoadSignerFromEnvironment` makes `AttachProof` use it. This is option A from the
+original discussion, now shipped. Locked by `TestSeedEnvReproducesProofKey` (CLI)
+and `TestWorkloadEnv_PoPBoundTokenRequiresProof` (resolver).
 
-Options, in order of preference:
-
-1. Finish key transport (open ADR `1cf67af8`). Bind the proof key to the
-   workload's platform identity instead of a static second secret, for example
-   a resolver-issued short-lived seed or a seed sealed to a host KMS key. This
-   is the only option that keeps one credential and keeps PoP on.
-2. Add an explicit `agent token issue --raw` that mints an unbound token with
-   a loud warning, so the raw path is a named product decision instead of an
-   undiscovered escape hatch.
-3. Keep `--no-pop` as the raw path and add a per-agent `require_pop` policy in
-   the cloud so a missing `cnf_key` can be refused where it matters.
-
-Until option 1 lands, the control-plane bootstrap uses a `--no-pop` token.
+Remaining open work (option 1): key transport that avoids a static second
+secret entirely, binding the proof key to the workload's platform identity
+(open ADR `1cf67af8`) so a leaked token alone is still useless without a host
+identity. Until then, the control-plane bootstrap uses a PoP-bound token with
+its seed in `AGENTSECRETS_POP_SEED`.
 
 ## Design
 
@@ -164,10 +160,10 @@ that do not require cloud changes:
 - Add `require_pop` as a per-agent policy in the resolver once key transport
   lands, then migrate the bootstrap token to a bound one.
 
-The CLI flag itself is not the risk. An attacker who can run `agent create
---no-pop` already holds the user's CLI session and keychain. The real risk is
-the resolver accepting tokens with no `cnf_key` at all, which a server-side
-policy must close.
+The second static secret is not the risk on its own. The real risk is the
+resolver accepting tokens with no `cnf_key` at all, which a server-side
+policy must close. A leaked token alone is useless because it cannot prove
+possession without the seed.
 
 ## Phases
 
@@ -186,14 +182,15 @@ Each phase ends in a check that can fail.
 4. **Transfer the project.** `agentsecrets project transfer secretsapi --to
    "The Seventeen Engineering"`. Only after phase 1, because the transfer
    re-encrypts the only copy of the OPAQUE key material.
-5. **Prove raw delivery.** Mint a scoped `--no-pop` agent, put only
-   `AGENTSECRETS_TOKEN` in a scratch container, run `agentsecrets env
-   --cloud -- env`, and confirm the delivered names match. Check: no
-   credential values in logs or in the resolver response body.
+5. **Prove raw delivery.** Mint a scoped agent, copy the printed
+   `AGENTSECRETS_POP_SEED` beside `AGENTSECRETS_TOKEN` in a scratch container,
+   run `agentsecrets env --cloud -- env`, and confirm the delivered names
+   match. Check: no credential values in logs or in the resolver response body.
 6. **Implement the two-stage entrypoint** with the bootstrap set. Check all
    three cold-start cases above, plus the live health probe.
 7. **Close the PoP gap.** Land ADR `1cf67af8` key transport and the
-   `require_pop` policy, then migrate the bootstrap token off `--no-pop`.
+   `require_pop` policy, so a host needs no static seed and a leaked token
+   alone is still useless without a platform identity.
 
 ## Open decisions
 
