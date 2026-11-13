@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import uuid
 from typing import Any
+from django.conf import settings
 from django.db import transaction
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import User
+from apps.accounts.verification import enforce_creation_cap
 from apps.common.exceptions import (
     NotFoundError,
     AuthorizationError,
@@ -53,6 +55,15 @@ class ProjectService:
             raise AuthorizationError("Only workspace owners and admins can create projects")
         if await Project.objects.filter(workspace=membership.workspace, name=data.name).aexists():
             raise BodyValidationError("name", f"Project '{data.name}' already exists in this workspace")
+
+        current_projects = await Project.objects.filter(workspace=membership.workspace).acount()
+        await enforce_creation_cap(
+            user,
+            current=current_projects,
+            adding=1,
+            limit=settings.UNVERIFIED_PROJECT_LIMIT,
+            what="projects in a workspace",
+        )
 
         project = await Project.objects.acreate(
             workspace=membership.workspace,
@@ -337,6 +348,15 @@ class SecretService:
                     project=project, environment=env, key=k, value=enc, policy={},
                     rotation_type="none", rotation_binding={},
                 ))
+
+        current_secrets = await Secret.objects.filter(project=project, environment=env).acount()
+        await enforce_creation_cap(
+            user,
+            current=current_secrets,
+            adding=len(to_create),
+            limit=settings.UNVERIFIED_SECRET_LIMIT,
+            what="secrets in a project",
+        )
 
         @sync_to_async
         def _save_secrets():

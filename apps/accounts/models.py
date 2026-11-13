@@ -173,6 +173,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         refresh["jti"] = uuid.uuid4().hex
         refresh["claims_version"] = 1
         refresh["on_behalf_of"] = None
+        # Snapshot of the flag at issue time, so a client can show the right
+        # next step without a second call. Gates never trust this claim: a
+        # token minted before verification would otherwise stay blocked after
+        # the user verified, until they logged in again.
+        refresh["email_verified"] = bool(self.is_email_verified)
         if recovery:
             # Marks a session opened by proof of vault-key possession rather
             # than a password. Only such a session may reset the password

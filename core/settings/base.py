@@ -226,6 +226,11 @@ BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
 REQUIRE_EMAIL_VERIFICATION = _env_bool("REQUIRE_EMAIL_VERIFICATION", default=False)
 EMAIL_CODE_TTL_MINUTES = config("EMAIL_CODE_TTL_MINUTES", default=15, cast=int)
 EMAIL_CODE_MAX_ATTEMPTS = config("EMAIL_CODE_MAX_ATTEMPTS", default=5, cast=int)
+
+# Soft caps for unverified accounts. They refuse the creation that would cross
+# the line; nothing already stored is hidden, locked, or removed.
+UNVERIFIED_PROJECT_LIMIT = config("UNVERIFIED_PROJECT_LIMIT", default=1, cast=int)
+UNVERIFIED_SECRET_LIMIT = config("UNVERIFIED_SECRET_LIMIT", default=5, cast=int)
 # Public base URL advertised in OAuth discovery metadata
 # (/.well-known/oauth-authorization-server). MUST be the real public domain —
 # never localhost — or agent clients cannot complete login. Honors the

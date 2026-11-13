@@ -15,6 +15,7 @@ from django.utils import timezone
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import User
+from apps.accounts.verification import require_verified_email
 from apps.common.exceptions import (
     NotFoundError,
     AuthorizationError,
@@ -304,6 +305,7 @@ class MemberService:
         um = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
         if um.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace admins can invite members.")
+        await require_verified_email(user, action="invite members")
 
         results = []
         any_created = False
@@ -619,6 +621,7 @@ class AgentService:
         project_id: uuid.UUID | None = None,
     ) -> tuple[dict[str, Any], str, str]:
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        await require_verified_email(user, action="use cloud mode")
 
         # A project-scoped agent must be bound to a project inside its own
         # workspace. The project_id arrives from the URL, so without this check a
@@ -714,6 +717,7 @@ class AgentService:
         if not exists:
             raise NotFoundError("Agent not found")
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        await require_verified_email(user, action="mint workload tokens for cloud mode")
 
         expires_at = timezone.now() + timezone.timedelta(days=data.expires_in_days) if data.expires_in_days else None
         raw_token = secrets_module.token_urlsafe(32)
