@@ -46,6 +46,7 @@ from .schemas import (
     AgentTokenCreateSchema,
     InternalAgentVerifySchema,
 )
+from . import invites
 from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector, AuditSelector
 
 logger = logging.getLogger("apps.workspaces")
@@ -307,88 +308,106 @@ class MemberService:
             raise AuthorizationError("Only workspace admins can invite members.")
         await require_verified_email(user, action="invite members")
 
+        workspace = await Workspace.objects.filter(id=workspace_id).afirst()
+        if workspace is None:
+            raise NotFoundError("Workspace not found")
+
         results = []
         any_created = False
-        # Running seat counter so one batch can't overshoot the cap; the
-        # check reconciles billing on a would-block (self-heals stale tier)
-        # and raises only when the workspace is truly out of seats.
-        seats = await Membership.objects.filter(
-            workspace_id=workspace_id,
-            status__in=[MembershipStatus.ACTIVE, MembershipStatus.INVITED],
-        ).acount()
-        cap_known_open = False
 
-        for invite in entries:
+        for entry in entries:
+            email = invites.normalize_email(entry.email)
             try:
-                invitee = await User.objects.filter(email=invite.email).afirst()
-                if not invitee:
-                    results.append({"email": invite.email, "error": "User not found"})
-                    continue
+                existing_m = await Membership.objects.filter(
+                    workspace_id=workspace_id, user__email=email
+                ).afirst()
 
-                existing_m = await Membership.objects.filter(user=invitee, workspace_id=workspace_id).afirst()
-                if existing_m:
-                    if invite.encrypted_workspace_key and (not existing_m.encrypted_workspace_key or existing_m.status == MembershipStatus.INVITED):
-                        existing_m.encrypted_workspace_key = invite.encrypted_workspace_key
-                        existing_m.status = MembershipStatus.ACTIVE
-                        existing_m.role = invite.role
-                        await existing_m.asave(update_fields=["encrypted_workspace_key", "status", "role", "updated_at"])
-                        logger.info(
-                            f"MEMBER_KEY_UPDATED: Updated encrypted key and activated workspace {workspace_id} for user {invite.email}"
-                        )
-                        results.append({"email": invite.email, "error": ""})
-                        any_created = True
-                        await ActivityLogService.record_target(
-                            user=user,
-                            workspace_id=workspace_id,
-                            project_id=None,
-                            action="member.invited",
-                            target_type="member",
-                            target_id=invitee.id,
-                            target_name=invite.email,
-                            metadata={"role": str(invite.role), "reactivated": True},
-                        )
-                        continue
-
-                    results.append({"email": invite.email, "error": "Already a member"})
-                    continue
-
-                if not cap_known_open and seats >= MemberService.FREE_MEMBER_LIMIT:
-                    try:
-                        await MemberService.check_member_cap(user=user, workspace_id=workspace_id)
-                        cap_known_open = True
-                    except BodyValidationError:
-                        results.append({"email": invite.email, "error": MemberService.LIMIT_MESSAGE})
-                        continue
-
-                await Membership.objects.acreate(
-                    user=invitee,
+                # An accepted invitation waiting for its key. This is the
+                # second half of the handoff: the admin's client seals the
+                # workspace key on refresh, which unlocks the workspace.
+                if await invites.finalize(
                     workspace_id=workspace_id,
-                    role=invite.role,
-                    status=MembershipStatus.ACTIVE if invite.encrypted_workspace_key else MembershipStatus.INVITED,
-                    encrypted_workspace_key=invite.encrypted_workspace_key or "",
+                    email=email,
+                    encrypted_workspace_key=entry.encrypted_workspace_key,
+                ):
+                    results.append({"email": entry.email, "error": ""})
+                    any_created = True
+                    await ActivityLogService.record_target(
+                        user=user,
+                        workspace_id=workspace_id,
+                        project_id=None,
+                        action="member.invited",
+                        target_type="member",
+                        target_id=getattr(existing_m, "user_id", None),
+                        target_name=email,
+                        metadata={"role": str(entry.role), "key_sealed": True},
+                    )
+                    continue
+
+                if existing_m:
+                    # Legacy INVITED rows from before invitations had their own
+                    # record. Keep healing them when a key arrives.
+                    if entry.encrypted_workspace_key and (
+                        not existing_m.encrypted_workspace_key
+                        or existing_m.status == MembershipStatus.INVITED
+                    ):
+                        existing_m.encrypted_workspace_key = entry.encrypted_workspace_key
+                        existing_m.status = MembershipStatus.ACTIVE
+                        existing_m.role = entry.role
+                        await existing_m.asave(
+                            update_fields=[
+                                "encrypted_workspace_key",
+                                "status",
+                                "role",
+                                "updated_at",
+                            ]
+                        )
+                        results.append({"email": entry.email, "error": ""})
+                        any_created = True
+                        continue
+
+                    results.append({"email": entry.email, "error": "Already a member"})
+                    continue
+
+                # One batch cannot overshoot the cap: reserved seats are
+                # counted on every iteration, so an earlier invite in the same
+                # request already consumes its seat.
+                try:
+                    await invites.check_capacity(user=user, workspace=workspace)
+                except BodyValidationError:
+                    results.append(
+                        {"email": entry.email, "error": MemberService.LIMIT_MESSAGE}
+                    )
+                    continue
+
+                await invites.issue(
+                    workspace=workspace,
+                    inviter=user,
+                    email=email,
+                    role=entry.role,
                 )
                 logger.info(
-                    f"MEMBER_INVITED: User invited to workspace {workspace_id} with role {invite.role}"
+                    f"MEMBER_INVITED: Invitation sent to {email} for workspace {workspace_id}"
                 )
-                results.append({"email": invite.email, "error": ""})
+                results.append({"email": entry.email, "error": ""})
                 any_created = True
-                seats += 1
                 await ActivityLogService.record_target(
                     user=user,
                     workspace_id=workspace_id,
                     project_id=None,
                     action="member.invited",
                     target_type="member",
-                    target_id=invitee.id,
-                    target_name=invite.email,
-                    metadata={"role": str(invite.role)},
+                    target_id=None,
+                    target_name=email,
+                    metadata={"role": str(entry.role)},
                 )
 
             except Exception as e:
                 logger.error(
                     f"MEMBER_INVITE_FAILED: Error inviting to workspace {workspace_id}: {type(e).__name__}"
                 )
-                results.append({"email": invite.email, "error": str(e)})
+                message = getattr(e, "err_msg", None) or str(e)
+                results.append({"email": entry.email, "error": message})
 
         return results, any_created
 

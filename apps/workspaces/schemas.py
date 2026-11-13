@@ -449,3 +449,38 @@ class ForensicDecisionReplaySchema(Schema):
     steps: Dict[str, Any] = {}
     verified: bool = True
 
+
+class PendingInviteSchema(Schema):
+    id: str
+    workspace_id: str
+    workspace_name: str
+    role: str
+    invited_by: str = ""
+    expires_at: str
+
+
+class InvitePreviewSchema(Schema):
+    workspace_name: str
+    invited_by: str = ""
+    email: str
+    role: str
+    expires_at: str
+    has_account: bool
+
+
+class InviteAcceptSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    token: Optional[str] = None
+    code: Optional[str] = None
+    workspace_id: Optional[str] = None
+
+
+class InviteAcceptResultSchema(Schema):
+    workspace_id: str
+    workspace_name: str
+    role: str
+    # True until an admin client seals the workspace key. The workspace is
+    # visible but every secret in it stays unreadable until then.
+    key_pending: bool
+

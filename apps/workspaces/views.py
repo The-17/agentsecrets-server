@@ -14,6 +14,7 @@ from ninja import Query
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from apps.common.exceptions import BodyValidationError
+from . import invites
 from .schemas import (
     WorkspaceCreateSchema,
     WorkspaceUpdateSchema,
@@ -57,6 +58,10 @@ from .schemas import (
     AuditSummaryResponseSchema,
     WorkspaceActivityItemSchema,
     ForensicDecisionReplaySchema,
+    PendingInviteSchema,
+    InvitePreviewSchema,
+    InviteAcceptSchema,
+    InviteAcceptResultSchema,
 )
 from .selectors import (
     WorkspaceSelector,
@@ -1001,4 +1006,34 @@ class ForensicController:
     async def replay_log(self, request, log_id: str):
         data = await ForensicLogSelector.get_replay(log_id=log_id, user=request.auth)
         return CustomResponse.success(message="Forensic decision replay retrieved successfully", data=data)
+
+
+@api_controller("/invites", tags=["Invites"], auth=JWTAuth())
+class InviteController:
+    """Acceptance side of a workspace invitation.
+
+    The invite email links here. Nothing is granted until the invited address
+    accepts; an unaccepted invitation never appears in anyone's workspace list.
+    """
+
+    @route.get("/pending/", response={200: DataResponse[List[PendingInviteSchema]]})
+    async def list_pending(self, request):
+        data = await invites.pending_for(user=request.auth)
+        return CustomResponse.success(message="Pending invitations retrieved", data=data)
+
+    @route.post("/accept/", response={200: DataResponse[InviteAcceptResultSchema], 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse})
+    async def accept_invite(self, request, data: InviteAcceptSchema):
+        workspace_id = uuid.UUID(data.workspace_id) if data.workspace_id else None
+        result = await invites.accept(
+            user=request.auth,
+            token=data.token,
+            code=data.code,
+            workspace_id=workspace_id,
+        )
+        return CustomResponse.success(message="Invitation accepted", data=result)
+
+    @route.get("/preview/", auth=None, response={200: DataResponse[InvitePreviewSchema], 404: ErrorResponse})
+    async def preview_invite(self, request, token: str):
+        data = await invites.preview(token=token)
+        return CustomResponse.success(message="Invitation retrieved", data=data)
 

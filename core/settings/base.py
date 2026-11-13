@@ -231,6 +231,13 @@ EMAIL_CODE_MAX_ATTEMPTS = config("EMAIL_CODE_MAX_ATTEMPTS", default=5, cast=int)
 # the line; nothing already stored is hidden, locked, or removed.
 UNVERIFIED_PROJECT_LIMIT = config("UNVERIFIED_PROJECT_LIMIT", default=1, cast=int)
 UNVERIFIED_SECRET_LIMIT = config("UNVERIFIED_SECRET_LIMIT", default=5, cast=int)
+
+# Workspace invitations. The link and the six-digit code both expire, and only
+# the address the invite was sent to can accept either. WEBSITE_BASE_URL is
+# where the acceptance page lives; it is also the signup target for an invited
+# person who has no account yet.
+INVITE_TTL_DAYS = config("INVITE_TTL_DAYS", default=7, cast=int)
+WEBSITE_BASE_URL = config("WEBSITE_BASE_URL", default="https://agentsecrets.tech")
 # Public base URL advertised in OAuth discovery metadata
 # (/.well-known/oauth-authorization-server). MUST be the real public domain —
 # never localhost — or agent clients cannot complete login. Honors the

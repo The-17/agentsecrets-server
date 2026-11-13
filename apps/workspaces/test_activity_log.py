@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from asgiref.sync import async_to_sync
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -211,6 +211,7 @@ class ActivityCoverageTests(ActivityTestBase):
             ).exists()
         )
 
+    @override_settings(DEBUG=True)
     def test_member_invite_and_removal_are_recorded(self):
         invitee = User.objects.create_user(
             email="activity_invitee@example.com",
@@ -239,7 +240,16 @@ class ActivityCoverageTests(ActivityTestBase):
         self.assertEqual(invited.target_name, invitee.email)
         self.assertEqual(invited.target_type, "member")
 
-        membership = Membership.objects.get(workspace=self.workspace, user=invitee)
+        # Inviting grants nothing; the invitee gets a membership only by
+        # accepting. Removal is the behavior under test here, so seed the
+        # membership directly instead of replaying the acceptance flow.
+        membership = Membership.objects.create(
+            workspace=self.workspace,
+            user=invitee,
+            role=MembershipRole.MEMBER,
+            status=MembershipStatus.ACTIVE,
+            encrypted_workspace_key="invitee_key",
+        )
         res = self.client.delete(
             f"/api/workspaces/{self.workspace.id}/members/{membership.id}/",
             **self.headers,

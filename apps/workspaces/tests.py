@@ -43,6 +43,10 @@ class WorkspacesAPITests(TestCase):
 
     def test_workspace_and_member_lifecycle(self):
         """Test workspace creation, member invites, and allowlist operations."""
+        from unittest.mock import patch
+
+        from apps.workspaces.models import InviteStatus, WorkspaceInvite
+
         # 1. Create Workspace
         ws_res = self.client.post(
             "/api/workspaces/",
@@ -53,7 +57,8 @@ class WorkspacesAPITests(TestCase):
         self.assertEqual(ws_res.status_code, 201)
         ws_id = ws_res.json()["data"]["id"]
 
-        # 2. Invite Member
+        # 2. Invite Member. The key is only sealed once the invitee accepts,
+        # so this creates a pending invitation, not a membership.
         invite_payload = {
             "invites": [
                 {
@@ -63,13 +68,22 @@ class WorkspacesAPITests(TestCase):
                 }
             ]
         }
-        inv_res = self.client.post(
-            f"/api/workspaces/{ws_id}/members/",
-            data=invite_payload,
-            content_type="application/json",
-            **self.auth_headers,
-        )
+        with patch("apps.common.email.brevo.send", return_value=True):
+            inv_res = self.client.post(
+                f"/api/workspaces/{ws_id}/members/",
+                data=invite_payload,
+                content_type="application/json",
+                **self.auth_headers,
+            )
         self.assertEqual(inv_res.status_code, 201)
+        self.assertTrue(
+            WorkspaceInvite.objects.filter(
+                workspace_id=ws_id, status=InviteStatus.PENDING
+            ).exists()
+        )
+        self.assertFalse(
+            Membership.objects.filter(workspace_id=ws_id, user=self.member).exists()
+        )
 
         # 3. Add to Allowlist
         al_res = self.client.post(
