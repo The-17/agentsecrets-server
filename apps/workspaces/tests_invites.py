@@ -257,6 +257,24 @@ class InviteTests(TestCase):
 
     @override_settings(DEBUG=True)
     @patch("apps.workspaces.invites._generate_code", return_value="123456")
+    def test_awaiting_key_is_visible_to_admins_only(self, _code):
+        self._invite("new@example.com")
+        user = make_user("new@example.com")
+        self.assertEqual(self._accept(user, code="123456").status_code, 200)
+
+        owner_view = self.client.get(
+            "/api/invites/awaiting-key/", **self.headers
+        ).json()["data"]
+        self.assertEqual(len(owner_view), 1)
+        self.assertEqual(owner_view[0]["email"], "new@example.com")
+
+        member_view = self.client.get(
+            "/api/invites/awaiting-key/", **self._auth(user)
+        ).json()["data"]
+        self.assertEqual(member_view, [])
+
+    @override_settings(DEBUG=True)
+    @patch("apps.workspaces.invites._generate_code", return_value="123456")
     def test_preview_masks_the_address_and_needs_no_auth(self, _code):
         make_user("someone@example.com")
         with patch(

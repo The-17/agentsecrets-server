@@ -459,6 +459,14 @@ class PendingInviteSchema(Schema):
     expires_at: str
 
 
+class AwaitingKeyInviteSchema(Schema):
+    id: str
+    workspace_id: str
+    workspace_name: str
+    email: str
+    role: str
+
+
 class InvitePreviewSchema(Schema):
     workspace_name: str
     invited_by: str = ""

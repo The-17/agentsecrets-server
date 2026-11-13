@@ -169,6 +169,40 @@ async def preview(*, token: str) -> dict:
     }
 
 
+async def awaiting_key_for(*, user: User) -> list[dict]:
+    """Invitations this caller can finish, because they admin the workspace.
+
+    These are the accepted invitations whose workspace key still has to be
+    sealed by a client that holds it. That is the admin's terminal, on its
+    next refresh.
+    """
+    admin_workspaces = [
+        ws_id
+        async for ws_id in Membership.objects.filter(
+            user=user,
+            status=MembershipStatus.ACTIVE,
+            role__in=[MembershipRole.OWNER, MembershipRole.ADMIN],
+        ).values_list("workspace_id", flat=True)
+    ]
+    if not admin_workspaces:
+        return []
+
+    items = []
+    async for invite in WorkspaceInvite.objects.filter(
+        workspace_id__in=admin_workspaces, status=InviteStatus.ACCEPTED
+    ).select_related("workspace"):
+        items.append(
+            {
+                "id": str(invite.id),
+                "workspace_id": str(invite.workspace_id),
+                "workspace_name": invite.workspace.name,
+                "email": invite.email,
+                "role": invite.role,
+            }
+        )
+    return items
+
+
 async def pending_for(*, user: User) -> list[dict]:
     """Invitations waiting on this signed-in address."""
     items = []

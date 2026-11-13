@@ -59,6 +59,7 @@ from .schemas import (
     WorkspaceActivityItemSchema,
     ForensicDecisionReplaySchema,
     PendingInviteSchema,
+    AwaitingKeyInviteSchema,
     InvitePreviewSchema,
     InviteAcceptSchema,
     InviteAcceptResultSchema,
@@ -1015,6 +1016,12 @@ class InviteController:
     The invite email links here. Nothing is granted until the invited address
     accepts; an unaccepted invitation never appears in anyone's workspace list.
     """
+
+    @route.get("/awaiting-key/", response={200: DataResponse[List[AwaitingKeyInviteSchema]]})
+    async def list_awaiting_key(self, request):
+        """Accepted invitations whose workspace key this caller must seal."""
+        data = await invites.awaiting_key_for(user=request.auth)
+        return CustomResponse.success(message="Invitations awaiting a key", data=data)
 
     @route.get("/pending/", response={200: DataResponse[List[PendingInviteSchema]]})
     async def list_pending(self, request):
