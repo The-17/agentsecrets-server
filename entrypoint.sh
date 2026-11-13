@@ -53,6 +53,19 @@ if [ -n "$OPAQUE_SIDECAR_TOKEN" ] && [ -n "$OPAQUE_SERVER_KEY_MATERIAL" ]; then
     fi
 elif [ -n "$OPAQUE_SIDECAR_URL" ]; then
     echo "OPAQUE_SIDECAR_URL is set without token or key material; OPAQUE endpoints will fail closed." >&2
+else
+    # A Docker deploy with no OPAQUE env vars still boots and still passes its
+    # healthcheck, but every signup and password login returns 503. Say so at
+    # startup so the operator sees it in the deploy log instead of hearing it
+    # from users. Do not fail the boot: read-only API traffic must keep working.
+    echo "================================================================" >&2
+    echo " WARNING: OPAQUE IS NOT CONFIGURED" >&2
+    echo " Account signup and password login will return HTTP 503." >&2
+    echo " Set OPAQUE_SIDECAR_TOKEN and OPAQUE_SERVER_KEY_MATERIAL in the" >&2
+    echo " deployment environment, then redeploy. Reuse the exact key" >&2
+    echo " material from the previous host: enrolled accounts cannot log" >&2
+    echo " in under freshly generated keys." >&2
+    echo "================================================================" >&2
 fi
 
 exec "$@"

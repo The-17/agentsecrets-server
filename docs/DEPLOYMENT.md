@@ -7,7 +7,7 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 ## 1. Prerequisites
 
 - **Python**: 3.10 or higher
-- **Database**: PostgreSQL 14+ (Recommended) or SQLite (Local testing)
+- **Database**: PostgreSQL 14+ (required; there is no SQLite fallback)
 - **AgentSecrets CLI**: Installed locally (`brew install The-17/tap/agentsecrets` or `npm install -g @the-17/agentsecrets`)
 - **Web Server / Reverse Proxy**: Caddy, Nginx, or Traefik with TLS termination
 
@@ -30,6 +30,8 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 | `POSTGRES_PASSWORD` | PostgreSQL database password | Strong generated password |
 | `POSTGRES_HOST` | PostgreSQL host address | `localhost` or `postgres.internal` |
 | `POSTGRES_PORT` | PostgreSQL port | `5432` |
+| `OPAQUE_SIDECAR_TOKEN` | Shared bearer token between Django and the OPAQUE sidecar | Random 32-byte base64 string |
+| `OPAQUE_SERVER_KEY_MATERIAL` | Long-term OPAQUE server keys (`sk:pk:oprf`, base64, colon-separated) | Generated once, see below |
 
 ### Optional / Advanced Security Keys:
 
@@ -37,7 +39,52 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 |---|---|---|
 | `RESOLVER_SERVICE_KEY` | Shared internal key for agent verification calls | `internal-secret-token` |
 | `CRON_SECRET` | Bearer token for scheduled metric computation | `cron-trigger-token` |
-| `LOG_LEVEL` | Application logging verbosity (`INFO`, `WARNING`, `ERROR`) | `INFO` |
+
+---
+
+## 2a. OPAQUE login on a Docker host
+
+Account signup and password login are handled by an OPAQUE sidecar that runs
+inside the same container. The Docker image already contains the binary. It
+starts only when **both** `OPAQUE_SIDECAR_TOKEN` and
+`OPAQUE_SERVER_KEY_MATERIAL` are present. With either missing, the container
+boots, its healthcheck passes, and every login attempt returns:
+
+```
+OPAQUE is not configured on this server (status 503)
+```
+
+`entrypoint.sh` sets `OPAQUE_SIDECAR_URL=http://127.0.0.1:8790` automatically.
+Do not set it by hand unless the sidecar runs elsewhere.
+
+Generate the two values once, on a trusted machine, from the CLI repo:
+
+```bash
+# key material: one line, format sk:pk:oprf
+go run ./cmd/opaque-sidecar -print-keys
+
+# bearer token
+head -c 32 /dev/urandom | base64
+```
+
+Set both as environment variables on the service (Render: **Environment** tab),
+then redeploy. Verify without reading platform logs:
+
+```bash
+curl -s https://your-host/api/status/health/ | jq '.components.opaque'
+# {"configured": true}
+```
+
+**Reuse the exact `OPAQUE_SERVER_KEY_MATERIAL` from the previous host.**
+An OPAQUE registration record is cryptographically bound to the server keys
+that created it. Freshly generated keys strand every enrolled account: they
+can no longer log in, and the only recovery is re-enrollment. If the previous
+host's value is unrecoverable, treat it as an incident and re-enroll accounts
+rather than quietly rotating.
+
+Keep the value identical across replicas and restarts, store it in the host's
+secret manager, and never commit it. Rotating it is a migration, not a config
+edit.
 
 ---
 

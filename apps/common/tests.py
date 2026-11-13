@@ -1,5 +1,5 @@
 from unittest.mock import AsyncMock, patch
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.core.cache import cache
 
 class StatusEndpointTests(TestCase):
@@ -71,6 +71,33 @@ class StatusEndpointTests(TestCase):
         response = self.client.get("/health/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "healthy")
+
+    @override_settings(OPAQUE_SIDECAR_URL="", OPAQUE_SIDECAR_TOKEN="")
+    def test_status_reports_unconfigured_opaque_without_failing_healthcheck(self):
+        """A Docker deploy with no OPAQUE env vars still serves the API, but
+        signup and login return 503. That state must be visible on /status/
+        instead of surfacing only when a user tries to log in."""
+        response = self.client.get("/api/status/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "healthy")
+
+        opaque = data["components"]["opaque"]
+        self.assertFalse(opaque["configured"])
+        self.assertIn("503", opaque["impact"])
+        self.assertIn("OPAQUE_SERVER_KEY_MATERIAL", opaque["impact"])
+
+    @override_settings(
+        OPAQUE_SIDECAR_URL="http://127.0.0.1:8790",
+        OPAQUE_SIDECAR_TOKEN="test-token",
+    )
+    def test_status_reports_configured_opaque(self):
+        response = self.client.get("/api/status/")
+        self.assertEqual(response.status_code, 200)
+        opaque = response.json()["components"]["opaque"]
+        self.assertTrue(opaque["configured"])
+        self.assertNotIn("impact", opaque)
+        self.assertNotIn("test-token", str(opaque))
 
     @patch("django.db.connection.cursor")
     def test_status_database_failure(self, mock_cursor):

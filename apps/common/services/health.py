@@ -399,6 +399,30 @@ class SystemHealthService:
             fs_details["error"] = str(e)
         return fs_ok, fs_details
 
+    @staticmethod
+    def check_opaque() -> Dict[str, Any]:
+        """Report whether the OPAQUE login backend is configured.
+
+        Configuration only, never a sidecar call: this endpoint is a cheap,
+        cached probe. The container healthcheck must keep passing when OPAQUE
+        is down so read-only API traffic survives, so this check is advisory
+        and is deliberately excluded from overall_healthy. It is exposed so a
+        new deployment can be verified without reading platform logs: an
+        unconfigured backend is otherwise silent until a user tries to log in.
+        """
+        url = getattr(settings, "OPAQUE_SIDECAR_URL", "") or ""
+        token = getattr(settings, "OPAQUE_SIDECAR_TOKEN", "") or ""
+        configured = bool(url and token)
+        details: Dict[str, Any] = {"configured": configured}
+        if not configured:
+            details["impact"] = (
+                "Signup and password login return 503. Set "
+                "OPAQUE_SIDECAR_TOKEN and OPAQUE_SERVER_KEY_MATERIAL, then "
+                "redeploy. Reuse the previous host's key material: enrolled "
+                "accounts cannot authenticate under fresh keys."
+            )
+        return details
+
     @classmethod
     def diagnose_system(cls) -> Tuple[int, Dict[str, Any]]:
         now = timezone.now()
@@ -420,6 +444,7 @@ class SystemHealthService:
         cache_ok, cache_details = cls.check_cache()
         encryption_ok, encryption_details = cls.check_encryption()
         fs_ok, fs_details = cls.check_filesystem()
+        opaque_details = cls.check_opaque()
 
         overall_healthy = (
             db_ok and db_write_ok and functional_ok and cache_ok and encryption_ok and fs_ok
@@ -453,6 +478,9 @@ class SystemHealthService:
                     "status": "healthy" if fs_ok else "unhealthy",
                     "details": fs_details,
                 },
+                # Advisory, not part of overall_healthy. A distinct shape so
+                # nobody reads it as another gating health component.
+                "opaque": opaque_details,
             },
             "system": {
                 "python_version": sys.version.split(" ")[0],
