@@ -41,8 +41,9 @@ from apps.workspaces.models import (
     MembershipRole,
     MembershipStatus,
 )
-from .models import User, OneTimePassword, VaultRecoveryChallenge
+from .models import User, VaultRecoveryChallenge, EmailChallengePurpose
 from .schemas import RegisterSchema
+from .email_challenges import consume, issue
 
 logger = logging.getLogger("apps.accounts")
 
@@ -153,10 +154,26 @@ class AccountService:
 
         user, workspace_data = await _create_user_and_workspace()
 
+        if settings.REQUIRE_EMAIL_VERIFICATION:
+            # Re-fetch on the async connection: the object above came from a
+            # sync_to_async thread and may carry deferred fields.
+            user = await User.objects.aget(pk=user.pk)
+            await issue(
+                user=user,
+                email=user.email,
+                purpose=EmailChallengePurpose.VERIFY_EMAIL,
+                subject="Verify your AgentSecrets email",
+                body=(
+                    "Your AgentSecrets verification code is {code}. "
+                    "It expires in 15 minutes. If you did not sign up, ignore this email."
+                ),
+            )
+
         resp: dict[str, Any] = {
             "email": data.email,
             "first_name": data.first_name,
             "last_name": data.last_name,
+            "email_verification_required": settings.REQUIRE_EMAIL_VERIFICATION,
         }
         if workspace_data:
             resp["workspace"] = workspace_data
@@ -442,13 +459,12 @@ class AccountService:
             raise AuthenticationError("Verification Failed")
         if user.is_email_verified:
             raise BodyValidationError("email", "Email already verified")
-        try:
-            record = await OneTimePassword.objects.aget(code=otp)
-        except OneTimePassword.DoesNotExist:
-            raise AuthenticationError("Verification Failed")
-        if record.user_id != user.id:
-            raise AuthenticationError("Verification Failed")
-
+        await consume(
+            user=user,
+            purpose=EmailChallengePurpose.VERIFY_EMAIL,
+            otp=otp,
+            email=email,
+        )
         user.is_email_verified = True
         await user.asave(update_fields=["is_email_verified"])
 
@@ -459,21 +475,25 @@ class AccountService:
             raise NotFoundError("User does not exist")
         if user.is_email_verified:
             raise BodyValidationError("email", "Email already verified")
+        await issue(
+            user=user,
+            email=email,
+            purpose=EmailChallengePurpose.VERIFY_EMAIL,
+            subject="Verify your AgentSecrets email",
+            body=(
+                "Your AgentSecrets verification code is {code}. "
+                "It expires in 15 minutes. If you did not sign up, ignore this email."
+            ),
+        )
 
     @staticmethod
     async def request_email_change(*, user, new_email: str) -> None:
         """Store a pending email and send a verification code to it.
 
-        The code is stored in the existing OneTimePassword row for the user.
-        Actual delivery goes through Brevo; until BREVO_API_KEY is configured on
-        the host, delivery is a no-op and the flow fails closed with a clear
-        message. This is the "groundwork" state: the endpoint and CLI exist, the
-        real send will land when Brevo is wired.
+        Delivery goes through Brevo. Until BREVO_API_KEY is configured on the
+        host the flow fails closed, so no pending address is stored that the
+        user cannot confirm.
         """
-        from apps.common.email.brevo import send as brevo_send
-        from apps.common.exceptions import RequestError
-        from django.conf import settings
-
         # request.auth can carry deferred fields; touching them in an async
         # context would trigger a synchronous refresh. Re-fetch with the async
         # ORM so every field used below is loaded on the async connection.
@@ -499,23 +519,18 @@ class AccountService:
         if pending_taken:
             raise ConflictError("Email already registered")
 
-        import secrets as _secrets
-
-        code = f"{_secrets.randbelow(1_000_000):06d}"
-        await OneTimePassword.objects.aupdate_or_create(user=user, defaults={"code": code})
+        await issue(
+            user=user,
+            email=new_email,
+            purpose=EmailChallengePurpose.EMAIL_CHANGE,
+            subject="Your AgentSecrets email change code",
+            body=(
+                "Your verification code is {code}. "
+                "It expires in 15 minutes. If you did not request this, ignore this email."
+            ),
+        )
         user.pending_email = new_email
         await user.asave(update_fields=["pending_email"])
-
-        delivered = brevo_send(
-            to=new_email,
-            subject="Your AgentSecrets email change code",
-            text=f"Your verification code is {code}. It expires shortly.",
-        )
-        if not delivered and not settings.DEBUG:
-            raise RequestError(
-                "Email delivery is not configured on this server; "
-                "the email change cannot complete yet."
-            )
 
     @staticmethod
     async def confirm_email_change(*, user, new_email: str, otp: int) -> None:
@@ -529,18 +544,20 @@ class AccountService:
         if user.pending_email != new_email:
             raise BodyValidationError("email", "No pending change to that address")
 
-        record = await OneTimePassword.objects.filter(user=user).afirst()
-        if record is None or record.code != str(otp):
-            raise AuthenticationError("Invalid or expired code")
-
         if await User.objects.aget_or_none(email=new_email):
             raise ConflictError("Email already registered")
+
+        await consume(
+            user=user,
+            purpose=EmailChallengePurpose.EMAIL_CHANGE,
+            otp=otp,
+            email=new_email,
+        )
 
         user.email = new_email
         user.is_email_verified = True
         user.pending_email = None
         await user.asave(update_fields=["email", "is_email_verified", "pending_email"])
-        await OneTimePassword.objects.filter(user=user).adelete()
 
     @staticmethod
     async def confirm_password_reset(*, uidb64: str, token: str) -> User:

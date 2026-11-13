@@ -5,6 +5,7 @@ import uuid
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 # Third-party
@@ -316,12 +317,40 @@ class OAuthAuthorizationCode(BaseModel):
         return f"oauth-code {self.client_id} for {self.user.email}"
 
 
+class EmailChallengePurpose(models.TextChoices):
+    """Which flow owns a one-time code.
+
+    A code issued to change an address must not be usable to verify signup, and
+    a signup code must not confirm an email change. The purpose is part of the
+    challenge, not a convention the caller remembers.
+    """
+
+    VERIFY_EMAIL = "verify_email", "Verify Email"
+    EMAIL_CHANGE = "email_change", "Email Change"
+
+
 class OneTimePassword(models.Model):
+    """One active email challenge per user.
+
+    ``email`` is the address the code was sent to. ``expires_at`` and
+    ``attempts`` bound reuse and online guessing. Legacy rows have no expiry;
+    they are treated as expired by the consumer, never as valid forever.
+    """
+
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     code = models.CharField(max_length=100)
+    purpose = models.CharField(
+        max_length=32,
+        choices=EmailChallengePurpose.choices,
+        default=EmailChallengePurpose.EMAIL_CHANGE,
+    )
+    email = models.EmailField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
 
     def __str__(self):
-        return self.code
+        return f"{self.purpose} challenge for {self.user.email}"
     
 
 class VaultRecoveryChallenge(models.Model):

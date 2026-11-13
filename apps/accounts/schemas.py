@@ -340,6 +340,7 @@ class UserSummarySchema(Schema):
     last_name: str
     public_key: Optional[str] = None
     billing_id: Optional[str] = None
+    email_verified: bool = False
 
 
 class RegisterResponseDataSchema(Schema):
@@ -347,6 +348,7 @@ class RegisterResponseDataSchema(Schema):
     first_name: str
     last_name: str
     workspace: Optional[WorkspaceSummarySchema] = None
+    email_verification_required: bool = False
 
 
 class LoginResponseDataSchema(Schema):

@@ -47,6 +47,9 @@ class ErrorCode:
     MEMBER_CANNOT_REMOVE_OWNER = "member_cannot_remove_owner"
     MEMBER_CANNOT_CHANGE_OWNER = "member_cannot_change_owner"
 
+    # DELIVERY ERRORS
+    EMAIL_DELIVERY_UNAVAILABLE = "email_delivery_unavailable"
+
     # AGENT-SPECIFIC ERRORS
     AGENT_NOT_FOUND = "agent_not_found"
     AGENT_TOKEN_NOT_FOUND = "agent_token_not_found"

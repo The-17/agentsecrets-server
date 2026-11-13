@@ -1,14 +1,13 @@
-"""Brevo transactional email client (groundwork).
+"""Brevo transactional email client.
 
-This is the delivery channel for flows that must prove control of an address
-(email change, future real email verification). It is intentionally NOT yet
-wired into any flow except as a no-op fallback.
+Delivery uses Brevo's HTTPS API (``POST /v3/smtp/email`` with an ``api-key``
+header). It is not an SMTP relay: no host, port, or SMTP credentials are read.
+The endpoint name is Brevo's own naming for transactional mail.
 
-When ``BREVO_API_KEY`` is set, ``send`` posts to Brevo's SMTP API. When it is
-unset, ``send`` logs locally and returns ``False`` so callers can hard-fail with
-a clear "email delivery not configured" message rather than silently dropping
-the mail. Once the key is set on a host, the only remaining wiring is the call
-site (today: ``AccountService.request_email_change``).
+When ``BREVO_API_KEY`` is set, ``send`` posts to that API. When it is unset,
+``send`` logs locally and returns ``False`` so callers can hard-fail with a
+clear "email delivery not configured" message rather than silently dropping the
+mail. Call sites live in ``apps.accounts.email_challenges``.
 """
 import logging
 

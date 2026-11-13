@@ -213,11 +213,19 @@ ROTATION_TOKEN = config("ROTATION_TOKEN", default="")
 RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
 
-# Brevo transactional email (groundwork). When BREVO_API_KEY is unset, the email
-# client is a no-op and flows that require delivery fail closed with a clear
-# message. Set both on a host to enable real email verification / email change.
+# Brevo transactional email. This is the HTTP API (api.brevo.com/v3/smtp/email),
+# not an SMTP relay: no SMTP host, port or credentials are needed. With
+# BREVO_API_KEY unset the client is a no-op and flows that require delivery fail
+# closed with a clear message. Set both on a host to enable real verification.
 BREVO_API_KEY = config("BREVO_API_KEY", default="")
 BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
+
+# Email verification rollout. Off by default so a host without a Brevo key
+# behaves exactly as before. Turn it on only after BREVO_API_KEY is set, or
+# nobody can verify and the gates would lock out real accounts.
+REQUIRE_EMAIL_VERIFICATION = _env_bool("REQUIRE_EMAIL_VERIFICATION", default=False)
+EMAIL_CODE_TTL_MINUTES = config("EMAIL_CODE_TTL_MINUTES", default=15, cast=int)
+EMAIL_CODE_MAX_ATTEMPTS = config("EMAIL_CODE_MAX_ATTEMPTS", default=5, cast=int)
 # Public base URL advertised in OAuth discovery metadata
 # (/.well-known/oauth-authorization-server). MUST be the real public domain —
 # never localhost — or agent clients cannot complete login. Honors the
