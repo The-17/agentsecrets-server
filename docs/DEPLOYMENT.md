@@ -113,6 +113,13 @@ agentsecrets secrets set CRON_SECRET="your-internal-cron-secret"
 
 ## 4. Running the Server
 
+The container entrypoint applies committed migrations on every boot by default
+(`RUN_MIGRATIONS=false` opts out, for read-only replicas only). A deploy that
+ships a new model without its migration leaves the schema behind the code:
+cascade deletes then target a missing table and return 500. `build_files.sh`
+still runs `migrate` for Vercel builds, but Render's Docker service has no
+build step that does it, so the entrypoint is the single reliable place.
+
 ### Local Development / Evaluation:
 
 ```bash
@@ -249,6 +256,8 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - POSTGRES_SSLMODE=disable
+      # Optional; entrypoint.sh applies migrations by default. Set to false
+      # only for a read-only replica.
       - RUN_MIGRATIONS=true
       - COLLECT_STATIC=true
     volumes:

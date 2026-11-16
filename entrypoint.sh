@@ -20,10 +20,18 @@ except Exception:
     echo "PostgreSQL is ready!"
 fi
 
-# Run database migrations if requested
-if [ "$RUN_MIGRATIONS" = "true" ] || [ "$RUN_MIGRATIONS" = "1" ]; then
+# Apply committed migrations on every boot. This is on by default because a
+# deploy that ships new code but skips its migration leaves the schema behind
+# the models: Django then plans a cascade DELETE against a table that does not
+# exist and workspace deletion returns 500. Render has no build step that runs
+# migrations (build_files.sh is a Vercel artefact), so gating this behind an
+# env var nobody was told to set is how 0019_workspaceinvite never reached the
+# deployed database. Opt out only for a read-only replica, with RUN_MIGRATIONS=false.
+if [ "${RUN_MIGRATIONS:-true}" != "false" ] && [ "${RUN_MIGRATIONS:-true}" != "0" ]; then
     echo "Applying database migrations..."
     python manage.py migrate --noinput
+else
+    echo "RUN_MIGRATIONS is disabled; the schema is not being checked on this boot." >&2
 fi
 
 # Collect static files if requested
