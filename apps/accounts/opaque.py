@@ -20,6 +20,17 @@ class SidecarError(Exception):
     """The sidecar could not answer. Treat as an outage, never as a soft failure."""
 
 
+class SidecarAuthError(SidecarError):
+    """The sidecar answered and rejected the credential itself.
+
+    A wrong password, not a broken dependency. Callers must surface this as an
+    invalid-credentials response, never as an outage: telling a user with a typo
+    that the service is down is both wrong and unactionable. Subclasses
+    ``SidecarError`` so any caller that has not been taught to distinguish the
+    two still fails closed.
+    """
+
+
 class Sidecar:
     def __init__(self) -> None:
         url = getattr(settings, "OPAQUE_SIDECAR_URL", "") or ""
@@ -97,6 +108,11 @@ class Sidecar:
         if response.status_code == 401:
             logger.error("OPAQUE sidecar rejected the token at %s", url)
             raise SidecarError("OPAQUE sidecar rejected the bearer token")
+        if response.status_code == 403:
+            # The token was accepted and the credential was not. This is a
+            # failed login, not an outage, so it must not become a 503.
+            logger.info("OPAQUE sidecar rejected the credential at %s", url)
+            raise SidecarAuthError("OPAQUE sidecar rejected the credential")
         if response.status_code != 200:
             logger.error("OPAQUE sidecar returned %s at %s: %s", response.status_code, url, response.text[:200])
             raise SidecarError(f"OPAQUE sidecar returned {response.status_code}")

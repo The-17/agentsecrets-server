@@ -27,7 +27,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM golang:1.26-bookworm AS sidecar
 
 ARG OPAQUE_SIDECAR_REPO=https://github.com/The-17/agentsecrets.git
-ARG OPAQUE_SIDECAR_REF=5f08717
+# 3a3bedd: a rejected credential is 403, not 401, so the control plane can tell
+# a wrong password from a broken deployment.
+ARG OPAQUE_SIDECAR_REF=3a3bedd7add3e287dcd1cffa107e56bb7d47d908
 
 RUN git clone --filter=blob:none "$OPAQUE_SIDECAR_REPO" /src && \
     cd /src && git checkout "$OPAQUE_SIDECAR_REF"

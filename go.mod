@@ -3,7 +3,7 @@ module github.com/The-17/agentsecrets-server
 go 1.26.0
 
 require (
-	github.com/The-17/agentsecrets v1.4.1-0.20261028034043-46903e5072f8
+	github.com/The-17/agentsecrets v1.4.1-0.20261116231604-3a3bedd7add3
 	github.com/bytemare/opaque v0.18.0
 )
 

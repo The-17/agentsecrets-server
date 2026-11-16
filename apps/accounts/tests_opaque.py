@@ -6,14 +6,17 @@ and OPAQUE endpoints fail closed when the sidecar is unconfigured.
 """
 
 from datetime import timedelta
+from unittest.mock import Mock, patch
 
+from asgiref.sync import async_to_sync
 from django.contrib.auth import authenticate as dj_authenticate
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .models import OpaqueLoginChallenge, User
-from apps.common.exceptions import OpaqueUnavailableError
+from apps.common.exceptions import AuthenticationError, OpaqueUnavailableError
 
+from .opaque import Sidecar, SidecarAuthError, SidecarError
 from .opaque_services import OpaqueService
 
 
@@ -192,3 +195,92 @@ class EnrollmentClearsLegacyBlobTests(TestCase):
         # The legacy blob is gone in the same transaction that removes the password.
         self.assertEqual(self.user.encrypted_private_key, "")
         self.assertEqual(self.user.key_salt, "")
+
+
+class SidecarStatusMappingTests(TestCase):
+    """The sidecar's status codes must survive the HTTP client boundary intact.
+
+    A rejected credential (403) is a failed login. A rejected bearer token (401)
+    or any other status is an outage. Collapsing both into one error is what
+    told users with a typo that the auth service was down.
+    """
+
+    def setUp(self):
+        override = override_settings(
+            OPAQUE_SIDECAR_URL="http://sidecar.invalid",
+            OPAQUE_SIDECAR_TOKEN="test-token",
+        )
+        override.enable()
+        self.addCleanup(override.disable)
+        self.sidecar = Sidecar()
+
+    @staticmethod
+    def _response(status_code, payload=None, text=""):
+        response = Mock(status_code=status_code, text=text)
+        response.json.return_value = payload or {}
+        return response
+
+    def _login_finish_with(self, status_code):
+        with patch.object(
+            self.sidecar._session,
+            "post",
+            return_value=self._response(status_code, text="authentication failed"),
+        ):
+            self.sidecar.login_finish("ke3", "state", "c1")
+
+    def test_forbidden_is_a_credential_rejection(self):
+        with self.assertRaises(SidecarAuthError):
+            self._login_finish_with(403)
+
+    def test_unauthorized_is_an_outage_not_a_bad_credential(self):
+        # A bad bearer token means the deployment is broken, not the user's
+        # password. If this ever becomes SidecarAuthError the server would tell
+        # every user "invalid credentials" during a sidecar token rotation.
+        with self.assertRaises(SidecarError) as ctx:
+            self._login_finish_with(401)
+        self.assertNotIsInstance(ctx.exception, SidecarAuthError)
+
+    def test_server_error_is_an_outage(self):
+        with self.assertRaises(SidecarError) as ctx:
+            self._login_finish_with(500)
+        self.assertNotIsInstance(ctx.exception, SidecarAuthError)
+
+
+class LoginFinishErrorMappingTests(TestCase):
+    """A rejected credential must reach the client as 401 invalid_credentials.
+
+    The API shape is the contract the web console and the CLI read. Reporting a
+    wrong password as 503 opaque_unavailable hides it behind an outage message
+    the user cannot act on.
+    """
+
+    def setUp(self):
+        override = override_settings(
+            OPAQUE_SIDECAR_URL="http://sidecar.invalid",
+            OPAQUE_SIDECAR_TOKEN="test-token",
+        )
+        override.enable()
+        self.addCleanup(override.disable)
+
+    def _login_finish_raising(self, exc):
+        fake = Mock()
+        fake.login_finish.side_effect = exc
+        with patch("apps.accounts.opaque_services.make_sidecar", return_value=fake):
+            return async_to_sync(OpaqueService().login_finish_async)(
+                request=None,
+                cred_id="c1",
+                ke3="ke3",
+                server_state="state",
+                email="opaque@example.com",
+            )
+
+    def test_rejected_credential_maps_to_invalid_credentials(self):
+        with self.assertRaises(AuthenticationError) as ctx:
+            self._login_finish_raising(SidecarAuthError("rejected the credential"))
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(ctx.exception.err_code, "invalid_credentials")
+
+    def test_outage_still_maps_to_opaque_unavailable(self):
+        with self.assertRaises(OpaqueUnavailableError):
+            self._login_finish_raising(SidecarError("sidecar unreachable"))
+

@@ -16,7 +16,7 @@ from django.utils import timezone
 
 from apps.common.exceptions import OpaqueUnavailableError
 
-from .opaque import SidecarError, make_sidecar
+from .opaque import SidecarAuthError, SidecarError, make_sidecar
 
 logger = logging.getLogger("apps.accounts")
 
@@ -144,6 +144,14 @@ class OpaqueService:
     ):
         try:
             result = await sync_to_async(self.sidecar.login_finish)(ke3, server_state, cred_id)
+        except SidecarAuthError as exc:
+            # A rejected credential is the user's problem to fix, not an outage.
+            # Reporting it as 503 hides a wrong password behind "temporarily
+            # unavailable" and sends operators chasing a healthy sidecar.
+            logger.info("OPAQUE login finish rejected the credential: %s", exc)
+            from apps.common.exceptions import AuthenticationError
+
+            raise AuthenticationError("Invalid Credentials") from exc
         except SidecarError as exc:
             logger.error("OPAQUE login finish failed: %s", exc)
             raise OpaqueUnavailableError(str(exc)) from exc
