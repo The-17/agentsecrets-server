@@ -1,11 +1,14 @@
 # Standard library
 import base64
 import hashlib
+import json
 import logging
 import time
+import urllib.request
 
 # Django
 from django.conf import settings
+from django.core.cache import cache
 from django.utils.translation import gettext_lazy as _
 
 # Third-party
@@ -123,18 +126,53 @@ class InternalOrUserAuth(HttpBearer):
 
 class ResolverSignatureAuth(HttpBearer):
     """
-    Authenticates resolver-originated state-changing internal RPCs
-    (rotation execute / family-revoke) with an Ed25519 request signature.
+    Authenticates resolver-originated internal RPCs (rotation sweeps and
+    forensic ingest) with an Ed25519 request signature.
 
-    The resolver holds the private half (`RESOLVER_SIGNING_KEY`); the control
-    plane verifies against `RESOLVER_SIGNING_PUBKEY`. No shared secret exists,
-    nothing a self-hoster copies from this repo can forge, and verification
-    works through edge-terminated TLS (ADR 008).
+    The resolver holds the private half (`RESOLVER_SIGNING_KEY`); this control
+    plane verifies with the public half. No shared secret exists (ADR 008).
+    Trusted keys come from `RESOLVER_TRUSTED_KEYS` as comma-separated
+    `key_id:hex_pubkey` pairs, which allows an overlap during key rotation.
+    When that setting is empty the key is discovered from the resolver's
+    public signing-key endpoint, so a self-hosted control plane needs no
+    hand-copied key.
 
     Canonical payload: ``{timestamp}\\n{METHOD}\\n{path}\\n{sha256_hex(body)}``.
     """
 
     freshness_window_s = 300
+    discovery_cache_key = "resolver-trusted-keys"
+    discovery_cache_ttl_s = 300
+
+    @staticmethod
+    def _configured_keys() -> dict[str, str]:
+        keys: dict[str, str] = {}
+        raw = getattr(settings, "RESOLVER_TRUSTED_KEYS", "") or ""
+        for entry in raw.split(","):
+            key_id, sep, public_key = entry.strip().partition(":")
+            if sep and key_id.strip() and public_key.strip():
+                keys[key_id.strip()] = public_key.strip()
+        return keys
+
+    @classmethod
+    def _trusted_keys(cls) -> dict[str, str]:
+        keys = cls._configured_keys()
+        if keys:
+            return keys
+        cached = cache.get(cls.discovery_cache_key)
+        if cached:
+            return cached
+        base = getattr(settings, "RESOLVER_URL", "https://resolver.agentsecrets.tech").rstrip("/")
+        with urllib.request.urlopen(f"{base}/v1/rotation/signing-key", timeout=2) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        key_id = str(payload.get("key_id") or "")
+        public_key = str(payload.get("public_key") or "")
+        if not key_id or not public_key:
+            raise ValueError("resolver signing-key response is incomplete")
+        bytes.fromhex(public_key)
+        keys = {key_id: public_key}
+        cache.set(cls.discovery_cache_key, keys, cls.discovery_cache_ttl_s)
+        return keys
 
     def __call__(self, request):
         # No Authorization header is involved: identity is proven by the
@@ -150,9 +188,6 @@ class ResolverSignatureAuth(HttpBearer):
             return None
 
     def _verify(self, request):
-        pubkey_hex = getattr(settings, "RESOLVER_SIGNING_PUBKEY", "") or ""
-        if not pubkey_hex:
-            return None
         meta = request.META
         key_id = meta.get("HTTP_X_RESOLVER_KEY_ID", "")
         timestamp = meta.get("HTTP_X_RESOLVER_TIMESTAMP", "")
@@ -165,12 +200,15 @@ class ResolverSignatureAuth(HttpBearer):
             return None
         if abs(time.time() - ts) > self.freshness_window_s:
             return None
+        public_key = self._trusted_keys().get(key_id)
+        if not public_key:
+            return None
         body = request.body or b""
         body_hash = hashlib.sha256(body).hexdigest()
         path = meta.get("PATH_INFO", "") or request.path
         payload = "\n".join([timestamp, request.method.upper(), path, body_hash])
         try:
-            verify_key = VerifyKey(bytes.fromhex(pubkey_hex))
+            verify_key = VerifyKey(bytes.fromhex(public_key))
             signature = base64.b64decode(signature_b64)
             verify_key.verify(signature + payload.encode())
         except (ValueError, BadSignature):

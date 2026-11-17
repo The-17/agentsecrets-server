@@ -234,7 +234,7 @@ class SecretRotationTests(TestCase):
             project_id=self.project_id, key="API_KEY", environment="production"
         ).update(next_rotation_at=timezone.now() - timedelta(days=1))
 
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             due = self.client.get(
                 f"/api/internal/rotation/value-due/?workspace_id={self.workspace.id}",
                 **self._signed("GET", "/api/internal/rotation/value-due/"),

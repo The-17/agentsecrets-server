@@ -54,7 +54,7 @@ class ResolverSignedIngestTests(TestCase):
         }
 
     def _post(self, body: bytes, headers: dict):
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             return self.client.post(
                 "/api/internal/forensic/logs/", data=body,
                 content_type="application/json", **headers)

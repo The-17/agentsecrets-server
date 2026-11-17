@@ -129,7 +129,7 @@ class ProviderBindingTests(TestCase):
             "rotation_id": rotation_id,
             "reason": "routine",
         }).encode()
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             res = self.client.post(
                 "/api/internal/rotation/value-execute/", data=body,
                 content_type="application/json",

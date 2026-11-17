@@ -198,7 +198,7 @@ class TokenRotationTests(TestCase):
         AgentToken.objects.filter(id=self.token_id).update(
             next_rotation_at=timezone.now() - timedelta(days=1)
         )
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             due = self.client.get(
                 f"/api/internal/rotation/due/?workspace_id={self.workspace.id}",
                 **self._signed("GET", "/api/internal/rotation/due/"),
@@ -208,7 +208,7 @@ class TokenRotationTests(TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["token_id"], self.token_id)
 
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             bad_sig = dict(self._signed("GET", "/api/internal/rotation/due/"))
             bad_sig["HTTP_X_RESOLVER_SIGNATURE"] = "bogus"
             bad = self.client.get(
@@ -240,7 +240,7 @@ class TokenRotationTests(TestCase):
             "workspace_id": str(self.workspace.id),
             "family_key": family, "reason": "compromise",
         }).encode()
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             revoke = self.client.post(
                 "/api/internal/rotation/family-revoke/", data=body,
                 content_type="application/json",

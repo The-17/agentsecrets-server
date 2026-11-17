@@ -207,10 +207,12 @@ ENCRYPTION_KEY_NEXT = config("ENCRYPTION_KEY_NEXT", default="")
 # Operator bearer for the platform key rotation sweep endpoint. Unset means
 # the endpoint refuses every call.
 ROTATION_TOKEN = config("ROTATION_TOKEN", default="")
-# Ed25519 public key (hex) the control plane trusts for resolver-originated
-# state-changing internal RPCs (rotation execute/family-revoke). The resolver
-# holds the private half; no shared secret exists (ADR 008).
-RESOLVER_SIGNING_PUBKEY = config("RESOLVER_SIGNING_PUBKEY", default="")
+# Comma-separated key_id:hex_pubkey pairs the control plane trusts for
+# resolver-originated internal RPCs. Several keys are held during a rotation
+# overlap; selection is by X-Resolver-Key-ID. The resolver holds the private
+# half, so no shared secret exists (ADR 008). When empty, the control plane
+# discovers the key from RESOLVER_URL and needs no hand-copied key.
+RESOLVER_TRUSTED_KEYS = config("RESOLVER_TRUSTED_KEYS", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
 
 # Brevo transactional email. This is the HTTP API (api.brevo.com/v3/smtp/email),

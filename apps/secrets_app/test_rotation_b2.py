@@ -102,7 +102,7 @@ class AutonomousRotationTests(TestCase):
 
     def _execute(self, body, expected=200):
         raw = json.dumps(body).encode()
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             res = self.client.post(
                 "/api/internal/rotation/value-execute/", data=raw,
                 content_type="application/json",
@@ -201,7 +201,7 @@ class AutonomousRotationTests(TestCase):
             sealed_workspace_key="c2VhbGVk",
             is_active=True,
         )
-        with self.settings(RESOLVER_SIGNING_PUBKEY=self.verify_hex):
+        with self.settings(RESOLVER_TRUSTED_KEYS=f"test-key:{self.verify_hex}"):
             res = self.client.get(
                 f"/api/internal/rotation/workspace-keys/?workspace_id={self.workspace.id}",
                 **self._signed("GET", "/api/internal/rotation/workspace-keys/"),
