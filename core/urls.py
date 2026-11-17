@@ -4,10 +4,36 @@ from django.urls import path, include
 
 # Local
 from .api import api
+from apps.accounts.oauth_views import (
+    oauth_authorize,
+    oauth_discovery,
+    oauth_token,
+)
+from apps.common.views import health
 from apps.telemetry.api import telemetry_api
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+
+    # Root-level health alias. The published CLI probes `<origin>/health`
+    # before `server set`/`server status`, where `<origin>` is the API base
+    # with `/api` trimmed. Keep both spellings so the probe works without a
+    # redirect and probes stay cheap.
+    path("health", health, name="health"),
+    path("health/", health),
+
+    # OAuth 2.1 Authorization Code + PKCE for headless agent login
+    # (MCP bridge `auth_login`). Mounted at SITE ROOT — not under /api/ —
+    # because clients trim `/api` from the control-plane base before
+    # discovery. Plain Django views: the browser consent flow needs
+    # sessions + CSRF, which the token endpoint exempts (PKCE-bound codes).
+    path(
+        ".well-known/oauth-authorization-server",
+        oauth_discovery,
+        name="oauth-discovery",
+    ),
+    path("oauth/authorize", oauth_authorize, name="oauth-authorize"),
+    path("oauth/token", oauth_token, name="oauth-token"),
 
     # Django Ninja API — all controllers auto-discovered
     # Note: Using different API instances allows us to run entirely different

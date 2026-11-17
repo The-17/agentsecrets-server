@@ -3,6 +3,23 @@ from decouple import config
 from datetime import timedelta
 import os
 
+
+def _env_bool(name, default=False):
+    """Read an environment boolean, failing closed on any unrecognized value.
+
+    decouple's cast=bool raises ValueError on a non-boolean string, which would
+    crash the entire build if an env var is mis-set (e.g. a copy of the key name
+    used as its own value). For a feature flag the safe behaviour is to disable
+    the feature rather than abort the deploy.
+    """
+    raw = config(name, default=None, cast=str)
+    if raw is None:
+        return default
+    raw = raw.strip().lower()
+    if raw in ("1", "true", "yes", "on", "t", "y"):
+        return True
+    return False
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SECRET_KEY = config("SECRET_KEY")
@@ -24,7 +41,7 @@ THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "ninja_extra",
-    # "corsheaders",
+    "corsheaders",
     "rest_framework_simplejwt.token_blacklist",
 ]
 
@@ -40,6 +57,7 @@ LOCAL_APPS = [
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'apps.common.middleware.SecurityHeadersMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -78,7 +96,8 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 
 import sys
-if 'test' in sys.argv:
+TESTING = 'test' in sys.argv
+if TESTING:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -182,9 +201,82 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 ENCRYPTION_KEY = config("ENCRYPTION_KEY")
-RESOLVER_SERVICE_KEY = config("RESOLVER_SERVICE_KEY", default="")
+# Second key for platform rotation: as soon as it is set, writes move to
+# versioned ciphertext (v2: prefix) and the sweep re-encrypts old rows.
+ENCRYPTION_KEY_NEXT = config("ENCRYPTION_KEY_NEXT", default="")
+# Operator bearer for the platform key rotation sweep endpoint. Unset means
+# the endpoint refuses every call.
+ROTATION_TOKEN = config("ROTATION_TOKEN", default="")
+# Comma-separated key_id:hex_pubkey pairs the control plane trusts for
+# resolver-originated internal RPCs. Several keys are held during a rotation
+# overlap; selection is by X-Resolver-Key-ID. The resolver holds the private
+# half, so no shared secret exists (ADR 008). When empty, the control plane
+# discovers the key from RESOLVER_URL and needs no hand-copied key.
+RESOLVER_TRUSTED_KEYS = config("RESOLVER_TRUSTED_KEYS", default="")
 RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tech")
+
+# Brevo transactional email. This is the HTTP API (api.brevo.com/v3/smtp/email),
+# not an SMTP relay: no SMTP host, port or credentials are needed. With
+# BREVO_API_KEY unset the client is a no-op and flows that require delivery fail
+# closed with a clear message. Set both on a host to enable real verification.
+BREVO_API_KEY = config("BREVO_API_KEY", default="")
+BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
+
+# Email verification rollout. Off by default so a host without a Brevo key
+# behaves exactly as before. Turn it on only after BREVO_API_KEY is set, or
+# nobody can verify and the gates would lock out real accounts.
+REQUIRE_EMAIL_VERIFICATION = _env_bool("REQUIRE_EMAIL_VERIFICATION", default=False)
+EMAIL_CODE_TTL_MINUTES = config("EMAIL_CODE_TTL_MINUTES", default=15, cast=int)
+EMAIL_CODE_MAX_ATTEMPTS = config("EMAIL_CODE_MAX_ATTEMPTS", default=5, cast=int)
+
+# Soft caps for unverified accounts. They refuse the creation that would cross
+# the line; nothing already stored is hidden, locked, or removed.
+UNVERIFIED_PROJECT_LIMIT = config("UNVERIFIED_PROJECT_LIMIT", default=1, cast=int)
+UNVERIFIED_SECRET_LIMIT = config("UNVERIFIED_SECRET_LIMIT", default=5, cast=int)
+
+# Workspace invitations. The link and the six-digit code both expire, and only
+# the address the invite was sent to can accept either. WEBSITE_BASE_URL is
+# where the acceptance page lives; it is also the signup target for an invited
+# person who has no account yet.
+INVITE_TTL_DAYS = config("INVITE_TTL_DAYS", default=7, cast=int)
+WEBSITE_BASE_URL = config("WEBSITE_BASE_URL", default="https://agentsecrets.tech")
+# Public base URL advertised in OAuth discovery metadata
+# (/.well-known/oauth-authorization-server). MUST be the real public domain —
+# never localhost — or agent clients cannot complete login. Honors the
+# PUBLIC_BASE_URL operators were told to set, with OAUTH_ISSUER_BASE_URL
+# as an explicit override. Empty falls back to the request's own host.
+OAUTH_ISSUER_BASE_URL = config(
+    "OAUTH_ISSUER_BASE_URL", default=config("PUBLIC_BASE_URL", default="")
+)
+
+# Social login (Google / GitHub) — v4 identity providers. Fail closed: when the
+# provider's client id/secret are unset OR the feature flag is False, the
+# /auth/oauth endpoints return 503 and never fall back to password login.
+OAUTH_GOOGLE_ENABLED = _env_bool("OAUTH_GOOGLE_ENABLED", default=False)
+OAUTH_GITHUB_ENABLED = _env_bool("OAUTH_GITHUB_ENABLED", default=False)
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="")
+GOOGLE_CLIENT_SECRET = config("GOOGLE_CLIENT_SECRET", default="")
+GITHUB_CLIENT_ID = config("GITHUB_CLIENT_ID", default="")
+GITHUB_CLIENT_SECRET = config("GITHUB_CLIENT_SECRET", default="")
 CRON_SECRET = config("CRON_SECRET", default="dev-secret")
+
+# OPAQUE (RFC 9807) server crypto runs in the Go sidecar (cmd/opaque-sidecar in
+# the CLI repo): the only implementation wire-compatible with the CLI client is
+# the Go one. Empty URL or token disables the feature, and OPAQUE endpoints then
+# fail closed with 503 rather than falling back to password login.
+OPAQUE_SIDECAR_URL = config("OPAQUE_SIDECAR_URL", default="")
+OPAQUE_SIDECAR_TOKEN = config("OPAQUE_SIDECAR_TOKEN", default="")
+OPAQUE_TIMEOUT_SECONDS = config("OPAQUE_TIMEOUT_SECONDS", default=5, cast=int)
+
+# Browser dashboard origins allowed to call this API directly (custom
+# endpoints bypass the hosted dashboard's same-origin proxy, so a
+# self-hosted server must explicitly allow the dashboard origin here).
+CORS_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in config("CORS_ALLOWED_ORIGINS", default="https://cloud.agentsecrets.tech").split(",")
+    if o.strip()
+]
+CORS_ALLOW_CREDENTIALS = False
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),

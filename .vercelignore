@@ -1,0 +1,51 @@
+# The Vercel CLI uploads the working directory and only honours .vercelignore.
+# .gitignore is for git, not for CLI deploys: without this file the local
+# virtualenv (247 MB) was copied into the Python function bundle and the deploy
+# failed at 226.84 MB against the 225 MB limit.
+
+# Virtualenvs
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python runtime leftovers
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Local runtime state
+*.log
+logs/
+db.sqlite3
+db.sqlite3-journal
+
+# Local environment files. Project variables live in Vercel settings.
+.env
+.env.local
+.env.development
+.env.staging
+.env.production
+.env.test
+
+# Local agent and editor state
+.agentsecrets/
+.vscode/
+.idea/
+scratch/
+AGENTS.md
+scripts/verify.sh
+
+# Git metadata is ignored by the CLI already; stated for clarity.
+.git/
+
+# NOTE: staticfiles/ stays included. vercel.json uses it as the static-build
+# distDir, so excluding it would deploy without assets.

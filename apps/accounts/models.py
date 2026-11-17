@@ -2,8 +2,10 @@
 import uuid
 
 # Django
+from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 # Third-party
@@ -24,6 +26,7 @@ def slugify_two_fields(self):
 
 AUTH_PROVIDERS = [
         ('google', 'Google'),
+        ('github', 'GitHub'),
         ('email', 'Email')
     ]
 
@@ -51,6 +54,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_superuser = models.BooleanField(default=False)
     is_email_verified = models.BooleanField(default=False)
+    pending_email = models.EmailField(_('Pending Email'), null=True, blank=True)
     terms_agreement = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -80,16 +84,80 @@ class User(AbstractBaseUser, PermissionsMixin):
         help_text="User's private key encrypted with their derived user_key (only they can decrypt)"
     )
 
+    # Additive v4 vault record. Null for legacy accounts; storing it never
+    # removes or rewrites the legacy key blob above.
+    vault = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Opaque client-side vault record: wrapped VK envelopes and proof"
+    )
+    vault_version = models.PositiveIntegerField(
+        default=0,
+        help_text="Optimistic concurrency version for the vault record"
+    )
+
+    # OPAQUE enrollment. After confirmation, password login is disabled for the account.
+    # opaque_record is the SerializedRegistrationRecord sent by the client.
+    opaque_record = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Opaque SerializedRegistrationRecord from the client (RFC 9807 client-side)"
+    )
+    opaque_registered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when OPAQUE enrollment was confirmed (credentials now unusable via password)"
+    )
+
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}"
+
+    @property
+    def auth_methods(self) -> set[str]:
+        """Enabled auth methods for this account.
+
+        Auth state is a method SET, not a single provider. An account can hold
+        a password and one or more social identities at once, so signing in with
+        Google never removes the password path. Password and OPAQUE stay
+        alternatives: enrollment clears the password hash, so an enrolled
+        account has ``opaque`` only. OAuth identities never unlock the vault.
+        """
+        methods: set[str] = set()
+        if self.has_usable_password():
+            methods.add("password")
+        if self.opaque_record and self.opaque_registered_at:
+            methods.add("opaque")
+
+        # Legacy single-provider accounts predate SocialIdentity.
+        provider = (self.auth_provider or "email").lower()
+        if provider == "google":
+            methods.add("oauth_google")
+        elif provider == "github":
+            methods.add("oauth_github")
+
+        if self.pk:
+            for social_provider in self.social_identities.values_list("provider", flat=True):
+                if social_provider == "google":
+                    methods.add("oauth_google")
+                elif social_provider == "github":
+                    methods.add("oauth_github")
+        return methods
+
+    @property
+    def password_login_allowed(self) -> bool:
+        return "password" in self.auth_methods
+
+    @property
+    def opaque_login_allowed(self) -> bool:
+        return "opaque" in self.auth_methods
 
     def save(self, *args, **kwargs):
         if not self.billing_id:
             self.billing_id = generate_billing_id()
         super().save(*args, **kwargs)
 
-    def tokens(self):
+    def tokens(self, recovery: bool = False):
         refresh = RefreshToken.for_user(self)
         refresh["email"] = self.email
         refresh["first_name"] = self.first_name
@@ -97,6 +165,24 @@ class User(AbstractBaseUser, PermissionsMixin):
         refresh["billing_id"] = self.billing_id
         refresh["is_staff"] = self.is_staff
         refresh["is_superuser"] = self.is_superuser
+        # Connect (v6) extensibility hooks, A4: structured, versioned claims.
+        # These are additive and safe for older clients, which ignore them.
+        refresh["iss"] = getattr(settings, "OAUTH_ISSUER_BASE_URL", "") or "agentsecrets"
+        refresh["sub"] = str(self.id)
+        refresh["principal_type"] = "human"
+        refresh["jti"] = uuid.uuid4().hex
+        refresh["claims_version"] = 1
+        refresh["on_behalf_of"] = None
+        # Snapshot of the flag at issue time, so a client can show the right
+        # next step without a second call. Gates never trust this claim: a
+        # token minted before verification would otherwise stay blocked after
+        # the user verified, until they logged in again.
+        refresh["email_verified"] = bool(self.is_email_verified)
+        if recovery:
+            # Marks a session opened by proof of vault-key possession rather
+            # than a password. Only such a session may reset the password
+            # without knowing the old one.
+            refresh["recovery"] = True
         return {
             'refresh': str(refresh),
             'access': str(refresh.access_token)
@@ -109,17 +195,214 @@ class User(AbstractBaseUser, PermissionsMixin):
             models.Index(fields=['last_active_at']),
             models.Index(fields=['billing_id']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['auth_provider', 'provider_user_id'],
+                condition=models.Q(provider_user_id__isnull=False),
+                name='uniq_auth_provider_provider_user_id'
+            )
+        ]
     
     def __str__(self):
         return self.full_name
 
-class OneTimePassword(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE)
-    code = models.CharField(max_length=100)
+
+class SocialIdentity(BaseModel):
+    """A linked social login (Google or GitHub) for an account.
+
+    Separate from ``User.auth_provider`` so an account can hold a password and
+    one or more social identities at the same time. Linking a provider adds a
+    row; it never clears the password factor.
+    """
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="social_identities",
+        help_text="Account this social identity signs in to",
+    )
+    provider = models.CharField(max_length=20, choices=AUTH_PROVIDERS)
+    provider_user_id = models.CharField(
+        max_length=255,
+        help_text="Stable subject id from the provider (Google sub, GitHub id)",
+    )
+
+    class Meta:
+        verbose_name = _("Social Identity")
+        verbose_name_plural = _("Social Identities")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_user_id"],
+                name="uniq_social_identity_provider_subject",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["provider", "provider_user_id"]),
+        ]
 
     def __str__(self):
-        return self.code
+        return f"{self.provider}:{self.provider_user_id}"
+
+
+class OpaqueLoginChallenge(BaseModel):
+    """
+    Short-lived server state for each OPAQUE login request (TTL 120s).
+    Stored to prevent replay: the client consumes the challenge when it returns
+    and we safely delete the record after login_finish.
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="opaque_login_challenges",
+        help_text="User performing OPAQUE login"
+    )
+    challenge_id = models.CharField(
+        max_length=64,
+        unique=True,
+        help_text="Unique challenge ID"
+    )
+    expires_at = models.DateTimeField(
+        help_text="Challenge expiration (120s from creation)"
+    )
+    used_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the challenge was consumed"
+    )
+    # oss server_state returned on /v1/login/start, stored for consumption on /v1/login/finish
+    server_state = models.BinaryField(
+        help_text="Server state blob to prevent replay"
+    )
+
+    class Meta:
+        verbose_name = _("OPAQUE Login Challenge")
+        verbose_name_plural = _("OPAQUE Login Challenges")
+        indexes = [
+            models.Index(fields=["user", "expires_at"]),
+            models.Index(fields=["challenge_id"]),
+        ]
+
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+
+        return timezone.now() > self.expires_at
+
+    def consume(self) -> None:
+        from django.utils import timezone
+
+        self.used_at = timezone.now()
+        self.save(update_fields=["used_at"])
+
+
+class OAuthAuthorizationCode(BaseModel):
+    """
+    Single-use authorization code for the OAuth 2.1 Authorization Code + PKCE
+    flow that powers headless agent login (`auth_login` in the MCP bridge).
+
+    Only the SHA-256 hash of the code is stored — a database read never
+    yields a redeemable code. Codes are bound to (client, redirect_uri,
+    PKCE challenge) at issuance and claimed atomically at redemption.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="oauth_codes")
+    client_id = models.CharField(max_length=128, db_index=True)
+    redirect_uri = models.CharField(max_length=2000)
+    scope = models.CharField(max_length=512, default="", blank=True)
+    code_challenge = models.CharField(max_length=128)
+    code_challenge_method = models.CharField(max_length=16, default="S256")
+    code_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        # code_hash (unique) and expires_at (db_index) are indexed at the
+        # field level; no extra Meta indexes needed.
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"oauth-code {self.client_id} for {self.user.email}"
+
+
+class EmailChallengePurpose(models.TextChoices):
+    """Which flow owns a one-time code.
+
+    A code issued to change an address must not be usable to verify signup, and
+    a signup code must not confirm an email change. The purpose is part of the
+    challenge, not a convention the caller remembers.
+    """
+
+    VERIFY_EMAIL = "verify_email", "Verify Email"
+    EMAIL_CHANGE = "email_change", "Email Change"
+
+
+class OneTimePassword(models.Model):
+    """One active email challenge per user.
+
+    ``email`` is the address the code was sent to. ``expires_at`` and
+    ``attempts`` bound reuse and online guessing. Legacy rows have no expiry;
+    they are treated as expired by the consumer, never as valid forever.
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    code = models.CharField(max_length=100)
+    purpose = models.CharField(
+        max_length=32,
+        choices=EmailChallengePurpose.choices,
+        default=EmailChallengePurpose.EMAIL_CHANGE,
+    )
+    email = models.EmailField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.purpose} challenge for {self.user.email}"
     
+
+class VaultRecoveryChallenge(models.Model):
+    """A single-use nonce a client signs to prove it holds the vault key.
+
+    The challenge text is stored verbatim so the server verifies exactly the
+    bytes the client signed. Only the nonce hash is indexed for lookup; the
+    nonce itself is returned to the client once and never stored.
+    """
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="vault_recovery_challenges"
+    )
+    nonce_hash = models.CharField(max_length=64, unique=True)
+    challenge = models.TextField()
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "created_at"])]
+
+    def __str__(self):
+        return f"vault-recovery challenge for {self.user.email}"
+
+
+class AccountProbe(models.Model):
+    """One public account-existence probe, kept only long enough to pace them.
+
+    The auth UI has to ask whether an email is registered before it can show the
+    right step, which is enumeration by design. This table is what makes the
+    answer rate-limited, and it stores a hashed IP rather than the address so it
+    cannot become a record of who checked which account.
+    """
+
+    id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)
+    ip_hash = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["ip_hash", "created_at"])]
+
+    def __str__(self):
+        return f"account probe at {self.created_at:%Y-%m-%d %H:%M:%S}"
+
 
 # class RecoveryCode(models.Model):
 #     id = models.UUIDField(default=uuid.uuid4, primary_key=True, editable=False)

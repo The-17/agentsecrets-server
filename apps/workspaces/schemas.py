@@ -125,8 +125,14 @@ class AgentTokenCreateSchema(Schema):
 class AgentCapabilitiesSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
-    allowed_secrets: List[str] = []
-    denied_secrets: List[str] = []
+    # All fields are Optional so a caller can update a SUBSET of capabilities
+    # without clobbering the rest (the service merges non-None fields). This lets
+    # the CLI toggle scopes (can_env_read / can_proxy_resolve) independently of
+    # the granular secret allow/deny policy, and vice-versa.
+    allowed_secrets: Optional[List[str]] = None
+    denied_secrets: Optional[List[str]] = None
+    can_env_read: Optional[bool] = None
+    can_proxy_resolve: Optional[bool] = None
 
 
 class InternalAgentVerifySchema(Schema):
@@ -134,6 +140,39 @@ class InternalAgentVerifySchema(Schema):
 
     token_id: Optional[str] = None
     token: str
+
+
+class TokenRotateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    overlap_hours: Optional[int] = None
+    reason: str = "routine"  # routine | compromise (compromise: zero overlap, poison family)
+
+
+class RotationPolicySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    period_days: Optional[int] = None
+    overlap_hours: Optional[int] = None
+    enabled: bool = True
+
+
+class MintSuccessorSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    token_id: Optional[str] = None
+    rotation_id: Optional[str] = None
+    reason: str = "routine"
+    overlap_hours: Optional[int] = None
+
+
+class FamilyRevokeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    family_key: str
+    reason: str = "compromise"
 
 
 # ==========================================
@@ -229,6 +268,13 @@ class AgentTokenItemSchema(Schema):
     revoked_at: Optional[str] = None
     last_used_at: Optional[str] = None
     created_at: str
+    status: str = "active"  # active | superseded_overlap | overlap_expired | revoked | expired
+    rotation_state: str = "active"
+    rotation_family_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    superseded_by: Optional[str] = None
 
 
 class AgentTokenCreatedResponseDataSchema(Schema):
@@ -237,8 +283,63 @@ class AgentTokenCreatedResponseDataSchema(Schema):
     token_metadata: Dict[str, Any]
 
 
+class RotationMetadataSchema(Schema):
+    rotation_state: str
+    rotation_family_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    superseded_by: Optional[str] = None
+    rotation_due: bool = False
+
+
+class TokenRotateResponseDataSchema(Schema):
+    token: Optional[str] = None  # raw value, fresh mint only — shown exactly once
+    token_id: str
+    label: Optional[str] = None
+    expires_at: Optional[str] = None
+    created_at: str
+    rotation: RotationMetadataSchema
+
+
+class RotationPolicyResponseDataSchema(Schema):
+    id: str
+    rotation: RotationMetadataSchema
+
+
+class MintSuccessorResponseDataSchema(Schema):
+    token_id: str
+    token: Optional[str] = None  # raw value on fresh mint; absent on idempotent replay
+    replayed: bool = False
+    predecessor_overlap_until: Optional[str] = None
+    rotation: RotationMetadataSchema
+
+
+class DueRotationItemSchema(Schema):
+    family_key: str
+    token_id: str
+    workspace_id: str
+    registration_id: str
+    next_rotation_at: Optional[str] = None
+    rotation_period_days: Optional[int] = None
+    rotation_state: str
+
+
+class FamilyRevokeResponseDataSchema(Schema):
+    family_key: str
+    revoked_count: int
+    token_ids: List[str] = []
+
+
 class RevokedTokensResponseDataSchema(Schema):
     token_ids: List[str] = []
+
+
+class ResolverDelegationResponseDataSchema(Schema):
+    workspace_id: str
+    sealed_workspace_key: Optional[str] = None
+    public_key: Optional[str] = None
+    has_delegation: bool = False
 
 
 class AgentVerifyResponseSchema(Schema):
@@ -252,6 +353,8 @@ class AgentVerifyResponseSchema(Schema):
     capabilities: Optional[Dict[str, Any]] = None
     token_id: Optional[str] = None
     billing_id: Optional[str] = None
+    expires_at: Optional[str] = None
+    rotation: Optional[RotationMetadataSchema] = None
     allowlist: Optional[List[str]] = None
 
 
@@ -283,13 +386,34 @@ class AuditLogItemSchema(Schema):
     source: Optional[str] = "cloud"
 
 
+class AuditRetentionSchema(Schema):
+    days: Optional[int] = None
+    restricted: bool
+
+
 class AuditSummaryResponseSchema(Schema):
+    """Every field the dashboard cards read is required.
+
+    A default of 0 here would turn a producer that forgot a bucket into a
+    card that reports a confident zero. The client also defaults missing
+    keys to 0, so an omitted bucket is indistinguishable from an empty one.
+    Leaving these without defaults makes the omission fail response
+    validation instead of shipping a wrong number.
+    """
+
     period: Dict[str, Any]
     totals: Dict[str, int]
+    ok: int
+    blocked: int
+    redacted: int
+    cloud_requests: int
+    cli_requests: int
+    env_requests: int
     by_agent: List[Dict[str, Any]]
     by_credential: List[Dict[str, Any]]
     by_domain: List[Dict[str, Any]]
     anonymous_call_count: int
+    retention: AuditRetentionSchema
 
 
 class WorkspaceActivityItemSchema(Schema):
@@ -324,4 +448,47 @@ class ForensicDecisionReplaySchema(Schema):
     resolution: Dict[str, Any] = {}
     steps: Dict[str, Any] = {}
     verified: bool = True
+
+
+class PendingInviteSchema(Schema):
+    id: str
+    workspace_id: str
+    workspace_name: str
+    role: str
+    invited_by: str = ""
+    expires_at: str
+
+
+class AwaitingKeyInviteSchema(Schema):
+    id: str
+    workspace_id: str
+    workspace_name: str
+    email: str
+    role: str
+
+
+class InvitePreviewSchema(Schema):
+    workspace_name: str
+    invited_by: str = ""
+    email: str
+    role: str
+    expires_at: str
+    has_account: bool
+
+
+class InviteAcceptSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    token: Optional[str] = None
+    code: Optional[str] = None
+    workspace_id: Optional[str] = None
+
+
+class InviteAcceptResultSchema(Schema):
+    workspace_id: str
+    workspace_name: str
+    role: str
+    # True until an admin client seals the workspace key. The workspace is
+    # visible but every secret in it stays unreadable until then.
+    key_pending: bool
 

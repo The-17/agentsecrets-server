@@ -5,6 +5,7 @@ from ninja import Schema
 from pydantic import ConfigDict, field_validator, EmailStr
 
 from apps.common.schemas import EnvironmentType
+from .environment import parse_environment
 
 
 # ==========================================
@@ -56,6 +57,11 @@ class SecretItemSchema(Schema):
     key: str
     value: str
 
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        return parse_environment(value)
+
 
 class ProjectInviteSchema(Schema):
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +79,11 @@ class SecretBulkUpsertSchema(Schema):
     project_id: uuid.UUID
     environment: EnvironmentType = "development"
     secrets: Dict[str, str]
+
+    @field_validator("environment")
+    @classmethod
+    def validate_environment(cls, value: str) -> str:
+        return parse_environment(value)
 
     @field_validator("secrets")
     @classmethod
@@ -96,6 +107,49 @@ class SecretUpdateSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
     value: str
+
+
+class SecretVersionCreateSchema(Schema):
+    """Stage a client-encrypted value as pending. Ciphertext is the client's
+    DEK-ciphertext; the server applies only its own envelope."""
+    model_config = ConfigDict(extra="forbid")
+
+    ciphertext: str
+    rotation_id: Optional[str] = None
+    reason: str = "routine"  # routine | compromise
+
+
+class SecretPromoteSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_version_id: Optional[str] = None
+    reason: str = "routine"  # routine | compromise (compromise shreds previous)
+
+
+class SecretRotationPolicySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    rotation_type: str = "value_client"  # value_client | value_auto | value_provider
+    period_days: Optional[int] = None
+    overlap_hours: Optional[int] = None
+    provider_binding: Optional[Dict[str, Any]] = None
+    enabled: bool = True
+
+
+class ValueExecuteSchema(Schema):
+    """B2 autonomous execute (resolver-signed): stage a resolver-encrypted
+    value and promote it atomically. Ciphertext is the resolver's DEK
+    ciphertext; the server applies only its own envelope."""
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    project_id: str
+    environment: str = "development"
+    key: str
+    ciphertext: str
+    rotation_id: str
+    reason: str = "routine"
+    overlap_hours: Optional[int] = None
 
 
 # ==========================================
@@ -124,16 +178,22 @@ class EnvironmentCountItemSchema(Schema):
     secret_count: int
 
 
+class EnvironmentInventoryItemSchema(Schema):
+    name: str
+    is_standard: bool
+    secret_count: int
+
+
 class ProjectEnvironmentsResponseDataSchema(Schema):
     project_id: str
-    environments: Dict[str, EnvironmentCountItemSchema]
+    environments: List[EnvironmentInventoryItemSchema]
+    counts: Dict[str, EnvironmentCountItemSchema]
 
 
 class SecretCoverageItemSchema(Schema):
+    """`environments` always carries the three standard names, plus any custom environment holding the key."""
     key_name: str
-    development: bool
-    staging: bool
-    production: bool
+    environments: Dict[str, bool]
 
 
 class ProjectSecretsCoverageResponseDataSchema(Schema):
@@ -187,3 +247,64 @@ class ProjectTransferResponseDataSchema(Schema):
     target_workspace_id: str
     target_workspace_name: str
     secrets_transferred: int
+
+
+class SecretVersionItemSchema(Schema):
+    """Rotation metadata only — ciphertext is never serialized (HR-H1)."""
+    version_id: str
+    staging_label: str
+    rotation_reason: str
+    rotation_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    revoked_at: Optional[str] = None
+    created_at: str
+
+
+class SecretPendingResponseDataSchema(Schema):
+    version_id: str
+    staging_label: str
+    rotation_reason: str
+    rotation_id: Optional[str] = None
+    overlap_until: Optional[str] = None
+    revoked_at: Optional[str] = None
+    created_at: str
+    replayed: bool = False
+
+
+class SecretPromoteResponseDataSchema(Schema):
+    key: str
+    environment: str
+    current_version_id: str
+    previous_version_id: Optional[str] = None
+    reason: str
+
+
+class SecretRollbackResponseDataSchema(Schema):
+    key: str
+    environment: str
+    current_version_id: str
+    previous_version_id: str
+
+
+class SecretRotationPolicyDataSchema(Schema):
+    key: str
+    environment: str
+    policy: Dict[str, Any]
+
+
+class SecretRotationStatusDataSchema(Schema):
+    key: str
+    environment: str
+    policy: Dict[str, Any]
+    versions: List[SecretVersionItemSchema]
+
+
+class DueValueRotationItemSchema(Schema):
+    secret_id: str
+    project_id: str
+    environment: str
+    key: str
+    rotation_type: str
+    rotation_period_days: Optional[int] = None
+    next_rotation_at: Optional[str] = None
+    rotation_binding: Dict[str, Any] = {}

@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 from django.conf import settings
+from django.core.cache import cache
 from django.db.models import Count, Max, Q, Subquery, OuterRef, IntegerField
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -19,6 +21,7 @@ from apps.common.exceptions import (
 )
 from .models import (
     Workspace,
+    WorkspaceTier,
     Membership,
     MembershipRole,
     MembershipStatus,
@@ -31,6 +34,7 @@ from .models import (
     WorkspaceActivityLog,
     ForensicAuditLogEntry,
 )
+from .billing_source import plan_is_pro, resolver_plan
 
 logger = logging.getLogger("apps.workspaces")
 
@@ -104,6 +108,47 @@ class WorkspaceSelector:
         return member
 
     @staticmethod
+    async def resolve_tier(*, workspace_id: str) -> str:
+        """The workspace's plan, confirmed against the resolver and cached.
+
+        The only owner of "is this workspace Pro". The local ``tier`` mirror is
+        rewritten only by an explicit reconcile, so reading it alone reports a
+        fresh upgrade as Free. A Pro mirror can be trusted, because only a
+        resolver-confirmed reconcile ever sets it. A Free mirror is the
+        ambiguous direction, so it is confirmed with the resolver. An
+        unreachable resolver falls back to the mirror and re-checks after 60s
+        instead of 300.
+        """
+        cache_key = f"ws-tier:{workspace_id}"
+        tier = await sync_to_async(cache.get)(cache_key)
+        if tier is not None:
+            return tier
+
+        ws = await Workspace.objects.filter(id=workspace_id).select_related("owner").afirst()
+        if ws is None:
+            return "unknown"
+        db_tier = getattr(ws, "tier", None)
+        if db_tier == WorkspaceTier.PRO:
+            tier, ttl = db_tier, 300
+        else:
+            # Query the workspace's own dedicated account first. A workspace that
+            # has been upgraded owns a ws_bill_* account (ws.billing_id) whose plan
+            # the resolver stores; asking effective_billing_id instead resolves to
+            # the owner's pool for a free workspace and reports a fresh upgrade as
+            # Free. Genuinely free workspaces have no dedicated account, so fall
+            # back to effective_billing_id (free_ws_*), which resolver_plan treats
+            # as Free.
+            query_billing_id = ws.billing_id or ws.effective_billing_id
+            payload = await resolver_plan(billing_id=query_billing_id, user=ws.owner)
+            if payload is None:
+                tier, ttl = db_tier or "unknown", 60
+            else:
+                tier = WorkspaceTier.PRO if plan_is_pro(payload) else WorkspaceTier.FREE
+                ttl = 300
+        await sync_to_async(cache.set)(cache_key, tier, ttl)
+        return tier
+
+    @staticmethod
     async def list_user_workspaces(*, user: User) -> list[dict[str, Any]]:
         memberships = Membership.objects.filter(
             user=user, status=MembershipStatus.ACTIVE
@@ -118,19 +163,22 @@ class WorkspaceSelector:
             "workspace__owner__billing_id",
             "workspace__created_at",
         )
-        return [
-            {
-                "id": str(m["workspace__id"]),
-                "name": m["workspace__name"],
-                "type": m["workspace__type"],
-                "tier": m.get("workspace__tier") or "free",
-                "role": m["role"],
-                "billing_id": (m["workspace__billing_id"] if m.get("workspace__tier") == "pro" else None) or m["workspace__owner__billing_id"],
-                "encrypted_workspace_key": m["encrypted_workspace_key"],
-                "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
-            }
-            async for m in memberships
-        ]
+        result = []
+        async for m in memberships:
+            tier = await WorkspaceSelector.resolve_tier(workspace_id=str(m["workspace__id"]))
+            result.append(
+                {
+                    "id": str(m["workspace__id"]),
+                    "name": m["workspace__name"],
+                    "type": m["workspace__type"],
+                    "tier": tier,
+                    "role": m["role"],
+                    "billing_id": (m["workspace__billing_id"] if tier == "pro" else None) or m["workspace__owner__billing_id"],
+                    "encrypted_workspace_key": m["encrypted_workspace_key"],
+                    "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
+                }
+            )
+        return result
 
     @staticmethod
     async def list_workspace_members(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
@@ -289,8 +337,17 @@ class AgentSelector:
         if not exists:
             raise NotFoundError("Agent not found")
 
+        now = timezone.now()
         data: list[dict[str, Any]] = []
         async for t in AgentToken.objects.filter(registration_id=registration_id):
+            if t.revoked_at or t.rotation_state == "revoked":
+                status = "revoked"
+            elif t.rotation_state == "superseded":
+                status = "superseded_overlap" if (t.overlap_until and t.overlap_until >= now) else "overlap_expired"
+            elif t.expires_at and t.expires_at < now:
+                status = "expired"
+            else:
+                status = "active"
             data.append({
                 "id": str(t.id),
                 "label": t.label,
@@ -299,25 +356,135 @@ class AgentSelector:
                 "revoked_at": t.revoked_at.isoformat() if t.revoked_at else None,
                 "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
                 "created_at": t.created_at.isoformat(),
+                "status": status,
+                "rotation_state": t.rotation_state,
+                "rotation_family_id": t.rotation_family_id,
+                "overlap_until": t.overlap_until.isoformat() if t.overlap_until else None,
+                "next_rotation_at": t.next_rotation_at.isoformat() if t.next_rotation_at else None,
+                "rotation_period_days": t.rotation_period.days if t.rotation_period else None,
+                "superseded_by": t.superseded_by,
             })
         return data
 
     @staticmethod
     async def list_revoked_token_ids(*, workspace_id: uuid.UUID) -> list[str]:
-        """List all revoked token IDs for a workspace."""
+        """List all revoked and expired superseded token IDs for a workspace."""
         now = timezone.now()
-        q = Q(revoked_at__isnull=False)
-        if hasattr(AgentToken, "rotation_state"):
-            q |= Q(rotation_state="revoked")
-            q |= (Q(rotation_state="superseded") & (Q(overlap_until__isnull=True) | Q(overlap_until__lt=now)))
-        qs = AgentToken.objects.filter(workspace_id=workspace_id).filter(q).values_list("id", flat=True)
+        qs = AgentToken.objects.filter(
+            workspace_id=workspace_id
+        ).filter(
+            Q(revoked_at__isnull=False)
+            | Q(rotation_state="revoked")
+            | (Q(rotation_state="superseded") & (Q(overlap_until__isnull=True) | Q(overlap_until__lt=now)))
+        ).values_list("id", flat=True)
         return [str(token_id) async for token_id in qs]
+
+    @staticmethod
+    async def get_due_token_rotations(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Rotation-armed families past their cadence (metadata only, never
+        secret material). Consumed by the resolver's Pro-gated sweep (HR-M3)."""
+        now = timezone.now()
+        due: list[dict[str, Any]] = []
+        qs = AgentToken.objects.filter(
+            workspace_id=workspace_id,
+            rotation_state="active",
+            revoked_at__isnull=True,
+            rotation_period__isnull=False,
+            next_rotation_at__lte=now,
+        ).only(
+            "id", "workspace_id", "registration_id", "rotation_family_id",
+            "rotation_period", "next_rotation_at", "rotation_state",
+        )
+        async for t in qs:
+            due.append({
+                "family_key": t.rotation_family_id or str(t.id),
+                "token_id": str(t.id),
+                "workspace_id": str(t.workspace_id),
+                "registration_id": str(t.registration_id),
+                "next_rotation_at": t.next_rotation_at.isoformat() if t.next_rotation_at else None,
+                "rotation_period_days": t.rotation_period.days if t.rotation_period else None,
+                "rotation_state": t.rotation_state,
+            })
+        return due
+
+
+def cloud_source_q() -> Q:
+    """Rows that read as cloud-origin anywhere the dashboard counts them.
+
+    ``list_audit_logs`` coerces a missing or empty ``source`` to ``cloud`` at
+    read time (``log.get("source") or "cloud"``), so the summary's cloud
+    bucket and the ``source=cloud`` filter must coerce identically — otherwise
+    the card contradicts the Origin column over the very same rows. One
+    predicate, used by every read path, is what keeps them equal.
+    """
+    return Q(source="cloud") | Q(source="") | Q(source__isnull=True)
 
 
 class AuditSelector:
     """
     Pure read-only query selector layer for Audit Logs.
     """
+
+    # Plan-mode log retention windows. Free keeps 3 days; Pro keeps 30.
+    # Unknown tier fails open (no restriction).
+    FREE_RETENTION_DAYS = 3
+    PRO_RETENTION_DAYS = 30
+
+    SUMMARY_CACHE_TTL = 60
+    # Long enough that a version bump can never collide with an entry cached
+    # under the previous version; summaries themselves expire after 60s.
+    SUMMARY_VERSION_TTL = 7 * 24 * 3600
+
+    @staticmethod
+    def summary_version(workspace_id: str) -> int:
+        return cache.get(f"audit-summary:ver:{workspace_id}") or 1
+
+    @staticmethod
+    def invalidate_summary_cache(workspace_id) -> None:
+        """Version-bump every cached summary for this workspace.
+
+        Called wherever audit rows are written. The list reads the database
+        live while the summary serves a 60s cache, so without this the card
+        silently lags the table exactly when new events are landing — the
+        dashboard showed eight rows beside a card saying five.
+        """
+        key = f"audit-summary:ver:{workspace_id}"
+        try:
+            cache.incr(key)
+        except ValueError:
+            cache.set(key, 2, AuditSelector.SUMMARY_VERSION_TTL)
+
+    @staticmethod
+    async def retention_window(*, workspace_id: str) -> tuple[int | None, bool]:
+        """(days, restricted) for a workspace. restricted=False means pro/unknown.
+
+        The resolver owns entitlement, so a cache miss confirms the local mirror
+        against the resolver before clamping a Free workspace. Without that, an
+        upgrade stayed clamped to 3 days until someone called the billing
+        reconcile endpoint by hand.
+        """
+        try:
+            tier = await WorkspaceSelector.resolve_tier(workspace_id=str(workspace_id))
+        except Exception:
+            return None, False
+        if tier == WorkspaceTier.PRO:
+            return AuditSelector.PRO_RETENTION_DAYS, False
+        if tier == WorkspaceTier.FREE:
+            return AuditSelector.FREE_RETENTION_DAYS, True
+        return None, False
+
+    @staticmethod
+    async def apply_retention_floor(qs, *, workspace_id: str, field: str = "timestamp"):
+        """Clamp a log queryset to the workspace's plan retention window.
+
+        Shared by every Tier-1/Tier-2/Tier-3 read so the billing promise (Free
+        3 days, Pro 30) has one implementation. ``field`` names the timestamp
+        column: audit rows carry ``timestamp``, activity rows ``created_at``.
+        """
+        days, _ = await AuditSelector.retention_window(workspace_id=str(workspace_id))
+        if days:
+            qs = qs.filter(**{f"{field}__gte": timezone.now() - timedelta(days=days)})
+        return qs
 
     @staticmethod
     def apply_filters(qs, params: dict[str, Any]):
@@ -328,13 +495,30 @@ class AuditSelector:
             "identity_level": "identity_level",
             "credential_ref": "credential_ref",
             "environment": "environment",
-            "resolution_path": "resolution_path",
-            "source": "source",
         }
         for param, field in simple.items():
             val = params.get(param)
             if val:
                 qs = qs.filter(**{field: val})
+        # source is not a plain equality: the table's Origin column reads an
+        # empty/missing source as cloud, so filtering to Cloud has to select
+        # the same rows the reader already sees marked cloud.
+        source = params.get("source")
+        if source == "cloud":
+            qs = qs.filter(cloud_source_q())
+        elif source:
+            qs = qs.filter(source=source)
+        resolution_path = params.get("resolution_path")
+        if resolution_path:
+            # Comma-separated allowed (e.g. ?resolution_path=env,direct_resolve).
+            values = [v.strip() for v in str(resolution_path).split(",") if v.strip()]
+            if len(values) > 1:
+                qs = qs.filter(resolution_path__in=values)
+            elif values:
+                qs = qs.filter(resolution_path=values[0])
+        exclude_resolution = params.get("exclude_resolution_path")
+        if exclude_resolution:
+            qs = qs.exclude(resolution_path=exclude_resolution)
         domain = params.get("domain")
         if domain:
             qs = qs.filter(target_domain__icontains=domain)
@@ -353,12 +537,14 @@ class AuditSelector:
         return qs
 
     @staticmethod
-    async def list_audit_logs(*, workspace_id: str, params: dict[str, Any], limit: int = 100) -> list[dict[str, Any]]:
+    async def list_audit_logs(*, workspace_id: str, params: dict[str, Any], limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         qs = AuditSelector.apply_filters(
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             params,
         )
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
         limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
         fields = [
             "id",
             "timestamp",
@@ -376,7 +562,7 @@ class AuditSelector:
             "error",
             "source",
         ]
-        logs = qs.order_by("-timestamp").values(*fields)[:limit]
+        logs = qs.order_by("-timestamp", "-id").values(*fields)[offset : offset + limit]
         return [
             {
                 "id": str(log["id"]),
@@ -422,49 +608,152 @@ class AuditSelector:
         return fields
 
     @staticmethod
+    async def get_replay_by_audit(*, log_id: str, user: User) -> dict[str, Any]:
+        """Resolve a Tier-3 forensic replay from a Tier-2 audit id.
+
+        Primary path is the resolver-emitted correlation_id stored on both
+        rows. Pre-linkage rows fall back to timestamp proximity (±2s within
+        the workspace), scoped to the audit row's own event type so an env
+        delivery can never resolve to an unrelated proxy decision.
+        Raises NotFoundError when no forensic twin exists (e.g. CLI-origin
+        events, whose forensic chain lives only in local SQLite).
+        """
+        log = await AuditLogEntry.objects.filter(
+            id=log_id
+        ).exclude(identity_level=IdentityLevel.USER).afirst()
+        if not log:
+            raise NotFoundError("Log not found")
+        await WorkspaceSelector.get_membership(user=user, workspace_id=log.workspace_id)
+
+        forensic = None
+        if log.correlation_id:
+            forensic = await ForensicAuditLogEntry.objects.filter(
+                workspace_id=log.workspace_id,
+                correlation_id=log.correlation_id,
+            ).afirst()
+        if forensic is None and log.timestamp:
+            # Proximity fallback is only for genuine pre-linkage rows (emitted
+            # before correlation_id existed). Scope it to the event type the
+            # audit row actually is, so an env delivery can never bind to an
+            # unrelated proxy resolve that landed within ±2s in the same
+            # workspace and replay the wrong decision.
+            expected_type = "env_delivery" if (log.resolution_path or "") == "env" else "proxy_call"
+            window_start = log.timestamp - timedelta(seconds=2)
+            window_end = log.timestamp + timedelta(seconds=2)
+            forensic = await ForensicAuditLogEntry.objects.filter(
+                workspace_id=log.workspace_id,
+                created_at__gte=window_start,
+                created_at__lte=window_end,
+                event_json__type=expected_type,
+            ).order_by("created_at").afirst()
+        if forensic is None:
+            raise NotFoundError("No forensic record for this event")
+        return await ForensicLogSelector.get_replay(log_id=forensic.id, user=user)
+
+    @staticmethod
     async def get_audit_log_summary(
         *,
         workspace_id: str,
+        params: dict[str, Any] | None = None,
         start: str | None = None,
         end: str | None = None,
     ) -> dict[str, Any]:
+        """Aggregate the telemetry stream under the same filters as the list.
+
+        The dashboard shows these numbers next to a filtered table, so the
+        summary has to accept the list's query params; otherwise the cards
+        describe a different set of rows than the reader is looking at. Scope
+        is the plan retention window, never an arbitrary month boundary.
+        """
+        params = dict(params or {})
+        start = start or params.get("start") or None
+        end = end or params.get("end") or None
+
+        # 60s cache-aside: dashboard polls summary on every navigation +
+        # visibility return. Aggregates only — no secret material is cached.
+        # The version segment is bumped by invalidate_summary_cache on every
+        # audit write, so a landing row makes every cached count unreachable
+        # instead of letting the card contradict a live list for a minute.
+        fingerprint = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        cache_key = (
+            f"audit-summary:{workspace_id}:v{AuditSelector.summary_version(workspace_id)}:"
+            f"{start or 'all'}:{end or 'all'}:{fingerprint}"
+        )
+        cached = await sync_to_async(cache.get)(cache_key)
+        if cached is not None:
+            return cached
+
         qs = AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER)
+        qs = AuditSelector.apply_filters(qs, params)
         if start:
             qs = qs.filter(timestamp__gte=start)
         if end:
             qs = qs.filter(timestamp__lte=end)
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
+        retention_days, retention_restricted = await AuditSelector.retention_window(workspace_id=str(workspace_id))
 
-        total_requests = await qs.acount()
-        total_errors = await qs.filter(status_code__gte=400).acount()
+        # Same "failed" predicate the per-agent and per-domain breakdowns use, so
+        # the card and the breakdown can never disagree.
+        failed_q = Q(status_code__gte=400) | Q(error__isnull=False)
+
+        # Single aggregate for totals instead of 3 separate COUNT scans.
+        totals = await qs.aaggregate(
+            total=Count("id"),
+            errors=Count("id", filter=Q(status_code__gte=400)),
+            failed=Count("id", filter=failed_q),
+            redacted=Count("id", filter=Q(redacted=True)),
+            cloud=Count("id", filter=cloud_source_q()),
+            cli=Count("id", filter=Q(source="cli")),
+            env=Count("id", filter=Q(resolution_path="env")),
+            anon=Count("id", filter=Q(identity_level=IdentityLevel.ANONYMOUS)),
+        )
+        total_requests = totals["total"] or 0
+        total_errors = totals["errors"] or 0
+        failed = totals["failed"] or 0
 
         by_agent = await sync_to_async(list)(
             qs.exclude(agent_id__isnull=True).exclude(agent_id="").values("agent_id").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
         by_domain = await sync_to_async(list)(
             qs.values("target_domain").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
         by_credential = await sync_to_async(list)(
             qs.values("credential_ref").annotate(
                 count=Count("id"),
                 failed=Count("id", filter=Q(status_code__gte=400) | Q(error__isnull=False)),
-            ).order_by("-count")
+            ).order_by("-count")[:50]
         )
-        anon_count = await qs.filter(identity_level=IdentityLevel.ANONYMOUS).acount()
+        anon_count = totals["anon"] or 0
 
-        return {
+        result = {
             "period": {"start": start or "all", "end": end or "all"},
             "totals": {"requests": total_requests, "errors": total_errors},
+            # Counts the dashboard cards read. `blocked` uses the breakdown's
+            # failed predicate; `ok` is its complement over the same set.
+            "ok": max(0, total_requests - failed),
+            "blocked": failed,
+            "redacted": totals["redacted"] or 0,
+            # Quota meters cloud activity only: the resolver debits cloud proxy
+            # resolutions (TryConsumeUsage) and the control plane reports
+            # cloud-backed env deliveries (/v1/billing/record-usage). Local CLI
+            # calls reach neither path, so the dashboard must not add them in.
+            "cloud_requests": totals["cloud"] or 0,
+            "cli_requests": totals["cli"] or 0,
+            "env_requests": totals["env"] or 0,
             "by_agent": [{"agent_id": r["agent_id"], "count": r["count"], "failed": r["failed"]} for r in by_agent],
             "by_credential": [{"credential_ref": r["credential_ref"], "count": r["count"], "failed": r["failed"]} for r in by_credential],
             "by_domain": [{"domain": r["target_domain"], "count": r["count"], "failed": r["failed"]} for r in by_domain],
             "anonymous_call_count": anon_count,
+            "retention": {"days": retention_days, "restricted": retention_restricted},
         }
+        await sync_to_async(cache.set)(cache_key, result, AuditSelector.SUMMARY_CACHE_TTL)
+        return result
 
 
 class CloudDelegationSelector:
@@ -485,9 +774,66 @@ class CloudDelegationSelector:
             "user_encrypted_workspace_key": member.encrypted_workspace_key,
         }
 
+    @staticmethod
+    async def get_resolver_delegation(*, workspace_id: uuid.UUID) -> dict[str, Any]:
+        """Active CEDK delegation for resolver-identity callers (B2 DEK sync).
+
+        Returns the sealed blob and public key only — no user material, no
+        membership lookup. The resolver unseals with its own CEDK_priv."""
+        from .models import CloudDelegationKey
+        delegation = await CloudDelegationKey.objects.filter(
+            workspace_id=workspace_id, is_active=True
+        ).afirst()
+        return {
+            "workspace_id": str(workspace_id),
+            "sealed_workspace_key": delegation.sealed_workspace_key if delegation else None,
+            "public_key": delegation.public_key if delegation else None,
+            "has_delegation": bool(delegation and delegation.sealed_workspace_key),
+        }
+
 
 class WorkloadSelector:
     """Selector for headless container workload secret deliveries."""
+
+    @staticmethod
+    async def resolve_env_attribution(*, raw_token: str) -> dict[str, Any] | None:
+        """Best-effort workspace attribution for a refused env delivery.
+
+        resolve_env_payload validates the token strictly (unrevoked, unexpired,
+        capability granted, project contained). A refusal must still be
+        attributable to a workspace so the failure is auditable, so this looks up
+        the registration WITHOUT those gates. Returns None when no token matches
+        at all, in which case there is no tenant to file the refusal against."""
+        import hashlib
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        token = await AgentToken.objects.select_related(
+            "registration",
+            "registration__workspace",
+        ).filter(token_hash=token_hash).order_by("-created_at").afirst()
+        if not token or not token.registration or not token.registration.workspace_id:
+            return None
+        registration = token.registration
+        workspace = registration.workspace
+        environment = (
+            getattr(token, "environment", None)
+            or getattr(registration, "environment", None)
+            or "production"
+        )
+        allowlist = [
+            d
+            async for d in WorkspaceAllowlist.objects.filter(
+                workspace_id=registration.workspace_id
+            ).values_list("domain", flat=True)
+        ]
+        return {
+            "workspace_id": str(registration.workspace_id),
+            "workspace_name": workspace.name if workspace else "",
+            "agent_name": registration.name,
+            "project_id": str(registration.project_id) if registration.project_id else None,
+            "token_id": str(token.id),
+            "environment": environment,
+            "allowlist": allowlist,
+        }
 
     @staticmethod
     async def resolve_env_payload(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
@@ -538,14 +884,32 @@ class WorkloadSelector:
             )
 
         # Query secrets for this project & environment
-        from apps.secrets_app.models import Secret
+        from apps.secrets_app.models import Project, Secret
         from apps.common.services.encryption import EncryptionService
 
-        filter_kwargs = {"environment": env_name}
+        # Cross-workspace containment, fail closed, mirroring
+        # AgentService.verify_agent_token: a project-scoped agent may only read a
+        # project that lives in the token's own workspace.
+        if registration.project_id:
+            project_workspace_id = await Project.objects.filter(
+                id=registration.project_id
+            ).values_list("workspace_id", flat=True).afirst()
+            if project_workspace_id is None or str(project_workspace_id) != str(workspace.id):
+                logger.warning(
+                    "ENV_RESOLVE_WORKSPACE_MISMATCH: token=%s workspace=%s project=%s project_ws=%s",
+                    token.id,
+                    workspace.id,
+                    registration.project_id,
+                    project_workspace_id,
+                )
+                raise AuthorizationError("Agent project does not belong to the token's workspace")
+
+        # Always scope by the token's workspace, even when a project_id is set, so
+        # a dangling or cross-workspace project reference can never widen the
+        # query beyond the workspace the token belongs to.
+        filter_kwargs = {"environment": env_name, "project__workspace_id": workspace.id}
         if registration.project_id:
             filter_kwargs["project_id"] = registration.project_id
-        else:
-            filter_kwargs["project__workspace_id"] = workspace.id
 
         secrets_qs = Secret.objects.filter(**filter_kwargs).values("key", "value")
 
@@ -567,6 +931,8 @@ class WorkloadSelector:
             "workspace_id": str(workspace.id),
             "workspace_name": workspace.name,
             "agent_name": registration.name,
+            "project_id": str(registration.project_id) if registration.project_id else None,
+            "token_id": str(token.id),
             "environment": env_name,
             "secrets": secrets_map,
             "allowlist": allowlist,
@@ -577,6 +943,19 @@ class ActivityLogSelector:
     """
     Pure read-only query selector layer for Workspace Activity Logs (Tier 1 Managerial).
     """
+
+    # Category -> queryset predicate. Categories are the dashboard's filter
+    # taxonomy, not raw columns: rotation lives under secrets by target_type but
+    # must be filterable on its own, and tokens span two target types.
+    CATEGORY_FILTERS = {
+        "secret": Q(action__startswith="secret.") & ~Q(action__startswith="secret.rotation"),
+        "rotation": Q(action__startswith="secret.rotation"),
+        "project": Q(target_type="project"),
+        "environment": Q(target_type="environment"),
+        "member": Q(target_type="member"),
+        "allowlist": Q(target_type="allowlist"),
+        "token": Q(target_type__in=["agent_token", "agent_token_family"]),
+    }
 
     @staticmethod
     def apply_filters(qs, params: dict[str, Any]):
@@ -592,6 +971,24 @@ class ActivityLogSelector:
             val = params.get(param)
             if val:
                 qs = qs.filter(**{field: val})
+
+        # Dashboard search: one box over the fields a reader recognises. Runs
+        # server-side so it reaches beyond the loaded page, matching the
+        # telemetry tab's behaviour.
+        query = (params.get("q") or "").strip()
+        if query:
+            qs = qs.filter(
+                Q(action__icontains=query)
+                | Q(target_name__icontains=query)
+                | Q(actor_email__icontains=query)
+                | Q(target_type__icontains=query)
+            )
+
+        category = (params.get("category") or "").strip().lower()
+        if category:
+            predicate = ActivityLogSelector.CATEGORY_FILTERS.get(category)
+            if predicate is not None:
+                qs = qs.filter(predicate)
 
         since = params.get("since")
         if since:
@@ -611,6 +1008,11 @@ class ActivityLogSelector:
     ) -> list[dict[str, Any]]:
         qs = WorkspaceActivityLog.objects.filter(workspace_id=workspace_id)
         qs = ActivityLogSelector.apply_filters(qs, params)
+        # Plan retention applies to the managerial stream too: Free 3 days,
+        # Pro 30. Clamping before paging keeps page boundaries honest.
+        qs = await AuditSelector.apply_retention_floor(
+            qs, workspace_id=workspace_id, field="created_at"
+        )
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
 
@@ -723,7 +1125,7 @@ class CloudSyncSelector:
 
     @staticmethod
     async def build_sync_payload(*, workspace_id: uuid.UUID) -> dict[str, Any]:
-        from .models import CloudDelegationKey, WorkspaceAllowlist
+        from .models import CloudDelegationKey, Workspace, WorkspaceAllowlist
         from apps.common.services.encryption import EncryptionService
         from apps.secrets_app.models import Secret
 
@@ -765,6 +1167,12 @@ class CloudSyncSelector:
         if delegation and delegation.updated_at and (latest is None or delegation.updated_at > latest):
             latest = delegation.updated_at
 
+        # 5. Billing entitlement for quota attribution by quota-enforcing
+        # consumers (e.g. the cloud resolver's login posture, which has no
+        # token-bound billing id). None when the workspace has no billing.
+        workspace = await Workspace.objects.filter(id=workspace_id).afirst()
+        billing_id = getattr(workspace, "effective_billing_id", None) if workspace else None
+
         return {
             "workspace_id": str(workspace_id),
             "version": latest.isoformat() if latest else None,
@@ -772,5 +1180,6 @@ class CloudSyncSelector:
             "public_key": delegation_public_key,
             "has_delegation": bool(delegation),
             "allowlist": allowlist,
+            "billing_id": billing_id,
             "secrets": secrets,
         }

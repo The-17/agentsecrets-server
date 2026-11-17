@@ -7,7 +7,7 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 ## 1. Prerequisites
 
 - **Python**: 3.10 or higher
-- **Database**: PostgreSQL 14+ (Recommended) or SQLite (Local testing)
+- **Database**: PostgreSQL 14+ (required; there is no SQLite fallback)
 - **AgentSecrets CLI**: Installed locally (`brew install The-17/tap/agentsecrets` or `npm install -g @the-17/agentsecrets`)
 - **Web Server / Reverse Proxy**: Caddy, Nginx, or Traefik with TLS termination
 
@@ -30,6 +30,8 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 | `POSTGRES_PASSWORD` | PostgreSQL database password | Strong generated password |
 | `POSTGRES_HOST` | PostgreSQL host address | `localhost` or `postgres.internal` |
 | `POSTGRES_PORT` | PostgreSQL port | `5432` |
+| `OPAQUE_SIDECAR_TOKEN` | Shared bearer token between Django and the OPAQUE sidecar | Random 32-byte base64 string |
+| `OPAQUE_SERVER_KEY_MATERIAL` | Long-term OPAQUE server keys (`sk:pk:oprf`, base64, colon-separated) | Generated once, see below |
 
 ### Optional / Advanced Security Keys:
 
@@ -37,7 +39,52 @@ This guide details how to self-host and operate `agentsecrets-server` in develop
 |---|---|---|
 | `RESOLVER_SERVICE_KEY` | Shared internal key for agent verification calls | `internal-secret-token` |
 | `CRON_SECRET` | Bearer token for scheduled metric computation | `cron-trigger-token` |
-| `LOG_LEVEL` | Application logging verbosity (`INFO`, `WARNING`, `ERROR`) | `INFO` |
+
+---
+
+## 2a. OPAQUE login on a Docker host
+
+Account signup and password login are handled by an OPAQUE sidecar that runs
+inside the same container. The Docker image already contains the binary. It
+starts only when **both** `OPAQUE_SIDECAR_TOKEN` and
+`OPAQUE_SERVER_KEY_MATERIAL` are present. With either missing, the container
+boots, its healthcheck passes, and every login attempt returns:
+
+```
+OPAQUE is not configured on this server (status 503)
+```
+
+`entrypoint.sh` sets `OPAQUE_SIDECAR_URL=http://127.0.0.1:8790` automatically.
+Do not set it by hand unless the sidecar runs elsewhere.
+
+Generate the two values once, on a trusted machine, from the CLI repo:
+
+```bash
+# key material: one line, format sk:pk:oprf
+go run ./cmd/opaque-sidecar -print-keys
+
+# bearer token
+head -c 32 /dev/urandom | base64
+```
+
+Set both as environment variables on the service (Render: **Environment** tab),
+then redeploy. Verify without reading platform logs:
+
+```bash
+curl -s https://your-host/api/status/health/ | jq '.components.opaque'
+# {"configured": true}
+```
+
+**Reuse the exact `OPAQUE_SERVER_KEY_MATERIAL` from the previous host.**
+An OPAQUE registration record is cryptographically bound to the server keys
+that created it. Freshly generated keys strand every enrolled account: they
+can no longer log in, and the only recovery is re-enrollment. If the previous
+host's value is unrecoverable, treat it as an incident and re-enroll accounts
+rather than quietly rotating.
+
+Keep the value identical across replicas and restarts, store it in the host's
+secret manager, and never commit it. Rotating it is a migration, not a config
+edit.
 
 ---
 
@@ -65,6 +112,13 @@ agentsecrets secrets set CRON_SECRET="your-internal-cron-secret"
 ---
 
 ## 4. Running the Server
+
+The container entrypoint applies committed migrations on every boot by default
+(`RUN_MIGRATIONS=false` opts out, for read-only replicas only). A deploy that
+ships a new model without its migration leaves the schema behind the code:
+cascade deletes then target a missing table and return 500. `build_files.sh`
+still runs `migrate` for Vercel builds, but Render's Docker service has no
+build step that does it, so the entrypoint is the single reliable place.
 
 ### Local Development / Evaluation:
 
@@ -202,6 +256,8 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - POSTGRES_SSLMODE=disable
+      # Optional; entrypoint.sh applies migrations by default. Set to false
+      # only for a read-only replica.
       - RUN_MIGRATIONS=true
       - COLLECT_STATIC=true
     volumes:
@@ -228,6 +284,31 @@ To maintain rolling platform analytics and adoption aggregates, run `calculate_m
 ```bash
 curl -X POST https://api.agentsecrets.yourcompany.com/telemetry/internal/compute-metrics/ \
   -H "Authorization: Bearer your-internal-cron-secret"
+```
+
+### Vercel cron + Deployment Protection (read this before enabling it)
+
+When deployed on Vercel, `vercel.json` registers the cron (`59 23 * * *` →
+`/telemetry/internal/compute-metrics/`). Vercel attaches
+`Authorization: Bearer $CRON_SECRET` automatically **only if** a `CRON_SECRET`
+environment variable exists for the target environment — if it is missing, the
+request arrives unauthenticated and the endpoint answers `401`.
+
+Deployment Protection can break the cron even when `CRON_SECRET` is set. Vercel's
+cron invokes the *generated deployment URL* (`*.vercel.app`), never the custom
+domain. If protection is scoped to protect generated deployment URLs
+(`ssoProtection.deploymentType = "all_except_custom_domains"`), the cron request
+is answered with `302 → vercel.com/sso-api` at the edge, before it reaches
+Django. The function never runs, no error appears in the app logs, and the
+rollup silently stops producing `DailyMetricsAggregate` rows.
+
+Fix: use a protection scope that leaves production deployment URLs reachable
+(`"preview"` protects preview deployments only), or drive the rollup from outside
+Vercel against the custom domain, which is exempt from deployment protection:
+
+```bash
+curl -fsS -X POST https://api.agentsecrets.yourcompany.com/telemetry/internal/compute-metrics/ \
+  -H "Authorization: Bearer $CRON_SECRET"
 ```
 
 ---

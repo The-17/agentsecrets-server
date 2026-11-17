@@ -70,6 +70,23 @@ class LoginSchema(Schema):
         return sanitize_and_normalize_password(v, min_length=0)
 
 
+class SocialExchangeSchema(Schema):
+    """Exchange an OAuth authorization code for a login token pair."""
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    redirect_uri: str
+    state: str
+
+
+class SocialAuthorizeResponseSchema(Schema):
+    """Authorize URL plus the signed state the client must echo on exchange."""
+    model_config = ConfigDict(extra="forbid")
+
+    authorize_url: str
+    state: str
+
+
 class LogoutSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,6 +98,101 @@ class VerifyOtpSchema(Schema):
 
     email: EmailStr
     otp: int
+
+
+class UpdateEmailRequestSchema(Schema):
+    """Request a verified email change. A code is sent to the new address."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_email: EmailStr
+
+
+class ConfirmEmailSchema(Schema):
+    """Confirm the pending email change with the code sent to the new address."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_email: EmailStr
+    otp: int
+
+
+class OpaqueCapabilitySchema(Schema):
+    """Report which auth methods the server supports."""
+
+    password: bool = True
+    oauth_github: bool = False
+    oauth_google: bool = False
+    email_link: bool = False
+    # OPAQUE is reported only when OPAQUE_SIDECAR_URL is configured and a sidecar is reachable.
+    opaque: bool = False  # Set dynamically by the endpoint.
+    # Whether the server accepts the v2 split-share vault. Clients gate the
+    # v1 -> v2 migration on this, so migration can be paused during rollout
+    # without shipping a client change.
+    vault_v2: bool = True
+
+
+class OpaqueRegisterStartSchema(Schema):
+    """Registration start: client sends reg_request + credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    reg_request: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueRegisterFinishSchema(Schema):
+    """Registration finish: Django sends reg_record + credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    reg_record: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueLoginStartSchema(Schema):
+    """Login start: client sends email, ke1, credential id.
+
+    The registration record is server-side state. It is read from the account,
+    never accepted from the client, so any device can log in once enrolled.
+    """
+    model_config = ConfigDict(extra="forbid")
+    email: EmailStr
+    ke1: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueLoginFinishSchema(Schema):
+    """Login finish: client sends email, ke3, server_state, credential_id."""
+    model_config = ConfigDict(extra="forbid")
+    email: EmailStr
+    ke3: str  # Base64 (no padding)
+    server_state: str  # Base64 (no padding)
+    credential_id: str  # UUID
+
+
+class OpaqueFinishResponseSchema(Schema):
+    """Response OPAQUE endpoints expect to return."""
+    model_config = ConfigDict(extra="forbid")
+    record: str  # opaque_record (opaque base64 dataset) for registration finish
+    ke2: str  # Server KE2 for login start
+    server_state: str  # Server state for login finish
+    session_key: str  # Session key for login finish
+
+
+class OpaqueRegisterStartResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    reg_response: str
+    credential_id: str
+
+
+class OpaqueRegisterFinishResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    record: str
+    credential_id: str
+
+
+class OpaqueLoginStartResponseSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+    ke2: str
+    server_state: str
+    credential_id: str
 
 
 class ResendOtpSchema(Schema):
@@ -118,11 +230,84 @@ class ChangePasswordSchema(Schema):
     new_password: str
     key_salt: str
     encrypted_private_key: str
+    vault: Optional[dict] = None
+    expected_version: Optional[int] = None
 
     @field_validator("current_password")
     @classmethod
     def validate_current_password(cls, v: str) -> str:
         return sanitize_and_normalize_password(v, min_length=0)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        return sanitize_and_normalize_password(v, min_length=8)
+
+
+class VaultUpdateSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int
+    vault: dict
+
+
+class InitializeKeysSchema(Schema):
+    """First-time key setup for accounts created without keys (social sign-up).
+
+    The client generates the keypair locally and sends the public key plus the
+    private key sealed under the master vault password. ``password`` is
+    optional; when present it becomes the account's password factor.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    public_key: str
+    encrypted_private_key: str
+    key_salt: str
+    password: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        return sanitize_and_normalize_password(v, min_length=8)
+
+
+class KeyMaterialResponseSchema(Schema):
+    """Key material a JWT-authenticated session needs to unlock its own vault.
+
+    The ciphertext is sealed under the master password (or the vault's
+    password envelope), so holding it without the password decrypts nothing.
+    """
+    public_key: Optional[str] = None
+    encrypted_private_key: Optional[str] = None
+    key_salt: Optional[str] = None
+    vault: Optional[dict] = None
+    vault_version: int = 0
+
+
+class RecoveryChallengeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class RecoveryVerifySchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    nonce: str
+    signature: str
+
+
+class RecoverPasswordSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str
+    key_salt: str
+    encrypted_private_key: str
+    vault: dict
+    expected_version: int
 
     @field_validator("new_password")
     @classmethod
@@ -155,6 +340,8 @@ class UserSummarySchema(Schema):
     last_name: str
     public_key: Optional[str] = None
     billing_id: Optional[str] = None
+    email_verified: bool = False
+    opaque_enrolled: bool = False
 
 
 class RegisterResponseDataSchema(Schema):
@@ -162,6 +349,7 @@ class RegisterResponseDataSchema(Schema):
     first_name: str
     last_name: str
     workspace: Optional[WorkspaceSummarySchema] = None
+    email_verification_required: bool = False
 
 
 class LoginResponseDataSchema(Schema):
@@ -170,8 +358,27 @@ class LoginResponseDataSchema(Schema):
     expires_at: str
     key_salt: Optional[str] = None
     encrypted_private_key: Optional[str] = None
+    vault: Optional[dict] = None
+    vault_version: Optional[int] = None
+    # Present only on OPAQUE login: proof the client and server derived the
+    # same key exchange secret.
+    session_key: Optional[str] = None
     user: UserSummarySchema
     workspaces: List[WorkspaceSummarySchema]
+
+
+class VaultResponseSchema(Schema):
+    vault: Optional[dict] = None
+    vault_version: int = 0
+
+
+class RecoveryChallengeResponseSchema(Schema):
+    challenge: str
+    nonce: str
+    expires_at: str
+    user_id: str
+    vault: Optional[dict] = None
+    vault_version: int = 0
 
 
 class TokenRefreshResponseDataSchema(Schema):
@@ -183,3 +390,16 @@ class TokenRefreshResponseDataSchema(Schema):
 class UserPublicKeyResponseSchema(Schema):
     email: str
     public_key: str
+
+
+class AccountProbeSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class AccountProbeResponseSchema(Schema):
+    # A bare boolean on purpose. The auth UI needs to know which step to render,
+    # but the response must never say "this account exists", because that is the
+    # enumeration this endpoint is rate-limited against.
+    exists: bool

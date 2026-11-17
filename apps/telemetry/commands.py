@@ -200,6 +200,112 @@ COMMAND_MAP: Dict[str, Tuple[str, str]] = {
     "sync": ("secrets", "sync"),
 }
 
+# Subcommand phrases per domain, matched longest-prefix against the tokens that
+# follow the command head. Covers the canonical noun-then-action tree
+# (`secrets pull`, `agent token issue`) so an action keeps its own bucket instead
+# of collapsing into "general". Anything absent stays "general": a trailing
+# argument is not a subcommand.
+SUBCOMMAND_ACTIONS: Dict[str, Dict[str, str]] = {
+    "secrets": {
+        "set": "set",
+        "list": "list",
+        "pull": "pull",
+        "push": "push",
+        "delete": "delete",
+        "diff": "diff",
+        "sync": "sync",
+        "rotate": "rotate",
+        "rotation": "rotation",
+        "rotation set": "rotation_set",
+        "rotation status": "rotation_status",
+        "policy": "policy",
+        "policy set": "policy_set",
+        "policy get": "policy_get",
+        "policy delete": "policy_delete",
+        "policy list": "policy_list",
+    },
+    "projects": {
+        "list": "list",
+        "create": "create",
+        "use": "use",
+        "update": "update",
+        "delete": "delete",
+        "invite": "invite",
+        "transfer": "transfer",
+    },
+    "workspaces": {
+        "list": "list",
+        "create": "create",
+        "switch": "switch",
+        "invite": "invite",
+        "members": "members",
+        "remove": "remove_member",
+        "promote": "promote",
+        "demote": "demote",
+        "delete": "delete",
+        "allowlist": "allowlist",
+        "allowlist add": "allowlist_add",
+        "allowlist remove": "allowlist_remove",
+        "allowlist list": "allowlist_list",
+        "allowlist logs": "allowlist_logs",
+    },
+    "agents": {
+        "register": "register",
+        "list": "list",
+        "delete": "delete",
+        "token": "tokens",
+        "token issue": "issue_token",
+        "token list": "list_tokens",
+        "token rotate": "rotate_token",
+        "token rotation": "token_rotation",
+        "token rotation set": "token_rotation_set",
+        "token revoke": "revoke_token",
+        "policy": "policy",
+        "policy get": "get_policy",
+        "policy set": "set_policy",
+    },
+    "logs": {
+        "list": "list",
+        "show": "show",
+        "summary": "summarize",
+        "watch": "watch",
+        "export": "export",
+        "verify": "verify",
+        "replay": "replay",
+    },
+    "environment": {
+        "switch": "switch",
+        "list": "list",
+        "copy": "copy",
+        "merge": "merge",
+        "clean": "clean",
+    },
+    "proxy": {
+        "start": "start",
+        "status": "status",
+        "stop": "stop",
+        "sync": "sync",
+        "logs": "logs",
+        "approve": "approve",
+        "rotate-session": "rotate_session",
+    },
+    "mcp": {
+        "serve": "serve",
+        "install": "install",
+        "bridge": "bridge",
+    },
+    "server": {
+        "get": "get",
+        "set": "set",
+        "status": "status",
+        "reset": "reset",
+    },
+}
+
+# Single-token generic verbs that are shortcuts into a domain (kept for
+# alias-usage accounting, never for domain resolution).
+_GENERIC_VERBS: Set[str] = {"list", "get", "set", "pull", "push", "diff", "use", "sync"}
+
 # Internal CLI flags or completion signals to ignore (not typos, not user commands)
 IGNORED_INTERNAL_COMMANDS: Set[str] = {
     "__complete", "completion", "help", "--help", "-h", "--version", "-v", "version"
@@ -227,26 +333,63 @@ def sanitize_raw_command_name(raw_name: str) -> str:
     return raw_clean
 
 
+def _split_command(raw_name: str):
+    """
+    Split a recorded command path into (head, rest, raw_tokens), sanitizing the
+    head token only. The Windows-path cleanup exists for a contaminated command
+    name ("statusC:\\Users\\..."), not for arguments: a legitimate argument can
+    contain a URL or a path (`server set https://...`) and must not truncate
+    the command path.
+    """
+    raw_tokens = [t for t in str(raw_name or "").strip().split() if t]
+    if not raw_tokens:
+        return "", [], []
+    head = sanitize_raw_command_name(raw_tokens[0]).lower()
+    if not head:
+        return "", [], []
+    return head, [t.lower() for t in raw_tokens[1:]], raw_tokens
+
+
+def _resolve_action(domain: str, rest: list) -> str:
+    """
+    Longest-prefix match of the tokens after the command head against the
+    domain's known subcommand phrases. Nothing matched stays "general" — a
+    trailing argument (`set STRIPE_KEY`, `call POST`) is not a subcommand and
+    must not be classified as a typo.
+    """
+    actions = SUBCOMMAND_ACTIONS.get(domain, {})
+    for end in range(len(rest), 0, -1):
+        phrase = " ".join(rest[:end])
+        if phrase in actions:
+            return actions[phrase]
+    return "general"
+
+
 def classify_command(raw_name: str) -> Tuple[str, str, bool]:
     """
-    Classifies a raw command string.
+    Classifies a raw command name or command path.
     Returns (domain, sub_action, is_typo).
+
+    Accepts both the legacy single token ("pull-secrets") and the space-joined
+    path the CLI now records ("secrets pull"). Both resolve to the same
+    (domain, action), so the canonical tree and the shortcut feed one bucket
+    instead of splitting one action across "general" and the action name.
     """
-    cleaned = sanitize_raw_command_name(raw_name)
-    if not cleaned:
+    head, rest, _ = _split_command(raw_name)
+    if not head:
         return ("", "", False)
 
-    lower = cleaned.lower()
-
-    if lower in IGNORED_INTERNAL_COMMANDS:
+    if head in IGNORED_INTERNAL_COMMANDS:
         return ("", "", False)
 
-    if lower in COMMAND_MAP:
-        domain, action = COMMAND_MAP[lower]
-        return (domain, action, False)
+    if head not in COMMAND_MAP:
+        # A genuine typo: report the head token, not the whole path.
+        return ("typos", head, True)
 
-    # If it is not recognized and not an internal flag, it's a true typo
-    return ("typos", lower, True)
+    domain, action = COMMAND_MAP[head]
+    if rest:
+        action = _resolve_action(domain, rest)
+    return (domain, action, False)
 
 
 def process_command_executions(
@@ -277,7 +420,8 @@ def process_command_executions(
         if not domain:
             continue
 
-        cleaned = sanitize_raw_command_name(raw_cmd).lower()
+        head, rest, _ = _split_command(raw_cmd)
+        cleaned = " ".join([head] + rest) if head else ""
 
         if is_typo:
             sanitized_typos[action] = sanitized_typos.get(action, 0) + count
@@ -292,8 +436,14 @@ def process_command_executions(
                 hierarchical_breakdown[domain]["actions"].get(action, 0) + count
             )
 
-            # Record alias/shortcut invocations (verb-noun forms like list-secrets, set-secret, or generic verbs)
-            if cleaned != domain and (action != "general" or "-" in cleaned or cleaned in {"list", "get", "set", "pull", "push", "diff", "use", "sync"}):
+            # Alias/shortcut usage counts single-token verb-noun forms
+            # (list-secrets, pull-secret). A canonical path ("secrets pull") is
+            # not a shortcut and must not inflate this table.
+            if (
+                not rest
+                and cleaned != domain
+                and (action != "general" or "-" in cleaned or cleaned in _GENERIC_VERBS)
+            ):
                 alias_usage[cleaned] = alias_usage.get(cleaned, 0) + count
 
     return canonical_totals, hierarchical_breakdown, sanitized_typos, alias_usage

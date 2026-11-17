@@ -47,6 +47,9 @@ class ErrorCode:
     MEMBER_CANNOT_REMOVE_OWNER = "member_cannot_remove_owner"
     MEMBER_CANNOT_CHANGE_OWNER = "member_cannot_change_owner"
 
+    # DELIVERY ERRORS
+    EMAIL_DELIVERY_UNAVAILABLE = "email_delivery_unavailable"
+
     # AGENT-SPECIFIC ERRORS
     AGENT_NOT_FOUND = "agent_not_found"
     AGENT_TOKEN_NOT_FOUND = "agent_token_not_found"
@@ -106,6 +109,37 @@ class ConflictError(RequestError):
 class QuotaExceededError(RequestError):
     def __init__(self, err_msg: str = "Monthly cloud resolution quota exhausted for current billing period. Upgrade to Pro for 100,000 resolutions/month."):
         super().__init__("quota_exceeded", err_msg, 429)
+
+
+class RateLimitError(RequestError):
+    def __init__(self, err_msg: str = "Too many attempts. Try again later."):
+        super().__init__("rate_limited", err_msg, 429)
+
+
+class OpaqueUnavailableError(RequestError):
+    """OPAQUE is unconfigured or its sidecar is down. Fail closed, never downgrade."""
+
+    def __init__(self, err_msg: str = "OPAQUE authentication is temporarily unavailable"):
+        super().__init__("opaque_unavailable", err_msg, 503)
+
+
+class PasswordLoginDisabledError(RequestError):
+    """This account is enrolled in OPAQUE, so it has no password factor."""
+
+    def __init__(self, err_msg: str = "Password login is disabled for this account. Use OPAQUE login."):
+        super().__init__("password_login_disabled", err_msg, 401)
+
+
+class EmailChangeDisabledError(RequestError):
+    """Email change is refused while OPAQUE is enrolled.
+
+    The account email is the OPAQUE credential identifier, so changing it would
+    invalidate the registered record and lock the account out (the password
+    factor is removed once enrolled). Refuse rather than strand the user.
+    """
+
+    def __init__(self, err_msg: str = "Email change is not available for OPAQUE-enrolled accounts."):
+        super().__init__("email_change_disabled", err_msg, 409)
 
 
 # ==========================================

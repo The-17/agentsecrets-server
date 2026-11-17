@@ -281,6 +281,40 @@ class AgentToken(models.Model):
         User, on_delete=models.SET_NULL, null=True,
         related_name='created_agent_tokens'
     )
+    rotation_family_id = models.CharField(
+        max_length=100, null=True, blank=True, db_index=True,
+        help_text="Root token id of this rotation family; assigned on first rotation"
+    )
+    supersedes = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text="Token id this token directly succeeds (plain id reference, never a raw token)"
+    )
+    superseded_by = models.CharField(
+        max_length=100, null=True, blank=True,
+        help_text="Token id that directly succeeds this token"
+    )
+    rotation_period = models.DurationField(
+        null=True, blank=True,
+        help_text="Automated cadence; arming is desired-state only, execution is Pro-gated in the resolver (HR-M3)"
+    )
+    rotation_overlap = models.DurationField(
+        null=True, blank=True,
+        help_text="Routine-rotation grace window; null means the 24h default"
+    )
+    next_rotation_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    overlap_until = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Superseded predecessor stays valid until this time (routine rotation only; compromise revokes immediately)"
+    )
+    rotation_state = models.CharField(
+        max_length=20, default='active', db_index=True,
+        choices=[('active', 'Active'), ('superseded', 'Superseded'), ('revoked', 'Revoked')],
+        help_text="active | superseded (in overlap) | revoked (explicit or compromise-poisoned)"
+    )
+    rotation_id = models.CharField(
+        max_length=100, null=True, blank=True, db_index=True,
+        help_text="Idempotency key of the rotation cycle that minted this token (HR-H4)"
+    )
 
     class Meta:
         db_table = 'agent_tokens'
@@ -358,6 +392,10 @@ class AuditLogEntry(models.Model):
     session_id = models.CharField(max_length=255, null=True, blank=True)
     policy_snapshot_id = models.CharField(max_length=255, null=True, blank=True)
     error = models.JSONField(null=True, blank=True)
+    # Per-request linkage binding this Tier-2 row to its Tier-3 forensic twin,
+    # emitted by the cloud resolver (corr_<hex>). Lets the web resolve replay
+    # from an audit id. Null for CLI-origin and pre-linkage rows.
+    correlation_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     class Meta:
         db_table = 'audit_logs'
@@ -592,6 +630,14 @@ class ForensicAuditLogEntry(models.Model):
         db_index=True,
         help_text="Timestamp when the event occurred"
     )
+    # Per-request linkage to the Tier-2 audit twin (see AuditLogEntry).
+    correlation_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Resolver-emitted corr_ id binding this record to its audit twin"
+    )
 
     class Meta:
         db_table = 'forensic_audit_logs'
@@ -603,5 +649,94 @@ class ForensicAuditLogEntry(models.Model):
 
     def __str__(self):
         return f"ForensicLog {self.id} (stream: {self.stream_id}#{self.stream_seq})"
+
+
+class InviteStatus(models.TextChoices):
+    """Lifecycle of a workspace invitation.
+
+    PENDING  - sent, nobody has accepted. Grants nothing.
+    ACCEPTED - the invited address proved control by accepting, and a
+               membership exists without a workspace key, so the workspace is
+               visible but locked.
+    ACTIVE   - an admin client sealed the workspace key for the new member.
+    REVOKED  - withdrawn, or superseded by a newer invite.
+    """
+
+    PENDING = 'pending', 'Pending'
+    ACCEPTED = 'accepted', 'Accepted'
+    ACTIVE = 'active', 'Active'
+    REVOKED = 'revoked', 'Revoked'
+
+
+class WorkspaceInvite(BaseModel):
+    """An invitation to join a workspace, bound to one address.
+
+    Invitations are their own record, not a Membership row, because an invite
+    grants nothing: no workspace appears in the invitee's list, no seat is
+    theirs, and no sealed key exists until they accept. The token is
+    single-use, the code is six digits, and both are stored hashed.
+    """
+
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name='invites',
+        help_text="Workspace the invitee is invited to",
+    )
+    email = models.EmailField(
+        help_text="Invited address, normalized to lowercase. Only it can accept.",
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=MembershipRole.choices,
+        default=MembershipRole.MEMBER,
+    )
+    invited_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sent_workspace_invites',
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=InviteStatus.choices,
+        default=InviteStatus.PENDING,
+        db_index=True,
+    )
+    token_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        help_text="sha256 of the single-use link token; the raw token is never stored.",
+    )
+    code_hash = models.CharField(
+        max_length=64,
+        help_text="sha256 of the six-digit acceptance code.",
+    )
+    attempts = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Failed code attempts. Locks at EMAIL_CODE_MAX_ATTEMPTS.",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='accepted_workspace_invites',
+    )
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'workspace_invites'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workspace', 'email', 'status']),
+            models.Index(fields=['email', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Invite {self.email} -> {self.workspace_id} ({self.status})"
 
 

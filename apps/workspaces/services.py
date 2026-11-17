@@ -8,12 +8,14 @@ import secrets as secrets_module
 import uuid
 from typing import Any
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction, models
 from django.db.models import Q
 from django.utils import timezone
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import User
+from apps.accounts.verification import require_verified_email
 from apps.common.exceptions import (
     NotFoundError,
     AuthorizationError,
@@ -44,7 +46,8 @@ from .schemas import (
     AgentTokenCreateSchema,
     InternalAgentVerifySchema,
 )
-from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector
+from . import invites
+from .selectors import WorkspaceSelector, AgentSelector, WorkloadSelector, AuditSelector
 
 logger = logging.getLogger("apps.workspaces")
 
@@ -69,6 +72,33 @@ def _bearer_for_sync(user: User) -> str:
     runs on the sync thread pool.
     """
     return sync_to_async(_bearer_for)(user)
+
+
+async def _sync_subscription(billing_id: str, bearer: str) -> dict | None:
+    """Ask the resolver to reconcile this account from Polar's API.
+
+    The pull-based heal for a missed webhook: the resolver fetches the live
+    subscription from Polar and activates the store only when Polar reports an
+    active/trialing plan. Returns the resolver's subscription payload, or None
+    when the resolver predates ``/v1/billing/sync`` or is unreachable, so the
+    caller keeps the read it already has.
+    """
+    import urllib.parse
+    import urllib.request
+
+    base = getattr(settings, "RESOLVER_URL", "https://resolver.agentsecrets.tech").rstrip("/")
+    query = urllib.parse.urlencode({"billing_id": billing_id})
+
+    def _do() -> dict | None:
+        req = urllib.request.Request(f"{base}/v1/billing/sync?{query}", method="POST")
+        req.add_header("Authorization", f"Bearer {bearer}")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    return await sync_to_async(_do, thread_sensitive=False)()
 
 
 class WorkspaceService:
@@ -196,6 +226,16 @@ class WorkspaceService:
             logger.error(f"BILLING_RECONCILE_FAILED: could not reach resolver for workspace {workspace_id}: {exc}")
             return {"tier": getattr(ws, "tier", "free"), "billing_id": ws.billing_id, "status": "resolver_unreachable"}
 
+        # A missed webhook leaves the store reporting Free even though Polar has
+        # a live subscription. Ask the resolver to reconcile from Polar before
+        # trusting the read. Best effort: an older resolver without the sync
+        # endpoint, or a Polar hiccup, leaves the read above untouched.
+        if not (remote_tier == "pro" and remote_status == "active"):
+            healed = await _sync_subscription(ws.billing_id, await _bearer_for_sync(user))
+            if healed:
+                remote_tier = (healed.get("plan") or remote_tier).lower()
+                remote_status = (healed.get("status") or remote_status).lower()
+
         # Mirror only a resolver-confirmed active Pro account. Anything else
         # (free, cancelled, past_due, unreachable) leaves the workspace free so it
         # keeps drawing the owner pool rather than claiming quota it doesn't have.
@@ -203,10 +243,13 @@ class WorkspaceService:
             if getattr(ws, "tier", "free") != WorkspaceTier.PRO:
                 ws.tier = WorkspaceTier.PRO
                 await ws.asave(update_fields=["tier", "updated_at"])
+            # Drop the retention verdict so the next read sees Pro immediately.
+            await sync_to_async(cache.delete)(f"ws-tier:{workspace_id}")
             return {"tier": "pro", "billing_id": ws.billing_id, "status": "active"}
         if getattr(ws, "tier", "free") != WorkspaceTier.FREE:
             ws.tier = WorkspaceTier.FREE
             await ws.asave(update_fields=["tier", "updated_at"])
+        await sync_to_async(cache.delete)(f"ws-tier:{workspace_id}")
         return {"tier": "free", "billing_id": ws.billing_id, "status": remote_status or "inactive"}
 
 
@@ -214,6 +257,44 @@ class MemberService:
     """
     Domain service layer for Workspace Member operations and invitations.
     """
+
+    # Free workspaces hold this many seats (active + pending invites).
+    # Pro is unlimited. This is the same "3 members" the billing page
+    # advertises; the resolver never sees member rows, so the server —
+    # the choke point for web, CLI, and API invites — enforces it.
+    FREE_MEMBER_LIMIT = 3
+    LIMIT_MESSAGE = (
+        "Free workspaces hold 3 members. Upgrade to Pro for unlimited seats."
+    )
+
+    @staticmethod
+    async def check_member_cap(*, user: User, workspace_id: uuid.UUID) -> None:
+        """Raise BodyValidationError when a free workspace is out of seats.
+
+        Pro and unknown tiers pass (fail open). On a would-block, billing is
+        reconciled once first so a stale local tier can't wrongly refuse a
+        workspace the resolver already upgraded to Pro.
+        """
+        ws = await Workspace.objects.filter(id=workspace_id).afirst()
+        if ws is None or getattr(ws, "tier", None) == WorkspaceTier.PRO:
+            return
+        if getattr(ws, "tier", None) not in (WorkspaceTier.FREE,):
+            return
+        seats = await Membership.objects.filter(
+            workspace_id=workspace_id,
+            status__in=[MembershipStatus.ACTIVE, MembershipStatus.INVITED],
+        ).acount()
+        if seats < MemberService.FREE_MEMBER_LIMIT:
+            return
+        try:
+            reconciled = await WorkspaceService.reconcile_workspace_billing(
+                user=user, workspace_id=workspace_id
+            )
+        except Exception:
+            reconciled = {"tier": "free"}
+        if (reconciled or {}).get("tier") == WorkspaceTier.PRO:
+            return
+        raise BodyValidationError("email", MemberService.LIMIT_MESSAGE)
 
     @staticmethod
     async def process_member_invites(
@@ -225,52 +306,108 @@ class MemberService:
         um = await WorkspaceSelector.get_membership(user=user, workspace_id=workspace_id)
         if um.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("Only workspace admins can invite members.")
+        await require_verified_email(user, action="invite members")
+
+        workspace = await Workspace.objects.filter(id=workspace_id).afirst()
+        if workspace is None:
+            raise NotFoundError("Workspace not found")
 
         results = []
         any_created = False
 
-        for invite in entries:
+        for entry in entries:
+            email = invites.normalize_email(entry.email)
             try:
-                invitee = await User.objects.filter(email=invite.email).afirst()
-                if not invitee:
-                    results.append({"email": invite.email, "error": "User not found"})
+                existing_m = await Membership.objects.filter(
+                    workspace_id=workspace_id, user__email=email
+                ).afirst()
+
+                # An accepted invitation waiting for its key. This is the
+                # second half of the handoff: the admin's client seals the
+                # workspace key on refresh, which unlocks the workspace.
+                if await invites.finalize(
+                    workspace_id=workspace_id,
+                    email=email,
+                    encrypted_workspace_key=entry.encrypted_workspace_key,
+                ):
+                    results.append({"email": entry.email, "error": ""})
+                    any_created = True
+                    await ActivityLogService.record_target(
+                        user=user,
+                        workspace_id=workspace_id,
+                        project_id=None,
+                        action="member.invited",
+                        target_type="member",
+                        target_id=getattr(existing_m, "user_id", None),
+                        target_name=email,
+                        metadata={"role": str(entry.role), "key_sealed": True},
+                    )
                     continue
 
-                existing_m = await Membership.objects.filter(user=invitee, workspace_id=workspace_id).afirst()
                 if existing_m:
-                    if invite.encrypted_workspace_key and (not existing_m.encrypted_workspace_key or existing_m.status == MembershipStatus.INVITED):
-                        existing_m.encrypted_workspace_key = invite.encrypted_workspace_key
+                    # Legacy INVITED rows from before invitations had their own
+                    # record. Keep healing them when a key arrives.
+                    if entry.encrypted_workspace_key and (
+                        not existing_m.encrypted_workspace_key
+                        or existing_m.status == MembershipStatus.INVITED
+                    ):
+                        existing_m.encrypted_workspace_key = entry.encrypted_workspace_key
                         existing_m.status = MembershipStatus.ACTIVE
-                        existing_m.role = invite.role
-                        await existing_m.asave(update_fields=["encrypted_workspace_key", "status", "role", "updated_at"])
-                        logger.info(
-                            f"MEMBER_KEY_UPDATED: Updated encrypted key and activated workspace {workspace_id} for user {invite.email}"
+                        existing_m.role = entry.role
+                        await existing_m.asave(
+                            update_fields=[
+                                "encrypted_workspace_key",
+                                "status",
+                                "role",
+                                "updated_at",
+                            ]
                         )
-                        results.append({"email": invite.email, "error": ""})
+                        results.append({"email": entry.email, "error": ""})
                         any_created = True
                         continue
 
-                    results.append({"email": invite.email, "error": "Already a member"})
+                    results.append({"email": entry.email, "error": "Already a member"})
                     continue
 
-                await Membership.objects.acreate(
-                    user=invitee,
-                    workspace_id=workspace_id,
-                    role=invite.role,
-                    status=MembershipStatus.ACTIVE if invite.encrypted_workspace_key else MembershipStatus.INVITED,
-                    encrypted_workspace_key=invite.encrypted_workspace_key or "",
+                # One batch cannot overshoot the cap: reserved seats are
+                # counted on every iteration, so an earlier invite in the same
+                # request already consumes its seat.
+                try:
+                    await invites.check_capacity(user=user, workspace=workspace)
+                except BodyValidationError:
+                    results.append(
+                        {"email": entry.email, "error": MemberService.LIMIT_MESSAGE}
+                    )
+                    continue
+
+                await invites.issue(
+                    workspace=workspace,
+                    inviter=user,
+                    email=email,
+                    role=entry.role,
                 )
                 logger.info(
-                    f"MEMBER_INVITED: User invited to workspace {workspace_id} with role {invite.role}"
+                    f"MEMBER_INVITED: Invitation sent to {email} for workspace {workspace_id}"
                 )
-                results.append({"email": invite.email, "error": ""})
+                results.append({"email": entry.email, "error": ""})
                 any_created = True
+                await ActivityLogService.record_target(
+                    user=user,
+                    workspace_id=workspace_id,
+                    project_id=None,
+                    action="member.invited",
+                    target_type="member",
+                    target_id=None,
+                    target_name=email,
+                    metadata={"role": str(entry.role)},
+                )
 
             except Exception as e:
                 logger.error(
                     f"MEMBER_INVITE_FAILED: Error inviting to workspace {workspace_id}: {type(e).__name__}"
                 )
-                results.append({"email": invite.email, "error": str(e)})
+                message = getattr(e, "err_msg", None) or str(e)
+                results.append({"email": entry.email, "error": message})
 
         return results, any_created
 
@@ -296,8 +433,19 @@ class MemberService:
         if role == MembershipRole.OWNER:
             raise AuthorizationError("Cannot promote member to OWNER. Transfer ownership instead.")
 
+        old_role = tm.role
         tm.role = role
         await tm.asave(update_fields=["role", "updated_at"])
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.role_changed",
+            target_type="member",
+            target_id=tm.user_id,
+            target_name=tm.user.email,
+            metadata={"from": str(old_role), "to": str(role)},
+        )
         return {"user_id": str(target_user_id), "email": tm.user.email, "role": tm.role}
 
     @staticmethod
@@ -321,7 +469,17 @@ class MemberService:
         if um.role not in [MembershipRole.OWNER, MembershipRole.ADMIN]:
             raise AuthorizationError("You don't have permission to remove members")
         email = tm.user.email
+        member_user_id = tm.user_id
         await tm.adelete()
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.removed",
+            target_type="member",
+            target_id=member_user_id,
+            target_name=email,
+        )
         logger.warning(f"MEMBER_REMOVED: Member removed from workspace {workspace_id}")
         return email
 
@@ -357,6 +515,16 @@ class MemberService:
             tm.role = MembershipRole.ADMIN
 
         await tm.asave(update_fields=["role", "updated_at"])
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="member.promoted" if action == "promote" else "member.demoted",
+            target_type="member",
+            target_id=tm.user_id,
+            target_name=tm.user.email,
+            metadata={"role": str(tm.role)},
+        )
         return {"user_id": str(tm.user.id), "role": tm.role}
 
 
@@ -398,6 +566,17 @@ class AllowlistService:
         entries = await _insert_records()
         for e in entries:
             e.added_by = user
+        for e in entries:
+            await ActivityLogService.record_target(
+                user=user,
+                workspace_id=workspace_id,
+                project_id=None,
+                action="allowlist.added",
+                target_type="allowlist",
+                target_id=e.id,
+                target_name=e.domain,
+                metadata={"domain": e.domain},
+            )
         return [
             {
                 "id": str(e.id),
@@ -435,6 +614,16 @@ class AllowlistService:
                 )
 
         await _delete_and_log()
+        await ActivityLogService.record_target(
+            user=user,
+            workspace_id=workspace_id,
+            project_id=None,
+            action="allowlist.removed",
+            target_type="allowlist",
+            target_id=entry.id,
+            target_name=domain.lower(),
+            metadata={"domain": domain.lower()},
+        )
 
 
 class AgentService:
@@ -451,6 +640,20 @@ class AgentService:
         project_id: uuid.UUID | None = None,
     ) -> tuple[dict[str, Any], str, str]:
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        await require_verified_email(user, action="use cloud mode")
+
+        # A project-scoped agent must be bound to a project inside its own
+        # workspace. The project_id arrives from the URL, so without this check a
+        # member of workspace A could create an agent in A that points at
+        # workspace B's project — the entry point for cross-workspace secret
+        # reads and for quota debited against the wrong workspace.
+        if project_id is not None:
+            project_workspace_id = await Project.objects.filter(
+                id=project_id
+            ).values_list("workspace_id", flat=True).afirst()
+            if project_workspace_id is None or str(project_workspace_id) != str(workspace_id):
+                raise AuthorizationError("Project does not belong to this workspace")
+
         raw_token = secrets_module.token_urlsafe(32)
         expires_at = timezone.now() + timezone.timedelta(days=payload.expires_in_days) if payload.expires_in_days else None
 
@@ -506,8 +709,19 @@ class AgentService:
         agent = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).afirst()
         if not agent:
             raise NotFoundError("Agent not found")
-        agent.capabilities = capabilities
-        await agent.asave(update_fields=["capabilities", "updated_at"])
+        # Merge semantics: only override fields that were explicitly supplied
+        # (non-None). Replacing the whole dict silently wiped unrelated
+        # capabilities — e.g. a granular secret-policy update would drop
+        # can_env_read / can_proxy_resolve, and vice-versa.
+        merged = dict(agent.capabilities or {})
+        for key, value in capabilities.items():
+            if value is None:
+                continue
+            merged[key] = value
+        agent.capabilities = merged
+        # NOTE: AgentRegistration has no `updated_at` column; passing it to
+        # update_fields raises ValueError and 500s every capability update.
+        await agent.asave(update_fields=["capabilities"])
         return agent.capabilities or {}
 
     @staticmethod
@@ -522,6 +736,7 @@ class AgentService:
         if not exists:
             raise NotFoundError("Agent not found")
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        await require_verified_email(user, action="mint workload tokens for cloud mode")
 
         expires_at = timezone.now() + timezone.timedelta(days=data.expires_in_days) if data.expires_in_days else None
         raw_token = secrets_module.token_urlsafe(32)
@@ -576,6 +791,260 @@ class AgentService:
         await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
         await AgentToken.objects.filter(registration_id=registration_id).adelete()
 
+    DEFAULT_ROTATION_OVERLAP = timezone.timedelta(hours=24)
+    ROTATION_REASONS = ("routine", "compromise")
+
+    @staticmethod
+    def _rotate_token_sync(
+        *,
+        predecessor_id: str,
+        rotation_id: str | None,
+        reason: str,
+        overlap: Any | None,
+    ) -> tuple[str | None, AgentToken, bool]:
+        """Mint a successor token inside one atomic transaction (HR-H4).
+
+        Returns (raw_token_or_None_on_replay, successor, replayed). The raw
+        value exists only on fresh mint and is shown to the caller exactly
+        once; a replayed rotation_id returns metadata without raw material.
+        Cap: one live successor per rotation_id per family.
+        """
+        if reason not in AgentService.ROTATION_REASONS:
+            raise BodyValidationError("reason", "Must be 'routine' or 'compromise'")
+        now = timezone.now()
+        overlap_eff = overlap or AgentService.DEFAULT_ROTATION_OVERLAP
+        with transaction.atomic():
+            try:
+                predecessor = AgentToken.objects.select_for_update().get(id=predecessor_id)
+            except AgentToken.DoesNotExist:
+                raise NotFoundError("Token not found")
+            family_id = predecessor.rotation_family_id or predecessor.id
+            if rotation_id:
+                replay = AgentToken.objects.filter(
+                    rotation_family_id=family_id,
+                    rotation_id=rotation_id,
+                    supersedes=predecessor.id,
+                ).first()
+                if replay is not None:
+                    return None, replay, True
+            if predecessor.rotation_state != "active" or predecessor.revoked_at:
+                raise BodyValidationError("token_id", "Only an active token can be rotated")
+            raw_token = secrets_module.token_urlsafe(32)
+            successor = AgentToken.objects.create(
+                registration_id=predecessor.registration_id,
+                workspace_id=predecessor.workspace_id,
+                token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+                label=predecessor.label,
+                environment=predecessor.environment,
+                expires_at=predecessor.expires_at,
+                created_by=predecessor.created_by,
+                rotation_family_id=family_id,
+                supersedes=predecessor.id,
+                rotation_id=rotation_id or None,
+                rotation_period=predecessor.rotation_period,
+                rotation_overlap=predecessor.rotation_overlap,
+                next_rotation_at=(now + predecessor.rotation_period) if predecessor.rotation_period else None,
+            )
+            if not predecessor.rotation_family_id:
+                predecessor.rotation_family_id = family_id
+            predecessor.superseded_by = successor.id
+            if reason == "compromise":
+                predecessor.revoked_at = now
+                predecessor.overlap_until = now
+                predecessor.save(update_fields=[
+                    "rotation_family_id", "superseded_by", "revoked_at",
+                    "overlap_until",
+                ])
+                AgentToken.objects.filter(rotation_family_id=family_id).exclude(
+                    id=successor.id
+                ).exclude(rotation_state="revoked").update(
+                    rotation_state="revoked", revoked_at=now, overlap_until=now
+                )
+            else:
+                predecessor.rotation_state = "superseded"
+                predecessor.overlap_until = now + overlap_eff
+                predecessor.save(update_fields=[
+                    "rotation_family_id", "superseded_by", "rotation_state",
+                    "overlap_until",
+                ])
+            return raw_token, successor, False
+
+    @staticmethod
+    def _token_rotation_metadata(token: AgentToken, now: Any) -> dict[str, Any]:
+        due = bool(
+            token.rotation_state == "active"
+            and token.rotation_period
+            and token.next_rotation_at
+            and token.next_rotation_at <= now
+        )
+        return {
+            "rotation_state": token.rotation_state,
+            "rotation_family_id": token.rotation_family_id,
+            "overlap_until": token.overlap_until.isoformat() if token.overlap_until else None,
+            "next_rotation_at": token.next_rotation_at.isoformat() if token.next_rotation_at else None,
+            "rotation_period_days": token.rotation_period.days if token.rotation_period else None,
+            "superseded_by": token.superseded_by,
+            "rotation_due": due,
+        }
+
+    @staticmethod
+    async def rotate_agent_token(
+        *,
+        user: User,
+        workspace_id: uuid.UUID,
+        registration_id: str,
+        token_id: str,
+        overlap_hours: int | None = None,
+        reason: str = "routine",
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Manual one-shot rotation (free for all tiers). The caller must
+        persist the returned raw token: it is shown exactly once."""
+        exists = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).aexists()
+        if not exists:
+            raise NotFoundError("Agent not found")
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        target = await AgentToken.objects.filter(id=token_id, registration_id=registration_id).afirst()
+        if not target:
+            raise NotFoundError("Token not found")
+        if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+            raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+        overlap = timezone.timedelta(hours=overlap_hours) if overlap_hours is not None else None
+        raw_token, successor, _ = await sync_to_async(AgentService._rotate_token_sync)(
+            predecessor_id=target.id, rotation_id=None, reason=reason, overlap=overlap,
+        )
+        try:
+            await ActivityLogService.record_target(
+                user=user, workspace_id=workspace_id, project_id=None,
+                action="agent_token.compromise_rotated" if reason == "compromise" else "agent_token.rotated",
+                target_type="agent_token",
+                target_id=successor.id,
+                target_name=target.label or str(target.id),
+                metadata={"reason": reason, "family_id": successor.rotation_family_id},
+            )
+        except Exception as exc:
+            logger.warning("ROTATE_AUDIT_SKIP: %s", exc)
+        return raw_token, {
+            "token_id": str(successor.id),
+            "label": successor.label,
+            "expires_at": successor.expires_at.isoformat() if successor.expires_at else None,
+            "created_at": successor.created_at.isoformat(),
+            "rotation": AgentService._token_rotation_metadata(successor, timezone.now()),
+        }
+
+    @staticmethod
+    async def mint_successor_for_token(
+        *,
+        raw_token: str,
+        rotation_id: str | None = None,
+        reason: str = "routine",
+        overlap_hours: int | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Token-bound mint for pull-renewal: presenting a valid token
+        authorizes minting its own successor. The presented secret (hash
+        match) is required; a bare token id is never sufficient."""
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        predecessor = await AgentToken.objects.filter(token_hash=token_hash).afirst()
+        if not predecessor or not hmac_module.compare_digest(token_hash, predecessor.token_hash):
+            raise NotFoundError("Token not found")
+        if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+            raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+        overlap = timezone.timedelta(hours=overlap_hours) if overlap_hours is not None else None
+        raw_new, successor, replayed = await sync_to_async(AgentService._rotate_token_sync)(
+            predecessor_id=predecessor.id, rotation_id=rotation_id, reason=reason, overlap=overlap,
+        )
+        now = timezone.now()
+        predecessor_overlap_until = None
+        if successor.supersedes:
+            refreshed = await AgentToken.objects.filter(id=successor.supersedes).afirst()
+            if refreshed and refreshed.overlap_until:
+                predecessor_overlap_until = refreshed.overlap_until.isoformat()
+        return raw_new, {
+            "token_id": str(successor.id),
+            "replayed": replayed,
+            "rotation": AgentService._token_rotation_metadata(successor, now),
+            "predecessor_overlap_until": predecessor_overlap_until,
+        }
+
+    @staticmethod
+    async def set_token_rotation_policy(
+        *,
+        user: User,
+        workspace_id: uuid.UUID,
+        registration_id: str,
+        token_id: str,
+        period_days: int | None = None,
+        overlap_hours: int | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Arm or disarm a rotation cadence. Desired-state only: execution is
+        Pro-gated in the resolver against its own Polar store (HR-M3)."""
+        exists = await AgentRegistration.objects.filter(id=registration_id, workspace_id=workspace_id).aexists()
+        if not exists:
+            raise NotFoundError("Agent not found")
+        await WorkspaceSelector.check_admin(user=user, workspace_id=workspace_id)
+        token = await AgentToken.objects.filter(id=token_id, registration_id=registration_id).afirst()
+        if not token:
+            raise NotFoundError("Token not found")
+        if token.rotation_state != "active" or token.revoked_at:
+            raise BodyValidationError("token_id", "Only an active token can arm a cadence")
+        now = timezone.now()
+        if not enabled or period_days is None:
+            token.rotation_period = None
+            token.next_rotation_at = None
+        else:
+            if not 1 <= period_days <= 365:
+                raise BodyValidationError("period_days", "Must be between 1 and 365")
+            if overlap_hours is not None and not 0 <= overlap_hours <= 168:
+                raise BodyValidationError("overlap_hours", "Must be between 0 and 168")
+            token.rotation_period = timezone.timedelta(days=period_days)
+            token.next_rotation_at = now + token.rotation_period
+            if overlap_hours is not None:
+                token.rotation_overlap = timezone.timedelta(hours=overlap_hours)
+        await token.asave(update_fields=[
+            "rotation_period", "rotation_overlap", "next_rotation_at",
+        ])
+        return {
+            "id": str(token.id),
+            "rotation": AgentService._token_rotation_metadata(token, now),
+        }
+
+    @staticmethod
+    async def revoke_token_family(
+        *,
+        workspace_id: uuid.UUID,
+        family_key: str,
+        reason: str = "compromise",
+    ) -> dict[str, Any]:
+        """Resolver-driven family revoke on corroborated reuse (HR-H6):
+        zero overlap, every live family member poisoned, none rollbackable."""
+
+        @sync_to_async
+        def _revoke_sync():
+            from django.db.models import Q as DQ
+            now = timezone.now()
+            with transaction.atomic():
+                qs = AgentToken.objects.select_for_update().filter(
+                    DQ(rotation_family_id=family_key) | DQ(id=family_key),
+                    workspace_id=workspace_id,
+                ).exclude(rotation_state="revoked")
+                ids = list(qs.values_list("id", flat=True))
+                count = qs.update(rotation_state="revoked", revoked_at=now, overlap_until=now)
+                return count, ids
+
+        count, ids = await _revoke_sync()
+        try:
+            await ActivityLogService.record_target(
+                user=None, workspace_id=workspace_id, project_id=None,
+                action="agent_token.family_revoked",
+                target_type="agent_token_family",
+                target_id=family_key, target_name=family_key,
+                metadata={"reason": reason, "revoked_count": count},
+                source="cloud",
+            )
+        except Exception as exc:
+            logger.warning("REVOKE_AUDIT_SKIP: %s", exc)
+        return {"family_key": family_key, "revoked_count": count, "token_ids": [str(i) for i in ids]}
+
     @staticmethod
     async def verify_agent_token(*, auth_caller: Any, data: InternalAgentVerifySchema) -> dict[str, Any]:
         token_hash = hashlib.sha256(data.token.encode()).hexdigest()
@@ -608,24 +1077,73 @@ class AgentService:
         if not (is_hash_match or is_id_match):
             return {"valid": False, "reason": "Invalid token"}
 
-        if token.revoked_at:
-            return {"valid": False, "reason": "Revoked"}
+        now = timezone.now()
+        identifiers = {
+            "token_id": str(token.id),
+            "workspace_id": str(token.workspace_id),
+            "rotation": {
+                "rotation_state": token.rotation_state,
+                "rotation_family_id": token.rotation_family_id,
+                "overlap_until": token.overlap_until.isoformat() if token.overlap_until else None,
+                "next_rotation_at": token.next_rotation_at.isoformat() if token.next_rotation_at else None,
+                "rotation_period_days": token.rotation_period.days if token.rotation_period else None,
+                "superseded_by": token.superseded_by,
+                "rotation_due": False,
+            },
+        }
+        if token.revoked_at or token.rotation_state == "revoked":
+            successor_used = False
+            if token.superseded_by:
+                successor = await AgentToken.objects.filter(id=token.superseded_by).afirst()
+                successor_used = bool(successor and successor.last_used_at)
+            return {"valid": False, "reason": "revoked_reuse_suspected" if successor_used else "Revoked", **identifiers}
 
-        if token.expires_at and token.expires_at < timezone.now():
-            return {"valid": False, "reason": "Expired"}
+        if token.rotation_state == "superseded":
+            if not (token.overlap_until and token.overlap_until >= now):
+                return {"valid": False, "reason": "overlap_expired", **identifiers}
+            rotation_reason = "superseded_overlap"
+        else:
+            rotation_reason = None
 
-        token.last_used_at = timezone.now()
+        if token.expires_at and token.expires_at < now:
+            return {"valid": False, "reason": "Expired", **identifiers}
+
+        token.last_used_at = now
         await token.asave(update_fields=["last_used_at"])
 
         agent = token.registration
         workspace = getattr(agent, "workspace", None)
-        billing_id = workspace.effective_billing_id if workspace else ""
+
+        # Cross-workspace containment, fail closed. A token may only act on a
+        # project inside its own workspace. When a project is set it is the
+        # canonical reference for both the audit trail and the billing debit, so
+        # the workspace reported and the account debited always agree with the
+        # project the call actually touches.
+        billing_workspace = workspace
+        if agent.project_id:
+            project = await Project.objects.select_related("workspace", "workspace__owner").filter(
+                id=agent.project_id
+            ).afirst()
+            if project is None or str(project.workspace_id) != str(token.workspace_id):
+                logger.warning(
+                    "AGENT_VERIFY_WORKSPACE_MISMATCH: token=%s agent=%s token_ws=%s project=%s project_ws=%s",
+                    token.id,
+                    agent.id,
+                    token.workspace_id,
+                    agent.project_id,
+                    getattr(project, "workspace_id", None),
+                )
+                return {"valid": False, "reason": "workspace_mismatch", **identifiers}
+            billing_workspace = project.workspace
+
+        billing_id = billing_workspace.effective_billing_id if billing_workspace else ""
 
         allowlist_qs = WorkspaceAllowlist.objects.filter(workspace_id=token.workspace_id).values_list("domain", flat=True)
         allowlist = [d async for d in allowlist_qs]
 
         return {
             "valid": True,
+            "reason": rotation_reason,
             "agent_id": str(agent.id),
             "agent_name": agent.name,
             "workspace_id": str(token.workspace_id),
@@ -635,6 +1153,8 @@ class AgentService:
             "token_id": str(token.id),
             "billing_id": billing_id,
             "allowlist": allowlist,
+            "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+            "rotation": AgentService._token_rotation_metadata(token, now),
         }
 
     @staticmethod
@@ -664,6 +1184,7 @@ class AgentService:
 
         char_limits = {
             "id": 64,
+            "correlation_id": 64,
             "environment": 20,
             "agent_id": 64,
             "identity_level": 20,
@@ -680,7 +1201,7 @@ class AgentService:
         }
 
         direct_fields = [
-            "id", "schema_version", "timestamp", "environment",
+            "id", "correlation_id", "schema_version", "timestamp", "environment",
             "agent_id", "identity_level", "method", "target_url",
             "target_path", "status_code", "duration_ms", "proxy_duration_ms",
             "redacted", "redaction_reason", "resolution_path",
@@ -713,7 +1234,10 @@ class AgentService:
             if not mapped.get("timestamp"):
                 mapped["timestamp"] = timezone.now()
 
-            if "source" not in mapped:
+            # Normalize source at the boundary: an empty or missing source
+            # becomes the derived value, so no row is ever stored in a state
+            # the read paths would have to guess about.
+            if not str(mapped.get("source") or "").strip():
                 if mapped.get("resolution_path") in ("local proxy", "cli", "env"):
                     mapped["source"] = "cli"
                 else:
@@ -752,6 +1276,11 @@ class AgentService:
             return 0, []
 
         created = await AuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
+        # Bump the summary cache version for every workspace we touched, so
+        # the dashboard's cards recount immediately instead of serving counts
+        # that predate the rows the list is already showing.
+        for touched_ws in {str(entry.workspace_id) for entry in model_entries}:
+            await sync_to_async(AuditSelector.invalidate_summary_cache)(touched_ws)
         return len(created), [str(log.id) for log in created]
 
 
@@ -806,7 +1335,157 @@ class WorkloadService:
 
     @staticmethod
     async def deliver_env_secrets(*, raw_token: str, env_override: str | None = None) -> dict[str, Any]:
-        return await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        started_at = timezone.now()
+        try:
+            payload = await WorkloadSelector.resolve_env_payload(raw_token=raw_token, env_override=env_override)
+        except Exception as exc:
+            # A refusal is a security decision too: record it (Tier-2 + Tier-3)
+            # so it is visible and replayable, then re-raise so the endpoint still
+            # answers with the correct status. Only genuine authorization refusals
+            # are audited (a transient DB error is not a policy denial), and only
+            # when the token maps to a workspace; an unknown token has no tenant
+            # to file against.
+            if isinstance(exc, AuthorizationError):
+                await WorkloadService._audit_env_refusal(
+                    raw_token=raw_token, exc=exc, started_at=started_at
+                )
+            raise
+        # Every headless env delivery is a credential injection: record it as a
+        # Tier-2 audit row (resolution_path="env") so container `env` runs show
+        # up in the web audit log like CLI `env` runs do. Best-effort and
+        # non-blocking: delivery must never fail because logging did. Key
+        # names only — values never touch the audit tier.
+        try:
+            keys = sorted((payload.get("secrets") or {}).keys())
+            duration_ms = int((timezone.now() - started_at).total_seconds() * 1000)
+            project_id = payload.get("project_id")
+            environment = payload.get("environment") or "production"
+            workspace_id = payload["workspace_id"]
+            # Link the Tier-2 audit row to its Tier-3 forensic twin so the web can
+            # resolve replay from the audit id. Same corr_<hex> shape the resolver
+            # stamps on proxy resolves.
+            correlation_id = "corr_" + uuid.uuid4().hex
+            # Env delivery is not an HTTP request: no HTTP status code (the twin
+            # carries the decision/outcome). A 200 here made the audit list treat
+            # deliveries as HTTP calls.
+            await AuditLogEntry.objects.acreate(
+                timestamp=started_at,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                environment=environment,
+                agent_id=payload.get("agent_name") or "",
+                agent_token_id=payload.get("token_id"),
+                identity_level=IdentityLevel.ISSUED,
+                credential_ref=",".join(keys)[:255],
+                injection_style="env_inject",
+                target_domain="",
+                target_url=f"env:{environment}",
+                target_path="",
+                method="ENV",
+                status_code=None,
+                duration_ms=duration_ms,
+                proxy_duration_ms=0,
+                redacted=False,
+                resolution_path="env",
+                caller_role="workload",
+                source="cloud",
+                correlation_id=correlation_id,
+            )
+            # Emit the Tier-3 forensic twin: the state + decision replay. Without
+            # it the audit row is countable but not replayable, and the
+            # replay-by-audit fallback could bind it to an unrelated proxy row.
+            await ForensicLogService.emit_env_delivery(
+                workspace_id=workspace_id,
+                workspace_name=payload.get("workspace_name") or "",
+                project_id=project_id,
+                environment=environment,
+                keys=keys,
+                allowlist=list(payload.get("allowlist") or []),
+                agent_name=payload.get("agent_name") or "",
+                token_id=payload.get("token_id"),
+                correlation_id=correlation_id,
+                duration_ms=duration_ms,
+                captured_at=started_at,
+            )
+        except Exception:
+            logger.warning("ENV_AUDIT: failed to record workload env delivery", exc_info=True)
+        return payload
+
+    @staticmethod
+    async def _audit_env_refusal(*, raw_token: str, exc: Exception, started_at) -> None:
+        """Record a refused env delivery as a Tier-2 audit row plus a Tier-3
+        forensic twin naming the layer that failed, so a refusal is visible and
+        replayable instead of vanishing. Best-effort: any failure here is logged
+        and swallowed so the original refusal still surfaces to the caller."""
+        try:
+            attribution = await WorkloadSelector.resolve_env_attribution(raw_token=raw_token)
+            if not attribution:
+                return
+            layer, reason = WorkloadService._classify_env_refusal(exc)
+            layers = [
+                {
+                    "layer": name,
+                    "result": "fail" if name == layer else "pass",
+                    "reason": reason if name == layer else "Not evaluated (blocked at an earlier layer)",
+                }
+                for name in ("agent_capabilities", "workspace_containment", "project_scope")
+            ]
+            environment = attribution.get("environment") or "production"
+            duration_ms = int((timezone.now() - started_at).total_seconds() * 1000)
+            correlation_id = "corr_" + uuid.uuid4().hex
+            await AuditLogEntry.objects.acreate(
+                timestamp=started_at,
+                workspace_id=attribution["workspace_id"],
+                project_id=attribution.get("project_id"),
+                environment=environment,
+                agent_id=attribution.get("agent_name") or "",
+                agent_token_id=attribution.get("token_id"),
+                identity_level=IdentityLevel.ISSUED,
+                credential_ref="",
+                injection_style="env_inject",
+                target_domain="",
+                target_url=f"env:{environment}",
+                target_path="",
+                method="ENV",
+                status_code=None,
+                duration_ms=duration_ms,
+                proxy_duration_ms=0,
+                redacted=False,
+                resolution_path="env",
+                caller_role="workload",
+                source="cloud",
+                correlation_id=correlation_id,
+                error={"decision": "blocked", "first_failure_layer": layer, "reason": reason},
+            )
+            await ForensicLogService.emit_env_delivery(
+                workspace_id=attribution["workspace_id"],
+                workspace_name=attribution.get("workspace_name") or "",
+                project_id=attribution.get("project_id"),
+                environment=environment,
+                keys=[],
+                allowlist=list(attribution.get("allowlist") or []),
+                agent_name=attribution.get("agent_name") or "",
+                token_id=attribution.get("token_id"),
+                correlation_id=correlation_id,
+                duration_ms=duration_ms,
+                captured_at=started_at,
+                decision="blocked",
+                layers=layers,
+                first_failure_layer=layer,
+            )
+        except Exception:
+            logger.warning("ENV_AUDIT: failed to record workload env refusal", exc_info=True)
+
+    @staticmethod
+    def _classify_env_refusal(exc: Exception) -> tuple[str, str]:
+        """Map a resolve_env_payload refusal to (failing_layer, reason)."""
+        msg = str(exc)
+        lowered = msg.lower()
+        if "workspace" in lowered and "project" in lowered:
+            return "workspace_containment", msg
+        if "token" in lowered or "can_env_read" in lowered:
+            return "agent_capabilities", msg
+        return "project_scope", msg
 
 
 class ActivityLogService:
@@ -855,6 +1534,37 @@ class ActivityLogService:
         except Exception as e:
             logger.error(f"Failed to record activity log {action}: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    async def record_target(
+        *,
+        user,
+        workspace_id,
+        project_id,
+        action: str,
+        target_type: str,
+        target_id,
+        target_name: str,
+        metadata: dict | None = None,
+        source: str = "api",
+    ):
+        """Shorthand for the overwhelmingly common record() shape: actor +
+        target + action + metadata. Every call site that passes these same
+        kwargs should use this instead of spelling them. The unattended
+        (user=None, source="cloud") rotation path uses the same helper.
+        """
+        await ActivityLogService.record(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            actor=user,
+            actor_email=getattr(user, "email", ""),
+            action=action,
+            target_type=target_type,
+            target_id=str(target_id),
+            target_name=target_name,
+            metadata=metadata or {},
+            source=source,
+        )
 
     @staticmethod
     async def record_batch(
@@ -972,6 +1682,7 @@ class ForensicLogService:
             entry_kwargs: dict[str, Any] = {
                 "workspace_id": ws_val,
                 "project_id": project_id,
+                "correlation_id": str(e.get("correlation_id") or "")[:64],
                 "stream_id": stream_id[:64],
                 "stream_seq": stream_seq,
                 "prev_chain_hash": prev_chain_hash[:64],
@@ -995,4 +1706,133 @@ class ForensicLogService:
 
         created = await ForensicAuditLogEntry.objects.abulk_create(model_entries, ignore_conflicts=True)
         return len(created), [str(log.id) for log in created]
+
+    @staticmethod
+    async def next_stream_link(*, workspace_id: Any, stream_id: str = "control_plane") -> tuple[str, int]:
+        """Return (prev_chain_hash, stream_seq) for the next locally emitted
+        forensic row on a workspace's stream.
+
+        Server-origin rows (headless env delivery) are appended by this server,
+        not ingested from the resolver, so nothing hands us the previous link.
+        We read it from the stream tail so the row still chains: genesis (empty
+        hash, seq 1) when the stream is new, else the tail's chain_hash and the
+        next sequence. Best-effort and non-blocking; the caller treats a failure
+        as "no forensic twin" without affecting secret delivery.
+        """
+        last = await ForensicAuditLogEntry.objects.filter(
+            workspace_id=workspace_id, stream_id=stream_id
+        ).order_by("-stream_seq").afirst()
+        if last is None:
+            return "", 1
+        return (last.chain_hash or ""), (last.stream_seq or 0) + 1
+
+    @staticmethod
+    async def emit_env_delivery(
+        *,
+        workspace_id: Any,
+        workspace_name: str,
+        project_id: str | None,
+        environment: str,
+        keys: list[str],
+        allowlist: list[str],
+        agent_name: str,
+        token_id: str | None,
+        correlation_id: str,
+        duration_ms: int,
+        captured_at,
+        decision: str = "permitted",
+        layers: list[dict[str, Any]] | None = None,
+        first_failure_layer: str = "",
+    ) -> None:
+        """Emit the Tier-3 forensic twin for a headless env delivery, delivered
+        or refused.
+
+        Replay must reconstruct the exact state at the millisecond of execution
+        and the decision, including where it failed. This records the same four
+        decision blocks the resolver emits for a proxy call and the CLI emits for
+        `env`. `decision="permitted"` is a successful injection; any other value
+        is a refusal whose `first_failure_layer` names the layer that stopped it.
+        The row is validated and hashed by ingest_forensic_logs (server-
+        authoritative chain) exactly like resolver-ingested rows.
+
+        Env delivery is not an HTTP request, so the event carries no HTTP status
+        code; the outcome/decision fields carry the result.
+        """
+        permitted = decision == "permitted"
+        if layers is None:
+            layers = [
+                {
+                    "layer": "agent_capabilities",
+                    "result": "pass",
+                    "reason": "Workload token is valid and active",
+                },
+                {
+                    "layer": "workspace_containment",
+                    "result": "pass",
+                    "reason": "Project belongs to the token's workspace",
+                },
+                {
+                    "layer": "project_scope",
+                    "result": "pass",
+                    "reason": f"Delivered {len(keys)} secret(s) for environment '{environment}'",
+                },
+            ]
+        prev_chain_hash, stream_seq = await ForensicLogService.next_stream_link(
+            workspace_id=workspace_id
+        )
+        agent_identity = {
+            "token_name": agent_name,
+            "token_id": token_id,
+            "identity_level": IdentityLevel.ISSUED,
+            "process_verified": True,
+        }
+        entry = {
+            "workspace_id": str(workspace_id),
+            "project_id": project_id,
+            "correlation_id": correlation_id,
+            "stream_id": "control_plane",
+            "stream_seq": stream_seq,
+            "prev_chain_hash": prev_chain_hash,
+            "created_at": captured_at.isoformat(),
+            "event_json": {
+                "type": "env_delivery",
+                "environment": environment,
+                "key_name": ",".join(keys),
+                "method": "ENV",
+                "path": f"env:{environment}",
+                "outcome": "success" if permitted else "blocked",
+                "latency_ms": duration_ms,
+                "agent_identity": agent_identity,
+            },
+            "snapshot_json": {
+                "captured_at": captured_at.isoformat(),
+                "workspace": {
+                    "id": str(workspace_id),
+                    "name": workspace_name,
+                    "allowlist": allowlist,
+                    "allowlist_count": len(allowlist),
+                },
+                "project": {
+                    "id": project_id,
+                    "environment": environment,
+                },
+                "secrets_in_scope": keys,
+                "secrets_count": len(keys),
+                "proxy": {"version": "control-plane", "source": "cloud"},
+            },
+            "enforcement_json": {
+                "decision": decision,
+                "decided_by": "control_plane",
+                "layers_evaluated": layers,
+                "first_failure_layer": first_failure_layer,
+            },
+            "resolution_json": {
+                "credential_injected": permitted,
+                "injection_style": "env_inject" if permitted else "",
+                "response_scanned": False,
+                "redaction_triggered": False,
+                "ssrf_check_passed": True,
+            },
+        }
+        await ForensicLogService.ingest_forensic_logs(entries=[entry])
 

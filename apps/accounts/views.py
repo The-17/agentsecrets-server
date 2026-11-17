@@ -1,30 +1,121 @@
 import logging
 from typing import Any
+from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
+
+from django.conf import settings
 
 from .auth import JWTAuth
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from .schemas import (
+    OpaqueRegisterStartSchema,
+    OpaqueRegisterFinishSchema,
+    OpaqueLoginStartSchema,
+    OpaqueLoginFinishSchema,
+    OpaqueRegisterStartResponseSchema,
+    OpaqueRegisterFinishResponseSchema,
+    OpaqueLoginStartResponseSchema,
+    OpaqueCapabilitySchema,
     RegisterSchema,
     LoginSchema,
     LogoutSchema,
     VerifyOtpSchema,
     ResendOtpSchema,
+    UpdateEmailRequestSchema,
+    ConfirmEmailSchema,
     ResetPasswordSchema,
     SetNewPasswordSchema,
     ChangePasswordSchema,
+    RecoveryChallengeSchema,
+    RecoveryVerifySchema,
+    RecoverPasswordSchema,
     RefreshTokenSchema,
     RegisterResponseDataSchema,
     LoginResponseDataSchema,
     TokenRefreshResponseDataSchema,
     UserPublicKeyResponseSchema,
+    AccountProbeSchema,
+    AccountProbeResponseSchema,
     UserSummarySchema,
+    VaultUpdateSchema,
+    VaultResponseSchema,
+    RecoveryChallengeResponseSchema,
+    InitializeKeysSchema,
+    KeyMaterialResponseSchema,
 )
+from apps.common.exceptions import AuthenticationError
+from apps.common.services.encryption import EncryptionService as encryption_service
 from .selectors import AccountSelector
 from .services import AccountService
+from .opaque_services import OpaqueService
 
 logger = logging.getLogger("apps.accounts")
+
+
+@api_controller("/auth/opaque", tags=["Auth OPAQUE"], auth=None)
+class OpaqueController:
+    """
+    OPAQUE (RFC 9807) registration and login. Crypto lives in the Go sidecar;
+    these endpoints forward blobs and own per-account enforcement.
+    """
+
+    @route.post("/register/start/", response={200: DataResponse[OpaqueRegisterStartResponseSchema], 503: ErrorResponse, 422: ErrorResponse})
+    async def register_start(self, request, data: OpaqueRegisterStartSchema):
+        manager = OpaqueService()
+        reg_response = await manager.register_user_start_async(
+            cred_id=data.credential_id,
+            reg_request=data.reg_request,
+        )
+        return CustomResponse.success(
+            message="Registration response generated",
+            data={
+                "reg_response": reg_response,
+                "credential_id": data.credential_id,
+            },
+        )
+
+    @route.post("/register/finish/", response={200: DataResponse[OpaqueRegisterFinishResponseSchema], 401: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def register_finish(self, request, data: OpaqueRegisterFinishSchema):
+        manager = OpaqueService()
+        record = await manager.register_user_finish_async(
+            user=request.auth,
+            cred_id=data.credential_id,
+            reg_record=data.reg_record,
+        )
+        return CustomResponse.success(
+            message="OPAQUE enrollment complete; password login is now disabled for this account",
+            data={"record": record, "credential_id": data.credential_id},
+        )
+
+    @route.post("/login/start/", response={200: DataResponse[OpaqueLoginStartResponseSchema], 401: ErrorResponse, 429: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse})
+    async def login_start(self, request, data: OpaqueLoginStartSchema):
+        manager = OpaqueService()
+        ke2, server_state = await manager.login_start_async(
+            cred_id=data.credential_id,
+            ke1=data.ke1,
+            email=data.email,
+        )
+        return CustomResponse.success(
+            message="Login challenge issued",
+            data={
+                "ke2": ke2,
+                "server_state": server_state,
+                "credential_id": data.credential_id,
+            },
+        )
+
+    @route.post("/login/finish/", response={200: DataResponse[LoginResponseDataSchema], 401: ErrorResponse, 409: ErrorResponse, 503: ErrorResponse, 422: ErrorResponse})
+    async def login_finish(self, request, data: OpaqueLoginFinishSchema):
+        manager = OpaqueService()
+        result = await manager.login_finish_async(
+            request=request,
+            cred_id=data.credential_id,
+            ke3=data.ke3,
+            server_state=data.server_state,
+            email=data.email,
+        )
+        return CustomResponse.success(message="Login successful!", data=result)
 
 
 @api_controller("/auth", tags=["Auth"], auth=None)
@@ -57,6 +148,8 @@ class AuthController:
                 "expires_at": expires_at,
                 "key_salt": key_salt,
                 "encrypted_private_key": user.encrypted_private_key,
+                "vault": user.vault,
+                "vault_version": user.vault_version,
                 "user": {
                     "id": str(user.id),
                     "email": user.email,
@@ -64,6 +157,7 @@ class AuthController:
                     "last_name": user.last_name,
                     "public_key": user.public_key,
                     "billing_id": user.billing_id,
+                    "email_verified": user.is_email_verified,
                 },
                 "workspaces": workspaces,
             },
@@ -101,7 +195,7 @@ class AuthController:
         )
         return CustomResponse.success(message="Password reset successfully")
 
-    @route.patch("/change-password/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
+    @route.patch("/change-password/", response={200: SuccessResponse, 400: ErrorResponse, 422: ErrorResponse, 409: ErrorResponse}, auth=JWTAuth())
     async def change_password(self, request, data: ChangePasswordSchema):
         await AccountService.change_password(
             user=request.auth,
@@ -109,8 +203,148 @@ class AuthController:
             new_password=data.new_password,
             key_salt=data.key_salt,
             encrypted_private_key=data.encrypted_private_key,
+            vault=data.vault,
+            expected_version=data.expected_version,
         )
         return CustomResponse.success(message="Password changed successfully")
+
+    @route.post(
+        "/update-email/",
+        response={200: SuccessResponse, 400: ErrorResponse, 409: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def update_email(self, request, data: UpdateEmailRequestSchema):
+        await AccountService.request_email_change(user=request.auth, new_email=data.new_email)
+        return CustomResponse.success(message="Verification code sent to your new address")
+
+    @route.post(
+        "/update-email/confirm/",
+        response={200: SuccessResponse, 400: ErrorResponse, 409: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def confirm_email(self, request, data: ConfirmEmailSchema):
+        await AccountService.confirm_email_change(
+            user=request.auth, new_email=data.new_email, otp=data.otp
+        )
+        return CustomResponse.success(message="Email updated")
+
+    @route.get("/vault/", response={200: DataResponse[VaultResponseSchema]}, auth=JWTAuth())
+    async def get_vault(self, request):
+        from .models import User
+
+        user = await User.objects.aget(id=request.auth.id)
+        return CustomResponse.success(
+            message="Vault retrieved",
+            data={"vault": user.vault, "vault_version": user.vault_version},
+        )
+
+    @route.put("/vault/", response={200: DataResponse[VaultResponseSchema], 409: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def put_vault(self, request, data: VaultUpdateSchema):
+        result = await AccountService.update_vault(
+            user=request.auth,
+            expected_version=data.expected_version,
+            vault=data.vault,
+        )
+        return CustomResponse.success(message="Vault updated", data=result)
+
+    @route.post(
+        "/keys/initialize/",
+        response={200: DataResponse[dict], 409: ErrorResponse, 422: ErrorResponse},
+        auth=JWTAuth(),
+    )
+    async def initialize_keys(self, request, data: InitializeKeysSchema):
+        """First-time key setup for accounts created without keys.
+
+        Social sign-up creates an account with no keypair, workspace, or
+        password factor. The client calls this once, during onboarding, after
+        the user chooses a master vault password. It is a no-op-with-409 for
+        accounts that already have keys.
+        """
+        result = await AccountService.initialize_keys(
+            user=request.auth,
+            public_key=data.public_key,
+            encrypted_private_key=data.encrypted_private_key,
+            key_salt=data.key_salt,
+            password=data.password,
+        )
+        return CustomResponse.success(message="Encryption keys initialized", data=result)
+
+    @route.get(
+        "/keymaterial/",
+        response={200: DataResponse[KeyMaterialResponseSchema]},
+        auth=JWTAuth(),
+    )
+    async def get_key_material(self, request):
+        """Return this session's own key material so it can unlock locally.
+
+        A social login returns no key material by design (identity-only). To
+        unlock the vault afterwards, the client fetches the ciphertexts here
+        and decrypts them with the master password the user types. The server
+        never sees that password, and the ciphertext alone decrypts nothing.
+        """
+        from .models import User
+
+        user = await User.objects.aget(id=request.auth.id)
+        key_salt = encryption_service.decrypt(user.key_salt) if user.key_salt else None
+        return CustomResponse.success(
+            message="Key material retrieved",
+            data={
+                "public_key": user.public_key,
+                "encrypted_private_key": user.encrypted_private_key,
+                "key_salt": key_salt,
+                "vault": user.vault,
+                "vault_version": user.vault_version or 0,
+            },
+        )
+
+    @route.post("/recover/challenge/", response={200: DataResponse[RecoveryChallengeResponseSchema], 429: ErrorResponse})
+    async def recover_challenge(self, request, data: RecoveryChallengeSchema):
+        result = await AccountService.create_recovery_challenge(email=data.email)
+        return CustomResponse.success(message="Recovery challenge issued", data=result)
+
+    @route.post("/recover/verify/", response={200: DataResponse[LoginResponseDataSchema], 401: ErrorResponse})
+    async def recover_verify(self, request, data: RecoveryVerifySchema):
+        user, tokens, expires_at, key_salt = await AccountService.verify_recovery(
+            email=data.email,
+            nonce=data.nonce,
+            signature=data.signature,
+        )
+        workspaces = await AccountSelector.get_user_workspaces_data(user=user)
+        return CustomResponse.success(
+            message="Recovery verified",
+            data={
+                **tokens,
+                "expires_at": expires_at,
+                "key_salt": key_salt,
+                "encrypted_private_key": user.encrypted_private_key,
+                "vault": user.vault,
+                "vault_version": user.vault_version,
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "public_key": user.public_key,
+                    "billing_id": user.billing_id,
+                    "email_verified": user.is_email_verified,
+                },
+                "workspaces": workspaces,
+            },
+        )
+
+    @route.patch("/recover/password/", response={200: SuccessResponse, 401: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def recover_password(self, request, data: RecoverPasswordSchema):
+        if not getattr(request, "recovery_session", False):
+            raise AuthenticationError("A recovery session is required to reset the password")
+        await AccountService.recover_password(
+            user=request.auth,
+            new_password=data.new_password,
+            key_salt=data.key_salt,
+            encrypted_private_key=data.encrypted_private_key,
+            vault=data.vault,
+            expected_version=data.expected_version,
+        )
+        return CustomResponse.success(message="Password reset successfully")
 
     @route.post("/logout/", response={200: SuccessResponse, 400: ErrorResponse}, auth=JWTAuth())
     async def logout(self, request, data: LogoutSchema = None):
@@ -120,26 +354,31 @@ class AuthController:
 
     @route.get("/me/", response={200: DataResponse[UserSummarySchema]}, auth=JWTAuth())
     async def get_current_user(self, request):
-        user = request.auth
-        billing_id = getattr(user, "billing_id", None)
+        from .models import User, generate_billing_id
+
+        # request.auth can carry deferred fields. Touching them in this async
+        # view raises SynchronousOnlyOperation, so read a fresh row instead.
+        db_user = await User.objects.aget(id=request.auth.id)
+        billing_id = db_user.billing_id
         if not billing_id:
-            from .models import User, generate_billing_id
-            db_user = await User.objects.aget_or_none(id=user.id)
-            if db_user:
-                if not db_user.billing_id:
-                    db_user.billing_id = generate_billing_id()
-                    await db_user.asave(update_fields=["billing_id"])
-                billing_id = db_user.billing_id
+            billing_id = generate_billing_id()
+            db_user.billing_id = billing_id
+            await db_user.asave(update_fields=["billing_id"])
 
         return CustomResponse.success(
             message="User profile retrieved",
             data={
-                "id": str(user.id),
-                "email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "public_key": user.public_key,
+                "id": str(db_user.id),
+                "email": db_user.email,
+                "first_name": db_user.first_name,
+                "last_name": db_user.last_name,
+                "public_key": db_user.public_key,
                 "billing_id": billing_id,
+                "email_verified": db_user.is_email_verified,
+                # auth_methods walks social_identities, which is a sync query.
+                "opaque_enrolled": bool(
+                    db_user.opaque_record and db_user.opaque_registered_at
+                ),
             },
         )
 
@@ -151,12 +390,48 @@ class AuthController:
             data=result,
         )
 
+    @route.get("/capabilities/", response={200: DataResponse[OpaqueCapabilitySchema]})
+    async def capabilities(self, request):
+        """Which auth methods this server supports. Public and side-effect free."""
+        opaque = await OpaqueService().healthy()
+        return CustomResponse.success(
+            message="Capabilities retrieved",
+            data=OpaqueCapabilitySchema(
+                password=True,
+                oauth_github=bool(getattr(settings, "OAUTH_GITHUB_ENABLED", False)),
+                oauth_google=bool(getattr(settings, "OAUTH_GOOGLE_ENABLED", False)),
+                email_link=bool(getattr(settings, "EMAIL_LINK_ENABLED", False)),
+                opaque=opaque,
+                vault_v2=True,
+            ),
+        )
+
 
 @api_controller("/users", tags=["Users"], auth=None)
 class UserController:
     """
     Public user endpoints for key discovery.
     """
+
+    @route.post("/probe/", response={200: DataResponse[AccountProbeResponseSchema], 422: ErrorResponse, 429: ErrorResponse})
+    async def probe_account(self, request, data: AccountProbeSchema):
+        """Report whether an email is registered, as a bare boolean.
+
+        The auth UI asks this on email submit so it can show the password step
+        or the signup step. It is enumeration by design and therefore paced per
+        IP; see apps/accounts/probe_limit.py. The response carries no message
+        that names existence, and an unknown address is not an error: 200 with
+        exists=false is the answer, so a 404 body cannot leak the distinction.
+        """
+        from apps.accounts.probe_limit import enforce_probe_limit
+
+        await sync_to_async(enforce_probe_limit)(request)
+
+        exists = await AccountSelector.account_exists(email=data.email)
+        return CustomResponse.success(
+            message="Probe complete",
+            data={"exists": exists},
+        )
 
     @route.get("/{email}/public-key/", response={200: DataResponse[UserPublicKeyResponseSchema], 404: ErrorResponse})
     async def get_public_key(self, request, email: str):

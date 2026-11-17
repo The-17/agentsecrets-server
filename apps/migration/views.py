@@ -36,11 +36,16 @@ class MigrationController:
             data=result,
         )
 
-    @route.post("/export/", response={200: DataResponse[MigrationExportBundleSchema], 401: ErrorResponse})
+    @route.post("/export/", auth=None, response={200: DataResponse[MigrationExportBundleSchema], 401: ErrorResponse})
     async def export_migration_data(self, request, data: Optional[MigrationImportRequestSchema] = None):
         """
         Exports the user's workspace and credential bundle.
-        Requires a valid, unconsumed MigrationToken passed via 'token' field or Bearer header.
+
+        Authorized by the migration token alone: the CLI deliberately sends no
+        session JWT on this path, so global JWT auth must be disabled here and
+        every request is re-checked against the token below (validity,
+        expiry, and that its jti is unconsumed).
+
         Strips outer server Fernet encryption while keeping client AES ciphertexts intact.
         """
         token = None
@@ -63,7 +68,9 @@ class MigrationController:
         except User.DoesNotExist:
             raise NotFoundError("User associated with token not found")
 
-        bundle = await MigrationService.export_bundle(user=user)
+        bundle = await MigrationService.export_bundle(
+            user=user, token_jti=claims.get("jti")
+        )
         return CustomResponse.success(
             message="Migration bundle exported successfully",
             data=bundle,
@@ -76,15 +83,14 @@ class MigrationController:
         Can receive an inline 'bundle' payload or fetch it from 'source_url' using 'token'.
         Wraps client ciphertexts with target server's ENCRYPTION_KEY.
         """
-        token_jti = None
         bundle_data = None
 
         if data.bundle:
             bundle_data = data.bundle.model_dump()
         elif data.source_url and data.token:
-            claims = await MigrationService.verify_token(data.token)
-            token_jti = claims.get("jti")
-
+            # The token is signed with the SOURCE server's key, which this one
+            # does not hold, so it cannot be verified here. The source
+            # authorizes the request and consumes the token when it exports.
             export_endpoint = f"{data.source_url.rstrip('/')}/api/migration/export/"
             
             def fetch_remote():
@@ -110,7 +116,6 @@ class MigrationController:
         result = await MigrationService.import_bundle(
             requesting_user=request.auth,
             bundle_data=bundle_data,
-            token_jti=token_jti,
         )
 
         return CustomResponse.success(

@@ -15,6 +15,16 @@ from .schemas import (
     ProjectInviteSchema,
     SecretBulkUpsertSchema,
     SecretUpdateSchema,
+    SecretVersionCreateSchema,
+    SecretPromoteSchema,
+    SecretRotationPolicySchema,
+    SecretVersionItemSchema,
+    SecretPendingResponseDataSchema,
+    SecretPromoteResponseDataSchema,
+    SecretRollbackResponseDataSchema,
+    SecretRotationPolicyDataSchema,
+    SecretRotationStatusDataSchema,
+    DueValueRotationItemSchema,
     ProjectResponseDataSchema,
     ProjectInviteResponseDataSchema,
     ProjectEnvironmentsResponseDataSchema,
@@ -25,7 +35,9 @@ from .schemas import (
     SecretListResponseDataSchema,
 )
 from .selectors import ProjectSelector, SecretSelector
+from .environment import query_environment
 from .services import ProjectService, SecretService
+from .rotation import SecretRotationService
 
 logger = logging.getLogger("apps.secrets_app")
 
@@ -49,6 +61,18 @@ class ProjectController:
             data=project_data,
             status_code=201,
         )
+
+    # --- Environment inventory ---
+
+    @route.get("/{project_id}/environments/", response={200: DataResponse[ProjectEnvironmentsResponseDataSchema], 404: ErrorResponse})
+    async def environments(self, request, project_id: uuid.UUID):
+        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
+        result = await ProjectSelector.get_environments(project=project)
+        return CustomResponse.success(message="Environments retrieved", data=result)
+
+    # --- Name-keyed project endpoints ---
+    # These must stay below the fixed path segments above: a route registered earlier
+    # that also matches /{project_id}/environments/ wins, since the path takes priority.
 
     @route.get("/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 404: ErrorResponse})
     async def get_project(self, request, project_name: str):
@@ -108,6 +132,37 @@ class ProjectController:
             data=result,
         )
 
+    # --- Specific by-id routes MUST stay above the generic
+    # --- Workspace-scoped block: Ninja matches in definition order, so
+    # --- /{workspace_id}/{project_name}/ would otherwise swallow
+    # --- /{project_id}/environments/ (project_name="environments") and 404.
+
+    # --- Environment info ---
+
+    @route.get("/{project_id}/secrets/coverage/", response={200: DataResponse[ProjectSecretsCoverageResponseDataSchema], 404: ErrorResponse})
+    async def secrets_coverage(self, request, project_id: uuid.UUID):
+        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
+        keys = await ProjectSelector.get_secrets_coverage(project=project)
+        return CustomResponse.success(
+            message="Secrets coverage retrieved",
+            data={"project_id": str(project_id), "keys": keys},
+        )
+
+    @route.get("/{project_id}/secrets/diff/", response={200: DataResponse[SecretsDiffResponseDataSchema], 400: ErrorResponse})
+    async def secrets_diff(self, request, project_id: uuid.UUID):
+        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
+        from_env = request.GET.get("from", "development")
+        to_env = request.GET.get("to", "production")
+        result = await ProjectSelector.get_secrets_diff(project=project, from_env=from_env, to_env=to_env)
+        return CustomResponse.success(message="Cross-environment diff retrieved", data=result)
+
+    @route.delete("/{project_id}/environments/{environment}/clean/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
+    async def clean_environment(self, request, project_id: uuid.UUID, environment: str):
+        count = await SecretService.clean_environment(
+            user=request.auth, project_id=project_id, environment=environment
+        )
+        return CustomResponse.success(message=f"Cleaned {count} secrets from environment '{environment}'")
+
     # --- Workspace-scoped project endpoints ---
 
     @route.get("/{workspace_id}/{project_name}/", response={200: DataResponse[ProjectResponseDataSchema], 404: ErrorResponse})
@@ -148,12 +203,6 @@ class ProjectController:
         )
 
     # --- Environment info ---
-
-    @route.get("/{project_id}/environments/", response={200: DataResponse[ProjectEnvironmentsResponseDataSchema], 404: ErrorResponse})
-    async def environments(self, request, project_id: uuid.UUID):
-        project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
-        result = await ProjectSelector.get_environment_counts(project=project)
-        return CustomResponse.success(message="Environment counts retrieved", data=result)
 
     @route.get("/{project_id}/secrets/coverage/", response={200: DataResponse[ProjectSecretsCoverageResponseDataSchema], 404: ErrorResponse})
     async def secrets_coverage(self, request, project_id: uuid.UUID):
@@ -197,8 +246,9 @@ class SecretsController:
     async def bulk_upsert_alias(self, request, data: SecretBulkUpsertSchema):
         return await self.bulk_upsert(request, data)
 
-    @route.get("/{project_id}/", response={200: DataResponse[SecretListResponseDataSchema], 404: ErrorResponse})
+    @route.get("/{project_id}/", response={200: DataResponse[SecretListResponseDataSchema], 404: ErrorResponse, 422: ErrorResponse})
     async def list_secrets(self, request, project_id: uuid.UUID, environment: str = "development"):
+        environment = query_environment(environment)
         project = await ProjectSelector.resolve_project_by_id(user=request.auth, project_id=project_id)
         secrets = await SecretSelector.list_project_secrets(project=project, environment=environment)
         return CustomResponse.success(
@@ -269,3 +319,56 @@ class SecretsController:
             user=request.auth, project_id=project_id, key=key, environment=environment, policy=data
         )
         return CustomResponse.success(message="Policy updated successfully", data=policy)
+
+    # --- Value rotation (B1 client-push; ROTATION_PLAN Phase 1) ---
+
+    @route.post("/{project_id}/{environment}/{key}/versions/", response={201: DataResponse[SecretPendingResponseDataSchema], 200: DataResponse[SecretPendingResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse})
+    async def stage_version(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretVersionCreateSchema):
+        result, replayed = await SecretRotationService.create_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            ciphertext=data.ciphertext, rotation_id=data.rotation_id, reason=data.reason,
+        )
+        return CustomResponse.success(
+            message="Version staged as pending",
+            data=result,
+            status_code=200 if replayed else 201,
+        )
+
+    @route.post("/{project_id}/{environment}/{key}/promote/", response={200: DataResponse[SecretPromoteResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse})
+    async def promote_version(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretPromoteSchema):
+        result = await SecretRotationService.promote_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            expected_current_version_id=data.expected_current_version_id, reason=data.reason,
+        )
+        return CustomResponse.success(message="Pending version promoted to current", data=result)
+
+    @route.post("/{project_id}/{environment}/{key}/rollback/", response={200: DataResponse[SecretRollbackResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse, 422: ErrorResponse})
+    async def rollback_version(self, request, project_id: uuid.UUID, environment: str, key: str):
+        result = await SecretRotationService.rollback_to_previous(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Rolled back to previous version", data=result)
+
+    @route.delete("/{project_id}/{environment}/{key}/versions/pending/", response={200: SuccessResponse, 403: ErrorResponse, 404: ErrorResponse})
+    async def abort_pending(self, request, project_id: uuid.UUID, environment: str, key: str):
+        await SecretRotationService.abort_pending_version(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Pending version aborted")
+
+    @route.get("/{project_id}/{environment}/{key}/rotation/", response={200: DataResponse[SecretRotationStatusDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def rotation_status(self, request, project_id: uuid.UUID, environment: str, key: str):
+        result = await SecretRotationService.get_rotation_status(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+        )
+        return CustomResponse.success(message="Rotation status retrieved", data=result)
+
+    @route.put("/{project_id}/{environment}/{key}/rotation-policy/", response={200: DataResponse[SecretRotationPolicyDataSchema], 403: ErrorResponse, 404: ErrorResponse, 422: ErrorResponse})
+    async def set_rotation_policy(self, request, project_id: uuid.UUID, environment: str, key: str, data: SecretRotationPolicySchema):
+        result = await SecretRotationService.set_rotation_policy(
+            user=request.auth, project_id=project_id, key=key, environment=environment,
+            rotation_type=data.rotation_type, period_days=data.period_days,
+            overlap_hours=data.overlap_hours, provider_binding=data.provider_binding,
+            enabled=data.enabled,
+        )
+        return CustomResponse.success(message="Rotation policy updated", data=result)

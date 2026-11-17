@@ -17,10 +17,10 @@ from apps.workspaces.models import (
     WorkspaceType,
     MembershipStatus,
     AgentRegistration,
-    AuditLogEntry,
 )
 from .models import TelemetrySnapshot, DailyMetricsAggregate
 from .commands import process_command_executions
+from .aggregations import cloud_call_stats, cloud_resolution_stats
 
 logger = logging.getLogger("apps.telemetry")
 
@@ -392,7 +392,8 @@ class TelemetrySelector:
             new_projects,
             new_secrets,
             proxy_agg,
-            cloud_agg,
+            cloud_calls,
+            cloud_resolution,
         ) = await asyncio.gather(
             User.objects.aaggregate(
                 active_daily=Count("id", filter=Q(last_active_at__gte=rolling_daily)),
@@ -433,8 +434,8 @@ class TelemetrySelector:
                 total_drift_diffs_detected=Sum("drift_diffs_detected"),
                 total_log_verifications=Sum("log_chain_verifications"),
                 total_tampering_alerts=Sum("tampering_detected"),
-                total_headless_nodes=Count("id", filter=Q(is_headless_node=True)),
-                total_active_keychains=Count("id", filter=Q(keychain_initialized=True)),
+                total_headless_nodes=Count("user_id", distinct=True, filter=Q(is_headless_node=True)),
+                total_active_keychains=Count("user_id", distinct=True, filter=Q(keychain_initialized=True)),
                 total_errors_auth=Sum("errors_auth_count"),
                 total_errors_keychain=Sum("errors_keychain_count"),
                 total_errors_secrets=Sum("errors_secrets_count"),
@@ -442,20 +443,16 @@ class TelemetrySelector:
                 total_errors_system=Sum("errors_system_count"),
                 total_errors_unknown=Sum("errors_unknown_count"),
             ),
-            AuditLogEntry.objects.filter(
-                resolution_path="direct_resolve"
-            ).aaggregate(
-                cloud_total=Count("id"),
-                cloud_redacted=Count("id", filter=Q(redacted=True)),
-                cloud_duration_ms=Sum("proxy_duration_ms"),
-            ),
+            sync_to_async(cloud_call_stats)(),
+            sync_to_async(cloud_resolution_stats)(),
         )
 
         cli_calls = proxy_agg.get("total_calls") or 0
-        cloud_calls = cloud_agg.get("cloud_total") or 0
-        total_calls = cli_calls + cloud_calls
-        total_redacted = (proxy_agg.get("total_redacted") or 0) + (cloud_agg.get("cloud_redacted") or 0)
-        total_secrets = (proxy_agg.get("total_secrets_resolved") or 0) + cloud_calls
+        total_calls = cli_calls + cloud_calls["calls"]
+        total_blocked = (proxy_agg.get("total_blocked") or 0) + cloud_resolution["blocked"]
+        total_redacted = (proxy_agg.get("total_redacted") or 0) + cloud_resolution["redacted"]
+        total_secrets = (proxy_agg.get("total_secrets_resolved") or 0) + cloud_resolution["secrets_resolved"]
+        total_proxy_duration_ms = (proxy_agg.get("total_proxy_duration_ms") or 0) + cloud_calls["duration_ms"]
 
         active_daily = active_counts["active_daily"]
         active_weekly = active_counts["active_weekly"]
@@ -537,7 +534,7 @@ class TelemetrySelector:
             else "0.00%"
         )
         security_block = (
-            f"{round(((proxy_agg.get('total_blocked') or 0) / total_calls) * 100, 2)}%"
+            f"{round((total_blocked / total_calls) * 100, 2)}%"
             if total_calls > 0
             else "0.00%"
         )
@@ -581,7 +578,7 @@ class TelemetrySelector:
             },
             "security": {
                 "total_proxy_calls": total_calls,
-                "total_proxy_blocked": proxy_agg.get("total_blocked") or 0,
+                "total_proxy_blocked": total_blocked,
                 "total_proxy_redacted": total_redacted,
                 "total_secrets_resolved": total_secrets,
                 "breakdown": {
@@ -589,7 +586,7 @@ class TelemetrySelector:
                         "proxy_calls": cli_calls,
                     },
                     "cloud": {
-                        "resolver_calls": cloud_calls,
+                        "resolver_calls": cloud_calls["calls"],
                     },
                 },
             },
@@ -600,7 +597,7 @@ class TelemetrySelector:
                     "mcp": proxy_agg.get("total_proxy_calls_mcp") or 0,
                     "direct": proxy_agg.get("total_proxy_calls_direct") or 0,
                     "developer": proxy_agg.get("total_developer_commands") or 0,
-                    "cloud_resolver": cloud_calls,
+                    "cloud_resolver": cloud_calls["calls"],
                 },
                 "identity_levels": {
                     "anonymous": proxy_agg.get("total_identity_anonymous_calls") or 0,
@@ -619,7 +616,7 @@ class TelemetrySelector:
             "performance": {
                 "avg_keychain_resolution_ms": proxy_agg.get("avg_keychain_resolution_ms") or 0.0,
                 "avg_session_refresh_ms": proxy_agg.get("avg_session_refresh_ms") or 0.0,
-                "total_proxy_duration_ms": proxy_agg.get("total_proxy_duration_ms") or 0,
+                "total_proxy_duration_ms": total_proxy_duration_ms,
             },
             "integrity": {
                 "log_chain_verifications": proxy_agg.get("total_log_verifications") or 0,

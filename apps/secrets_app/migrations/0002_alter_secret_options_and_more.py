@@ -53,6 +53,12 @@ class Migration(migrations.Migration):
             name='secret',
             table='secrets',
         ),
+        # Clear the (owner, name) unique_together BEFORE dropping owner:
+        # constraint rendering looks up old fields by name.
+        migrations.AlterUniqueTogether(
+            name='project',
+            unique_together=set(),
+        ),
         migrations.RemoveField(
             model_name='project',
             name='owner',

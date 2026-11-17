@@ -8,10 +8,13 @@ from asgiref.sync import sync_to_async
 from ninja_extra import api_controller, route
 
 from apps.accounts.models import User
-from apps.accounts.auth import JWTAuth, InternalOrUserAuth
+from apps.accounts.auth import JWTAuth, InternalOrUserAuth, ResolverSignatureAuth
+from apps.secrets_app.schemas import DueValueRotationItemSchema, ValueExecuteSchema, SecretPromoteResponseDataSchema
+from ninja import Query
 from apps.common.response import CustomResponse
 from apps.common.schemas import SuccessResponse, ErrorResponse, DataResponse
 from apps.common.exceptions import BodyValidationError
+from . import invites
 from .schemas import (
     WorkspaceCreateSchema,
     WorkspaceUpdateSchema,
@@ -37,6 +40,17 @@ from .schemas import (
     AgentTokenItemSchema,
     AgentTokenCreatedResponseDataSchema,
     AgentVerifyResponseSchema,
+    ResolverDelegationResponseDataSchema,
+    TokenRotateSchema,
+    RotationPolicySchema,
+    MintSuccessorSchema,
+    FamilyRevokeSchema,
+    RotationMetadataSchema,
+    TokenRotateResponseDataSchema,
+    RotationPolicyResponseDataSchema,
+    MintSuccessorResponseDataSchema,
+    DueRotationItemSchema,
+    FamilyRevokeResponseDataSchema,
     RevokedTokensResponseDataSchema,
     InternalBillingAuthorizeRequest,
     InternalBillingAuthorizeResponse,
@@ -44,6 +58,11 @@ from .schemas import (
     AuditSummaryResponseSchema,
     WorkspaceActivityItemSchema,
     ForensicDecisionReplaySchema,
+    PendingInviteSchema,
+    AwaitingKeyInviteSchema,
+    InvitePreviewSchema,
+    InviteAcceptSchema,
+    InviteAcceptResultSchema,
 )
 from .selectors import (
     WorkspaceSelector,
@@ -67,6 +86,26 @@ from .services import (
 )
 
 logger = logging.getLogger("apps.workspaces")
+
+
+async def _resolver_signature_valid(request) -> bool:
+    """Ed25519 resolver-identity check for ingest endpoints (async-safe).
+
+    The resolver's unattended forensic batches carry no user/agent
+    credential. Accepting its signature here adds no privilege: the same key
+    already authorizes value-execute writes and family revokes. Any failure
+    (no key configured, bad signature, stale timestamp) returns False and the
+    caller falls through to its 401. Scope stays unrestricted (None) exactly
+    like the operator service-key path — per-entry workspace attribution is
+    still recorded, and entries carry identifiers only (HR-H1).
+    """
+    try:
+        from asgiref.sync import sync_to_async
+
+        from apps.accounts.auth import ResolverSignatureAuth
+        return bool(await sync_to_async(ResolverSignatureAuth()._verify)(request))
+    except Exception:
+        return False
 
 
 async def _ingest_workspace_scope(*, user, agent_token_auth) -> set[str] | None:
@@ -119,7 +158,7 @@ class WorkspaceController:
                 "id": str(ws.id),
                 "name": ws.name,
                 "type": ws.type,
-                "tier": getattr(ws, "tier", "free"),
+                "tier": await WorkspaceSelector.resolve_tier(workspace_id=str(ws.id)),
                 "role": m.role,
                 "billing_id": ws.effective_billing_id,
                 "encrypted_workspace_key": m.encrypted_workspace_key,
@@ -137,6 +176,23 @@ class WorkspaceController:
     async def reconcile_workspace_billing(self, request, workspace_id: uuid.UUID):
         result = await WorkspaceService.reconcile_workspace_billing(user=request.auth, workspace_id=workspace_id)
         return CustomResponse.success(message="Workspace billing reconciled", data=result)
+
+    @route.get("/{workspace_id}/billing/status/", response={200: DataResponse[Dict[str, Any]], 404: ErrorResponse})
+    async def get_billing_status(self, request, workspace_id: uuid.UUID):
+        """Report the workspace plan as the resolver sees it. Read-only.
+
+        Any member may call it, because a member needs to know whether a custom
+        environment is available to them. The control plane only *reports* the
+        plan and never denies a feature, which keeps billing policy out of this
+        open-source server. Clients ask here instead of reading the local
+        mirror, so a fresh upgrade is not reported as Free.
+        """
+        await WorkspaceSelector.get_membership(user=request.auth, workspace_id=workspace_id)
+        tier = await WorkspaceSelector.resolve_tier(workspace_id=str(workspace_id))
+        return CustomResponse.success(
+            message="Billing status retrieved successfully",
+            data={"tier": tier},
+        )
 
     @route.patch("/{workspace_id}/", response={200: DataResponse[WorkspaceSimpleSchema], 403: ErrorResponse})
     async def update_workspace(self, request, workspace_id: uuid.UUID, data: WorkspaceUpdateSchema):
@@ -383,6 +439,35 @@ class TokenController:
         )
         return CustomResponse.success(message="Token deleted")
 
+    @route.post("/{workspace_id}/agents/{registration_id}/tokens/{token_id}/rotate/", response={201: DataResponse[TokenRotateResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def rotate_token(self, request, workspace_id: uuid.UUID, registration_id: str, token_id: str, data: TokenRotateSchema):
+        raw_token, metadata = await AgentService.rotate_agent_token(
+            user=request.auth,
+            workspace_id=workspace_id,
+            registration_id=registration_id,
+            token_id=token_id,
+            overlap_hours=data.overlap_hours,
+            reason=data.reason,
+        )
+        return CustomResponse.success(
+            message="Agent token rotated",
+            data={"token": raw_token, **metadata},
+            status_code=201,
+        )
+
+    @route.put("/{workspace_id}/agents/{registration_id}/tokens/{token_id}/rotation-policy/", response={200: DataResponse[RotationPolicyResponseDataSchema], 403: ErrorResponse, 404: ErrorResponse})
+    async def set_rotation_policy(self, request, workspace_id: uuid.UUID, registration_id: str, token_id: str, data: RotationPolicySchema):
+        result = await AgentService.set_token_rotation_policy(
+            user=request.auth,
+            workspace_id=workspace_id,
+            registration_id=registration_id,
+            token_id=token_id,
+            period_days=data.period_days,
+            overlap_hours=data.overlap_hours,
+            enabled=data.enabled,
+        )
+        return CustomResponse.success(message="Rotation policy updated", data=result)
+
 
 @api_controller("/audit", tags=["Audit Logs"], auth=JWTAuth())
 class AuditController:
@@ -391,12 +476,12 @@ class AuditController:
     """
 
     @route.get("/logs/", response={200: DataResponse[List[AuditLogItemSchema]], 400: ErrorResponse})
-    async def list_logs(self, request, workspace_id: str = None, limit: int = 100):
+    async def list_logs(self, request, workspace_id: str = None, limit: int = 100, offset: int = 0):
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await WorkspaceSelector.get_membership(user=request.auth, workspace_id=uuid.UUID(workspace_id))
         params = request.GET.dict()
-        data = await AuditSelector.list_audit_logs(workspace_id=workspace_id, params=params, limit=limit)
+        data = await AuditSelector.list_audit_logs(workspace_id=workspace_id, params=params, limit=limit, offset=offset)
         return CustomResponse.success(message="Audit logs retrieved", data=data)
 
     @route.get("/logs/{log_id}/", response={200: DataResponse[Dict[str, Any]], 404: ErrorResponse})
@@ -404,14 +489,25 @@ class AuditController:
         fields = await AuditSelector.get_audit_log_detail(log_id=log_id, user=request.auth)
         return CustomResponse.success(message="Audit log detail retrieved", data=fields)
 
+    @route.get("/logs/{log_id}/replay/", response={200: DataResponse[ForensicDecisionReplaySchema], 404: ErrorResponse})
+    async def replay_by_audit(self, request, log_id: str):
+        """Forensic decision replay resolved from a Tier-2 audit id.
+
+        The web's log table only knows audit ids; this resolves the Tier-3
+        twin via correlation_id (timestamp proximity for pre-linkage rows)
+        and returns the same verified replay shape as the forensic endpoint.
+        """
+        data = await AuditSelector.get_replay_by_audit(log_id=log_id, user=request.auth)
+        return CustomResponse.success(message="Audit decision replay retrieved", data=data)
+
     @route.get("/summary/", response={200: DataResponse[AuditSummaryResponseSchema], 400: ErrorResponse})
     async def summary(self, request, workspace_id: str = None):
         if not workspace_id:
             raise BodyValidationError("workspace_id", "workspace_id is required")
         await WorkspaceSelector.get_membership(user=request.auth, workspace_id=uuid.UUID(workspace_id))
-        start = request.GET.get("start")
-        end = request.GET.get("end")
-        data = await AuditSelector.get_audit_log_summary(workspace_id=workspace_id, start=start, end=end)
+        data = await AuditSelector.get_audit_log_summary(
+            workspace_id=workspace_id, params=request.GET.dict()
+        )
         return CustomResponse.success(message="Audit log summary retrieved", data=data)
 
     @route.get("/export/", response={200: dict, 400: ErrorResponse})
@@ -445,6 +541,7 @@ class AuditController:
             AuditLogEntry.objects.filter(workspace_id=workspace_id).exclude(identity_level=IdentityLevel.USER),
             request.GET.dict(),
         )
+        qs = await AuditSelector.apply_retention_floor(qs, workspace_id=workspace_id)
 
         def serialize_row(row):
             out = {}
@@ -511,6 +608,93 @@ class ResolverController:
         auth_caller = getattr(request, "auth", None)
         result = await AgentService.verify_agent_token(auth_caller=auth_caller, data=payload)
         return result
+
+    @route.post("/agents/mint-successor/", response={201: DataResponse[MintSuccessorResponseDataSchema], 200: DataResponse[MintSuccessorResponseDataSchema], 401: ErrorResponse, 404: ErrorResponse}, auth=None)
+    async def mint_successor(self, request):
+        """Token-bound successor mint for pull-renewal (Axis A).
+
+        Presenting a valid token authorizes minting its own successor; the
+        presented secret is required, a bare token id is never sufficient.
+        The raw successor is returned exactly once (absent on idempotent
+        replay); the caller must persist before use."""
+        try:
+            body = json.loads(request.body) if request.body else {}
+        except Exception:
+            body = {}
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        bearer_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        payload = MintSuccessorSchema(
+            token=body.get("token") or bearer_token or "",
+            token_id=body.get("token_id"),
+            rotation_id=body.get("rotation_id"),
+            reason=body.get("reason") or "routine",
+            overlap_hours=body.get("overlap_hours"),
+        )
+        raw_token, result = await AgentService.mint_successor_for_token(
+            raw_token=payload.token,
+            rotation_id=payload.rotation_id,
+            reason=payload.reason,
+            overlap_hours=payload.overlap_hours,
+        )
+        return CustomResponse.success(
+            message="Token successor minted",
+            data={"token": raw_token, **result},
+            status_code=200 if result["replayed"] else 201,
+        )
+
+    @route.get("/rotation/due/", response={200: DataResponse[List[DueRotationItemSchema]], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_due(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Rotation-armed families past cadence (metadata only). Consumed by
+        the resolver's Pro-gated sweep; arming is desired-state, the resolver
+        executes only for Pro workspaces against its own Polar store (HR-M3)."""
+        data = await AgentSelector.get_due_token_rotations(workspace_id=workspace_id)
+        return CustomResponse.success(message="Due token rotations retrieved", data=data)
+
+    @route.post("/rotation/family-revoke/", response={200: DataResponse[FamilyRevokeResponseDataSchema], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_family_revoke(self, request, data: FamilyRevokeSchema):
+        """Resolver-driven family revoke on corroborated reuse (HR-H6):
+        zero overlap, every live member poisoned."""
+        result = await AgentService.revoke_token_family(
+            workspace_id=uuid.UUID(data.workspace_id),
+            family_key=data.family_key,
+            reason=data.reason,
+        )
+        return CustomResponse.success(message="Token family revoked", data=result)
+
+    @route.get("/rotation/value-due/", response={200: DataResponse[List[DueValueRotationItemSchema]], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_value_due(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Value-rotation cadences past due (key names only, never ciphertext).
+        Consumed by the resolver's Pro-gated reminder sweep (HR-M3)."""
+        from apps.secrets_app.selectors import SecretSelector
+        data = await SecretSelector.get_due_value_rotations(workspace_id=workspace_id)
+        return CustomResponse.success(message="Due value rotations retrieved", data=data)
+
+    @route.post("/rotation/value-execute/", response={200: DataResponse[SecretPromoteResponseDataSchema], 400: ErrorResponse, 401: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_value_execute(self, request, data: ValueExecuteSchema):
+        """B2 autonomous execute (resolver-signed): stage a resolver-encrypted
+        value and promote it in one atomic transaction. The resolver is a
+        DEK-holder, so ciphertext-only handling preserves zero-knowledge."""
+        from apps.secrets_app.rotation import SecretRotationService
+        result, _ = await SecretRotationService.execute_autonomous_rotation(
+            workspace_id=uuid.UUID(data.workspace_id),
+            project_id=uuid.UUID(data.project_id),
+            key=data.key,
+            environment=data.environment,
+            ciphertext=data.ciphertext,
+            rotation_id=data.rotation_id,
+            reason=data.reason,
+        )
+        return CustomResponse.success(message="Autonomous rotation executed", data=result)
+
+    @route.get("/rotation/workspace-keys/", response={200: DataResponse[ResolverDelegationResponseDataSchema], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_workspace_keys(self, request, workspace_id: uuid.UUID = Query(...)):
+        """Active CEDK delegation for B2 DEK sync (sealed blob only). The
+        resolver unseals with its own CEDK_priv; no presenting token exists
+        on the unattended path."""
+        data = await CloudDelegationSelector.get_resolver_delegation(workspace_id=workspace_id)
+        return CustomResponse.success(message="Resolver delegation retrieved", data=data)
 
     @route.post("/billing/authorize/", response={200: InternalBillingAuthorizeResponse, 401: ErrorResponse}, auth=None)
     async def authorize_billing(self, request):
@@ -616,10 +800,13 @@ class ResolverController:
                 ).afirst()
 
         if not user and not agent_token_auth:
-            unauth_key = f"rl_unauth_audit_{ip}"
-            unauth_count = cache.get(unauth_key, 0)
-            cache.set(unauth_key, unauth_count + 1, timeout=86400)
-            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
+            if await _resolver_signature_valid(request):
+                request.auth = None  # resolver channel: scope unrestricted (service-key parity)
+            else:
+                unauth_key = f"rl_unauth_audit_{ip}"
+                unauth_count = cache.get(unauth_key, 0)
+                cache.set(unauth_key, unauth_count + 1, timeout=86400)
+                return 401, {"detail": "Unauthorized: valid service key or agent token required"}
 
         request.auth = user or agent_token_auth
 
@@ -677,10 +864,13 @@ class ResolverController:
                 ).afirst()
 
         if not user and not agent_token_auth:
-            unauth_key = f"rl_unauth_forensic_{ip}"
-            unauth_count = cache.get(unauth_key, 0)
-            cache.set(unauth_key, unauth_count + 1, timeout=86400)
-            return 401, {"detail": "Unauthorized: valid service key or agent token required"}
+            if await _resolver_signature_valid(request):
+                request.auth = None  # resolver channel: scope unrestricted (service-key parity)
+            else:
+                unauth_key = f"rl_unauth_forensic_{ip}"
+                unauth_count = cache.get(unauth_key, 0)
+                cache.set(unauth_key, unauth_count + 1, timeout=86400)
+                return 401, {"detail": "Unauthorized: valid service key or agent token required"}
 
         request.auth = user or agent_token_auth
 
@@ -817,4 +1007,40 @@ class ForensicController:
     async def replay_log(self, request, log_id: str):
         data = await ForensicLogSelector.get_replay(log_id=log_id, user=request.auth)
         return CustomResponse.success(message="Forensic decision replay retrieved successfully", data=data)
+
+
+@api_controller("/invites", tags=["Invites"], auth=JWTAuth())
+class InviteController:
+    """Acceptance side of a workspace invitation.
+
+    The invite email links here. Nothing is granted until the invited address
+    accepts; an unaccepted invitation never appears in anyone's workspace list.
+    """
+
+    @route.get("/awaiting-key/", response={200: DataResponse[List[AwaitingKeyInviteSchema]]})
+    async def list_awaiting_key(self, request):
+        """Accepted invitations whose workspace key this caller must seal."""
+        data = await invites.awaiting_key_for(user=request.auth)
+        return CustomResponse.success(message="Invitations awaiting a key", data=data)
+
+    @route.get("/pending/", response={200: DataResponse[List[PendingInviteSchema]]})
+    async def list_pending(self, request):
+        data = await invites.pending_for(user=request.auth)
+        return CustomResponse.success(message="Pending invitations retrieved", data=data)
+
+    @route.post("/accept/", response={200: DataResponse[InviteAcceptResultSchema], 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse})
+    async def accept_invite(self, request, data: InviteAcceptSchema):
+        workspace_id = uuid.UUID(data.workspace_id) if data.workspace_id else None
+        result = await invites.accept(
+            user=request.auth,
+            token=data.token,
+            code=data.code,
+            workspace_id=workspace_id,
+        )
+        return CustomResponse.success(message="Invitation accepted", data=result)
+
+    @route.get("/preview/", auth=None, response={200: DataResponse[InvitePreviewSchema], 404: ErrorResponse})
+    async def preview_invite(self, request, token: str):
+        data = await invites.preview(token=token)
+        return CustomResponse.success(message="Invitation retrieved", data=data)
 
