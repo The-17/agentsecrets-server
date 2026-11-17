@@ -41,7 +41,7 @@ from apps.workspaces.models import (
     MembershipRole,
     MembershipStatus,
 )
-from .models import User, VaultRecoveryChallenge, EmailChallengePurpose
+from .models import User, VaultRecoveryChallenge, EmailChallengePurpose, OneTimePassword
 from .schemas import RegisterSchema
 from .email_challenges import consume, issue
 
@@ -74,7 +74,11 @@ class AccountService:
         Throttled to once every 15 minutes to prevent write amplification.
         """
         now = timezone.now()
-        last_active = user.last_active_at
+        try:
+            last_active = user.last_active_at
+        except User.DoesNotExist:
+            # The account was deleted by the request that triggered this stamp.
+            return
         if last_active and (now - last_active) < timedelta(minutes=15):
             return
 
@@ -87,7 +91,12 @@ class AccountService:
         Synchronous variant of stamp_user_activity for WSGI middleware.
         """
         now = timezone.now()
-        last_active = user.last_active_at
+        try:
+            last_active = user.last_active_at
+        except User.DoesNotExist:
+            # The response that triggered this stamp deleted the account
+            # (DELETE /account/). There is nobody left to stamp.
+            return
         if last_active and (now - last_active) < timedelta(minutes=15):
             return
 
@@ -453,6 +462,140 @@ class AccountService:
         await sync_to_async(_apply, thread_sensitive=True)()
 
     @staticmethod
+    async def update_profile(*, user, first_name=None, last_name=None) -> None:
+        """Update the editable name fields. Never trusts request.auth's deferred copy."""
+        db_user = await User.objects.aget(pk=user.pk)
+        fields = []
+        if first_name is not None:
+            name = str(first_name).strip()
+            if not name or len(name) > 50:
+                raise BodyValidationError("first_name", "First name must be 1-50 characters")
+            db_user.first_name = name
+            fields.append("first_name")
+        if last_name is not None:
+            name = str(last_name).strip()
+            if not name or len(name) > 50:
+                raise BodyValidationError("last_name", "Last name must be 1-50 characters")
+            db_user.last_name = name
+            fields.append("last_name")
+        if fields:
+            await db_user.asave(update_fields=fields)
+
+    @staticmethod
+    async def set_avatar(*, user, content: bytes, filename: str) -> str:
+        """Upload a square avatar to Cloudinary and return its secure URL.
+
+        Production has an ephemeral filesystem and no /media/ route, so the
+        image lives in Cloudinary and only its HTTPS URL is stored. The bytes
+        are re-encoded to a 256x256 WebP before upload so each asset is small;
+        a stable public_id means re-uploads replace the old one. Fails closed
+        when Cloudinary is unconfigured or the upload errors.
+        """
+        from io import BytesIO
+
+        from PIL import Image, ImageOps
+
+        from apps.common.exceptions import RequestError
+
+        if len(content) > 2 * 1024 * 1024:
+            raise BodyValidationError("avatar", "Image must be under 2 MB")
+
+        def resize() -> bytes:
+            try:
+                with Image.open(BytesIO(content)) as img:
+                    img = ImageOps.exif_transpose(img).convert("RGB")
+                    img = ImageOps.fit(img, (256, 256))
+                    out = BytesIO()
+                    img.save(out, format="WEBP", quality=82, method=4)
+                    return out.getvalue()
+            except Exception:
+                raise BodyValidationError("avatar", "Use a valid PNG, JPEG, or WebP image")
+
+        webp = await sync_to_async(resize)()
+
+        if not settings.CLOUDINARY_URL:
+            raise RequestError(
+                "avatar_upload_unavailable",
+                "Profile photos are not configured on this server.",
+                503,
+            )
+
+        import base64
+
+        data_uri = "data:image/webp;base64," + base64.b64encode(webp).decode("ascii")
+
+        def upload() -> str:
+            import cloudinary.uploader
+
+            result = cloudinary.uploader.upload(
+                data_uri,
+                public_id=f"{settings.CLOUDINARY_FOLDER}/{user.pk}",
+                overwrite=True,
+                invalidate=True,
+                resource_type="image",
+            )
+            url = result.get("secure_url")
+            if not url or not url.startswith("https://"):
+                raise RequestError(
+                    "avatar_upload_unavailable",
+                    "Profile photo upload did not return a secure URL.",
+                    503,
+                )
+            return url
+
+        try:
+            url = await sync_to_async(upload)()
+        except RequestError:
+            raise
+        except Exception:
+            raise RequestError(
+                "avatar_upload_unavailable",
+                "Profile photo upload failed. Try again.",
+                503,
+            )
+
+        db_user = await User.objects.aget(pk=user.pk)
+        db_user.avatar_url = url
+        await db_user.asave(update_fields=["avatar_url"])
+        return url
+
+    @staticmethod
+    async def deactivate_account(*, user) -> None:
+        """Deactivate the account and revoke every refresh token.
+
+        Stateless access tokens stay valid until their short expiry, but no new
+        access token can be minted because all outstanding refresh tokens are
+        blacklisted. Login is refused because is_active is false.
+        """
+        from rest_framework_simplejwt.token_blacklist.models import (
+            BlacklistedToken,
+            OutstandingToken,
+        )
+
+        db_user = await User.objects.aget(pk=user.pk)
+        db_user.is_active = False
+        await db_user.asave(update_fields=["is_active"])
+
+        def blacklist_all():
+            for token in OutstandingToken.objects.filter(user=db_user):
+                BlacklistedToken.objects.get_or_create(token=token)
+
+        await sync_to_async(blacklist_all)()
+
+    @staticmethod
+    async def delete_account(*, user, confirm_email: str) -> None:
+        """Permanently delete the account and everything that cascades from it."""
+        db_user = await User.objects.aget(pk=user.pk)
+        if confirm_email.strip().lower() != db_user.email.lower():
+            raise BodyValidationError("confirm_email", "Enter your account email to confirm")
+        # Refresh tokens reference the user; remove them before the cascade so
+        # token_blacklist's FK does not block the delete.
+        from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
+
+        await sync_to_async(OutstandingToken.objects.filter(user=db_user).delete)()
+        await db_user.adelete()
+
+    @staticmethod
     async def verify_email(*, email: str, otp: int) -> None:
         user = await User.objects.aget_or_none(email=email)
         if not user:
@@ -469,12 +612,37 @@ class AccountService:
         await user.asave(update_fields=["is_email_verified"])
 
     @staticmethod
-    async def resend_otp(*, email: str) -> None:
+    async def resend_otp(*, email: str) -> int:
+        """Send a fresh verification code and return the cooldown in seconds.
+
+        A code already in the inbox stays valid until it expires, so a second
+        request inside the cooldown is refused with the remaining seconds. The
+        frontend uses that number for its Resend countdown, which keeps the two
+        sides in agreement instead of inventing a separate timer.
+        """
         user = await User.objects.aget_or_none(email=email)
         if not user:
             raise NotFoundError("User does not exist")
         if user.is_email_verified:
             raise BodyValidationError("email", "Email already verified")
+
+        cooldown = settings.EMAIL_RESEND_COOLDOWN_SECONDS
+        now = timezone.now()
+        recent = await OneTimePassword.objects.filter(
+            user=user, purpose=EmailChallengePurpose.VERIFY_EMAIL
+        ).afirst()
+        if recent and recent.created_at:
+            elapsed = (now - recent.created_at).total_seconds()
+            if elapsed < cooldown:
+                from apps.common.exceptions import RequestError
+
+                raise RequestError(
+                    "rate_limited",
+                    "A code was already sent. Wait before requesting another.",
+                    429,
+                    data={"retry_after": max(1, int(cooldown - elapsed + 0.999))},
+                )
+
         await issue(
             user=user,
             email=email,
@@ -485,6 +653,7 @@ class AccountService:
                 "It expires in 15 minutes. If you did not sign up, ignore this email."
             ),
         )
+        return cooldown
 
     @staticmethod
     async def request_email_change(*, user, new_email: str) -> None:

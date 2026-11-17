@@ -47,6 +47,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         _("Username"), populate_from=slugify_two_fields, unique=True, always_update=True
     )
     avatar= models.ImageField(upload_to='avatars/', null=True, blank=True)
+    # The Cloudinary HTTPS URL for this user's avatar. The image itself lives
+    # in Cloudinary with a stable public_id (avatars/<user pk>); only the URL is
+    # stored here. Render has an ephemeral filesystem and no /media/ route, so
+    # writing the image to disk would 404 after the next deploy.
+    avatar_url = models.URLField(blank=True, default="")
     auth_provider = models.CharField(max_length=20, choices=AUTH_PROVIDERS, default="email")
     provider_user_id = models.CharField(max_length=255, null=True, blank=True)
 

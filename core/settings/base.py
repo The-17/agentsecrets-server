@@ -222,12 +222,21 @@ RESOLVER_URL = config("RESOLVER_URL", default="https://resolver.agentsecrets.tec
 BREVO_API_KEY = config("BREVO_API_KEY", default="")
 BREVO_SENDER = config("BREVO_SENDER", default="no-reply@agentsecrets.tech")
 
+# Cloudinary single-URL credential (cloudinary://<key>:<secret>@<cloud>). The
+# SDK reads CLOUDINARY_URL natively. Empty by default: avatar upload fails
+# closed with a clear error rather than storing an image it cannot serve.
+CLOUDINARY_URL = config("CLOUDINARY_URL", default="")
+CLOUDINARY_FOLDER = config("CLOUDINARY_FOLDER", default="avatars")
+
 # Email verification rollout. Off by default so a host without a Brevo key
 # behaves exactly as before. Turn it on only after BREVO_API_KEY is set, or
 # nobody can verify and the gates would lock out real accounts.
 REQUIRE_EMAIL_VERIFICATION = _env_bool("REQUIRE_EMAIL_VERIFICATION", default=False)
 EMAIL_CODE_TTL_MINUTES = config("EMAIL_CODE_TTL_MINUTES", default=15, cast=int)
 EMAIL_CODE_MAX_ATTEMPTS = config("EMAIL_CODE_MAX_ATTEMPTS", default=5, cast=int)
+# Minimum seconds between two code sends to one address. The frontend reads the
+# same value back as retry_after so its Resend countdown matches the server.
+EMAIL_RESEND_COOLDOWN_SECONDS = config("EMAIL_RESEND_COOLDOWN_SECONDS", default=60, cast=int)
 
 # Soft caps for unverified accounts. They refuse the creation that would cross
 # the line; nothing already stored is hidden, locked, or removed.

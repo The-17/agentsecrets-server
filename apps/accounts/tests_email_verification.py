@@ -155,7 +155,7 @@ class EmailVerificationTests(TestCase):
         user.refresh_from_db()
         self.assertFalse(user.is_email_verified)
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, EMAIL_RESEND_COOLDOWN_SECONDS=0)
     def test_resend_otp_sends_a_fresh_code(self):
         user = make_user()
         with patch(SEND, return_value=True) as send:

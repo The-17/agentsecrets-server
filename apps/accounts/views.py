@@ -1,6 +1,8 @@
 import logging
 from typing import Any
 from asgiref.sync import sync_to_async
+from ninja import File
+from ninja.files import UploadedFile
 from ninja_extra import api_controller, route
 
 from django.conf import settings
@@ -22,6 +24,9 @@ from .schemas import (
     LogoutSchema,
     VerifyOtpSchema,
     ResendOtpSchema,
+    ResendOtpDataSchema,
+    UpdateProfileSchema,
+    DeleteAccountSchema,
     UpdateEmailRequestSchema,
     ConfirmEmailSchema,
     ResetPasswordSchema,
@@ -168,10 +173,12 @@ class AuthController:
         await AccountService.verify_email(email=data.email, otp=data.otp)
         return CustomResponse.success(message="Email verified successfully!")
 
-    @route.post("/resend-otp/", response={200: SuccessResponse, 400: ErrorResponse})
+    @route.post("/resend-otp/", response={200: DataResponse[ResendOtpDataSchema], 400: ErrorResponse, 429: ErrorResponse})
     async def resend_otp(self, request, data: ResendOtpSchema):
-        await AccountService.resend_otp(email=data.email)
-        return CustomResponse.success(message="OTP sent successfully!")
+        retry_after = await AccountService.resend_otp(email=data.email)
+        return CustomResponse.success(
+            message="OTP sent successfully!", data={"retry_after": retry_after}
+        )
 
     @route.post("/reset-password-request/", response={200: SuccessResponse})
     async def reset_password_request(self, request, data: ResetPasswordSchema):
@@ -374,6 +381,7 @@ class AuthController:
                 "last_name": db_user.last_name,
                 "public_key": db_user.public_key,
                 "billing_id": billing_id,
+                "avatar": db_user.avatar_url or None,
                 "email_verified": db_user.is_email_verified,
                 # auth_methods walks social_identities, which is a sync query.
                 "opaque_enrolled": bool(
@@ -381,6 +389,37 @@ class AuthController:
                 ),
             },
         )
+
+    @route.patch("/me/", response={200: SuccessResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def update_profile(self, request, data: UpdateProfileSchema):
+        await AccountService.update_profile(
+            user=request.auth,
+            first_name=data.first_name,
+            last_name=data.last_name,
+        )
+        return CustomResponse.success(message="Profile updated")
+
+    @route.post("/me/avatar/", response={200: DataResponse[dict], 422: ErrorResponse}, auth=JWTAuth())
+    async def upload_avatar(self, request, file: UploadedFile = File(...)):
+        content = await sync_to_async(file.read)()
+        url = await AccountService.set_avatar(
+            user=request.auth, content=content, filename=file.name
+        )
+        return CustomResponse.success(
+            message="Avatar updated", data={"avatar_url": url}
+        )
+
+    @route.post("/account/deactivate/", response={200: SuccessResponse}, auth=JWTAuth())
+    async def deactivate_account(self, request):
+        await AccountService.deactivate_account(user=request.auth)
+        return CustomResponse.success(message="Account deactivated")
+
+    @route.delete("/account/", response={200: SuccessResponse, 422: ErrorResponse}, auth=JWTAuth())
+    async def delete_account(self, request, data: DeleteAccountSchema):
+        await AccountService.delete_account(
+            user=request.auth, confirm_email=data.confirm_email
+        )
+        return CustomResponse.success(message="Account deleted")
 
     @route.post("/refresh/", response={200: DataResponse[TokenRefreshResponseDataSchema], 401: ErrorResponse})
     async def refresh(self, request, data: RefreshTokenSchema):

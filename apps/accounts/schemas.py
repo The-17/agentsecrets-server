@@ -195,6 +195,10 @@ class OpaqueLoginStartResponseSchema(Schema):
     credential_id: str
 
 
+class ResendOtpDataSchema(Schema):
+    retry_after: int
+
+
 class ResendOtpSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 
@@ -342,6 +346,16 @@ class UserSummarySchema(Schema):
     billing_id: Optional[str] = None
     email_verified: bool = False
     opaque_enrolled: bool = False
+    avatar: Optional[str] = None
+
+
+class UpdateProfileSchema(Schema):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+
+class DeleteAccountSchema(Schema):
+    confirm_email: str
 
 
 class RegisterResponseDataSchema(Schema):
