@@ -158,7 +158,7 @@ class WorkspaceController:
                 "id": str(ws.id),
                 "name": ws.name,
                 "type": ws.type,
-                "tier": getattr(ws, "tier", "free"),
+                "tier": await WorkspaceSelector.resolve_tier(workspace_id=str(ws.id)),
                 "role": m.role,
                 "billing_id": ws.effective_billing_id,
                 "encrypted_workspace_key": m.encrypted_workspace_key,

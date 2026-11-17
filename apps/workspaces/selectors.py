@@ -139,7 +139,7 @@ class WorkspaceSelector:
             # back to effective_billing_id (free_ws_*), which resolver_plan treats
             # as Free.
             query_billing_id = ws.billing_id or ws.effective_billing_id
-            payload = await resolver_plan(billing_id=query_billing_id)
+            payload = await resolver_plan(billing_id=query_billing_id, user=ws.owner)
             if payload is None:
                 tier, ttl = db_tier or "unknown", 60
             else:
@@ -163,19 +163,22 @@ class WorkspaceSelector:
             "workspace__owner__billing_id",
             "workspace__created_at",
         )
-        return [
-            {
-                "id": str(m["workspace__id"]),
-                "name": m["workspace__name"],
-                "type": m["workspace__type"],
-                "tier": m.get("workspace__tier") or "free",
-                "role": m["role"],
-                "billing_id": (m["workspace__billing_id"] if m.get("workspace__tier") == "pro" else None) or m["workspace__owner__billing_id"],
-                "encrypted_workspace_key": m["encrypted_workspace_key"],
-                "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
-            }
-            async for m in memberships
-        ]
+        result = []
+        async for m in memberships:
+            tier = await WorkspaceSelector.resolve_tier(workspace_id=str(m["workspace__id"]))
+            result.append(
+                {
+                    "id": str(m["workspace__id"]),
+                    "name": m["workspace__name"],
+                    "type": m["workspace__type"],
+                    "tier": tier,
+                    "role": m["role"],
+                    "billing_id": (m["workspace__billing_id"] if tier == "pro" else None) or m["workspace__owner__billing_id"],
+                    "encrypted_workspace_key": m["encrypted_workspace_key"],
+                    "created_at": m["workspace__created_at"].isoformat() if m["workspace__created_at"] else None,
+                }
+            )
+        return result
 
     @staticmethod
     async def list_workspace_members(*, workspace_id: uuid.UUID) -> list[dict[str, Any]]:
