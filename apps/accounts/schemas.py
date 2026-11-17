@@ -341,6 +341,7 @@ class UserSummarySchema(Schema):
     public_key: Optional[str] = None
     billing_id: Optional[str] = None
     email_verified: bool = False
+    opaque_enrolled: bool = False
 
 
 class RegisterResponseDataSchema(Schema):

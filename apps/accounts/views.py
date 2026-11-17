@@ -354,26 +354,31 @@ class AuthController:
 
     @route.get("/me/", response={200: DataResponse[UserSummarySchema]}, auth=JWTAuth())
     async def get_current_user(self, request):
-        user = request.auth
-        billing_id = getattr(user, "billing_id", None)
+        from .models import User, generate_billing_id
+
+        # request.auth can carry deferred fields. Touching them in this async
+        # view raises SynchronousOnlyOperation, so read a fresh row instead.
+        db_user = await User.objects.aget(id=request.auth.id)
+        billing_id = db_user.billing_id
         if not billing_id:
-            from .models import User, generate_billing_id
-            db_user = await User.objects.aget_or_none(id=user.id)
-            if db_user:
-                if not db_user.billing_id:
-                    db_user.billing_id = generate_billing_id()
-                    await db_user.asave(update_fields=["billing_id"])
-                billing_id = db_user.billing_id
+            billing_id = generate_billing_id()
+            db_user.billing_id = billing_id
+            await db_user.asave(update_fields=["billing_id"])
 
         return CustomResponse.success(
             message="User profile retrieved",
             data={
-                "id": str(user.id),
-                "email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "public_key": user.public_key,
+                "id": str(db_user.id),
+                "email": db_user.email,
+                "first_name": db_user.first_name,
+                "last_name": db_user.last_name,
+                "public_key": db_user.public_key,
                 "billing_id": billing_id,
+                "email_verified": db_user.is_email_verified,
+                # auth_methods walks social_identities, which is a sync query.
+                "opaque_enrolled": bool(
+                    db_user.opaque_record and db_user.opaque_registered_at
+                ),
             },
         )
 
