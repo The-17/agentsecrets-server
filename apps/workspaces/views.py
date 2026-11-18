@@ -671,6 +671,31 @@ class ResolverController:
         data = await SecretSelector.get_due_value_rotations(workspace_id=workspace_id)
         return CustomResponse.success(message="Due value rotations retrieved", data=data)
 
+    @route.get("/rotation/workspaces/", response={200: DataResponse[List[Dict[str, Any]]], 401: ErrorResponse}, auth=ResolverSignatureAuth())
+    async def rotation_workspaces(self, request):
+        """Workspaces with a due rotation, so the resolver sweep does not
+        depend on a workload token having touched it since startup."""
+        from django.utils import timezone
+
+        from apps.secrets_app.models import Secret
+
+        from .models import AgentToken, Workspace
+
+        now = timezone.now()
+        value_ids = Secret.objects.filter(
+            rotation_period__isnull=False, next_rotation_at__lte=now
+        ).exclude(rotation_type="none").values_list("project__workspace_id", flat=True).distinct()
+        token_ids = AgentToken.objects.filter(
+            rotation_period__isnull=False,
+            next_rotation_at__lte=now,
+            rotation_state="active",
+            revoked_at__isnull=True,
+        ).values_list("workspace_id", flat=True).distinct()
+        ids = {str(i) for i in value_ids} | {str(i) for i in token_ids}
+        rows = await Workspace.objects.filter(id__in=ids).values("id", "billing_id")
+        data = [{"workspace_id": str(r["id"]), "billing_id": r["billing_id"] or ""} for r in rows]
+        return CustomResponse.success(message="Rotation workspaces retrieved", data=data)
+
     @route.post("/rotation/value-execute/", response={200: DataResponse[SecretPromoteResponseDataSchema], 400: ErrorResponse, 401: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse}, auth=ResolverSignatureAuth())
     async def rotation_value_execute(self, request, data: ValueExecuteSchema):
         """B2 autonomous execute (resolver-signed): stage a resolver-encrypted
