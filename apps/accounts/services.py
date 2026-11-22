@@ -583,6 +583,47 @@ class AccountService:
         await sync_to_async(blacklist_all)()
 
     @staticmethod
+    async def request_reactivation(*, email: str) -> None:
+        """Email a reactivation code, but only to an actually deactivated account.
+
+        The view always returns success so this never enumerates accounts. No
+        challenge is created for unknown or active addresses. Delivery is
+        fail-closed inside issue().
+        """
+        from .email_challenges import issue
+
+        user = await User.objects.filter(email__iexact=email).afirst()
+        if user is None or user.is_active:
+            return
+        await issue(
+            user=user,
+            email=user.email,
+            purpose=EmailChallengePurpose.REACTIVATE,
+            subject="Reactivate your AgentSecrets account",
+            body="Your reactivation code is {code}. It expires in 15 minutes. "
+                 "If you did not request this, ignore this email.",
+        )
+
+    @staticmethod
+    async def reactivate_account(*, email: str, otp: int) -> None:
+        """Consume a REACTIVATE code and re-enable login for the account."""
+        from .email_challenges import consume
+
+        user = await User.objects.filter(email__iexact=email).afirst()
+        if user is None or user.is_active:
+            # Generic failure: never reveal whether the address exists or its
+            # state, and do not let a code flip an already-active account.
+            raise AuthenticationError("Invalid or expired code")
+        await consume(
+            user=user,
+            purpose=EmailChallengePurpose.REACTIVATE,
+            otp=otp,
+            email=user.email,
+        )
+        user.is_active = True
+        await user.asave(update_fields=["is_active"])
+
+    @staticmethod
     async def delete_account(*, user, confirm_email: str) -> None:
         """Permanently delete the account and everything that cascades from it."""
         db_user = await User.objects.aget(pk=user.pk)

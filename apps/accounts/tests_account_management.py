@@ -119,6 +119,76 @@ class AccountManagementTests(TestCase):
         )
         self.assertIn(login.status_code, (400, 401, 403))
 
+    def test_reactivate_with_code_restores_login(self):
+        from unittest.mock import patch
+
+        from apps.accounts.models import EmailChallengePurpose, OneTimePassword
+
+        self.client.post("/api/auth/account/deactivate/", **self.auth)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_active)
+
+        # Old token stops working once deactivated.
+        me = self.client.get("/api/auth/me/", **self.auth)
+        self.assertEqual(me.status_code, 401)
+
+        with patch("apps.common.email.brevo.send", return_value=True) as send:
+            req = self.client.post(
+                "/api/auth/account/reactivate/request/",
+                data={"email": self.user.email},
+                content_type="application/json",
+            )
+        self.assertEqual(req.status_code, 200)
+        send.assert_called_once()
+        challenge = OneTimePassword.objects.get(
+            user=self.user, purpose=EmailChallengePurpose.REACTIVATE
+        )
+        confirmation = self.client.post(
+            "/api/auth/account/reactivate/confirm/",
+            data={"email": self.user.email, "otp": int(challenge.code)},
+            content_type="application/json",
+        )
+        self.assertEqual(confirmation.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_active)
+        self.assertFalse(
+            OneTimePassword.objects.filter(
+                user=self.user, purpose=EmailChallengePurpose.REACTIVATE
+            ).exists()
+        )
+        # The code is single use: a second confirm fails.
+        again = self.client.post(
+            "/api/auth/account/reactivate/confirm/",
+            data={"email": self.user.email, "otp": int(challenge.code)},
+            content_type="application/json",
+        )
+        self.assertEqual(again.status_code, 401)
+
+    def test_reactivate_request_does_not_enumerate_accounts(self):
+        from unittest.mock import patch
+
+        with patch("apps.common.email.brevo.send", return_value=True) as send:
+            req = self.client.post(
+                "/api/auth/account/reactivate/request/",
+                data={"email": "nobody@example.com"},
+                content_type="application/json",
+            )
+        # Same generic success as a real deactivated account, and no email sent.
+        self.assertEqual(req.status_code, 200)
+        send.assert_not_called()
+
+    def test_reactivate_request_ignores_active_account(self):
+        from unittest.mock import patch
+
+        with patch("apps.common.email.brevo.send", return_value=True) as send:
+            req = self.client.post(
+                "/api/auth/account/reactivate/request/",
+                data={"email": self.user.email},
+                content_type="application/json",
+            )
+        self.assertEqual(req.status_code, 200)
+        send.assert_not_called()
+
     def test_delete_requires_matching_email(self):
         res = self.client.delete(
             "/api/auth/account/",

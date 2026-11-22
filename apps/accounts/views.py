@@ -25,6 +25,8 @@ from .schemas import (
     VerifyOtpSchema,
     ResendOtpSchema,
     ResendOtpDataSchema,
+    ReactivateRequestSchema,
+    ReactivateConfirmSchema,
     UpdateProfileSchema,
     DeleteAccountSchema,
     UpdateEmailRequestSchema,
@@ -413,6 +415,22 @@ class AuthController:
     async def deactivate_account(self, request):
         await AccountService.deactivate_account(user=request.auth)
         return CustomResponse.success(message="Account deactivated")
+
+    @route.post("/account/reactivate/request/", response={200: SuccessResponse, 400: ErrorResponse})
+    async def reactivate_request(self, request, data: ReactivateRequestSchema):
+        # Unauthenticated on purpose: a deactivated account cannot log in. The
+        # response is generic so this cannot enumerate which emails have accounts.
+        await AccountService.request_reactivation(email=data.email)
+        return CustomResponse.success(
+            message="If that account is deactivated, a reactivation code is on its way."
+        )
+
+    @route.post("/account/reactivate/confirm/", response={200: SuccessResponse, 400: ErrorResponse})
+    async def reactivate_confirm(self, request, data: ReactivateConfirmSchema):
+        await AccountService.reactivate_account(email=data.email, otp=data.otp)
+        return CustomResponse.success(
+            message="Account reactivated. You can sign in again."
+        )
 
     @route.delete("/account/", response={200: SuccessResponse, 422: ErrorResponse}, auth=JWTAuth())
     async def delete_account(self, request, data: DeleteAccountSchema):

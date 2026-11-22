@@ -205,6 +205,20 @@ class ResendOtpSchema(Schema):
     email: EmailStr
 
 
+class ReactivateRequestSchema(Schema):
+    """Request a reactivation code. Email only, like password reset."""
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class ReactivateConfirmSchema(Schema):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    otp: int
+
+
 class ResetPasswordSchema(Schema):
     model_config = ConfigDict(extra="forbid")
 

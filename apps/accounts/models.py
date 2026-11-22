@@ -337,6 +337,7 @@ class EmailChallengePurpose(models.TextChoices):
 
     VERIFY_EMAIL = "verify_email", "Verify Email"
     EMAIL_CHANGE = "email_change", "Email Change"
+    REACTIVATE = "reactivate", "Reactivate Account"
 
 
 class OneTimePassword(models.Model):
