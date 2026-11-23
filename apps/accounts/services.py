@@ -72,36 +72,32 @@ class AccountService:
         """
         Updates the user's last_active_at timestamp.
         Throttled to once every 15 minutes to prevent write amplification.
+        Uses a queryset update so a user deleted earlier in the same request
+        (DELETE /account/) is a harmless no-op instead of a DatabaseError.
         """
         now = timezone.now()
         try:
             last_active = user.last_active_at
         except User.DoesNotExist:
-            # The account was deleted by the request that triggered this stamp.
             return
         if last_active and (now - last_active) < timedelta(minutes=15):
             return
-
-        user.last_active_at = now
-        await user.asave(update_fields=["last_active_at"])
+        await User.objects.filter(pk=user.pk).aupdate(last_active_at=now)
 
     @staticmethod
     def stamp_user_activity_sync(*, user: User) -> None:
         """
         Synchronous variant of stamp_user_activity for WSGI middleware.
+        Queryset update so deleting the account mid-request is a no-op.
         """
         now = timezone.now()
         try:
             last_active = user.last_active_at
         except User.DoesNotExist:
-            # The response that triggered this stamp deleted the account
-            # (DELETE /account/). There is nobody left to stamp.
             return
         if last_active and (now - last_active) < timedelta(minutes=15):
             return
-
-        user.last_active_at = now
-        user.save(update_fields=["last_active_at"])
+        User.objects.filter(pk=user.pk).update(last_active_at=now)
 
     @staticmethod
     async def register_user(*, data: RegisterSchema) -> dict[str, Any]:

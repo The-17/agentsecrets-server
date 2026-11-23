@@ -189,6 +189,32 @@ class AccountManagementTests(TestCase):
         self.assertEqual(req.status_code, 200)
         send.assert_not_called()
 
+    def test_delete_after_real_login_token_no_500(self):
+        """A real login token carries profile claims; deleting must not 500.
+
+        The stateless auth builds a detached User from those claims. The
+        activity-tracking middleware stamps it after the response, when the row
+        is already gone. A queryset update makes that a no-op instead of a
+        DatabaseError that turned a successful delete into a 500.
+        """
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        token = AccessToken.for_user(self.user)
+        token["email"] = self.user.email
+        token["first_name"] = self.user.first_name
+        token["last_name"] = self.user.last_name
+        token["billing_id"] = self.user.billing_id or ""
+        token["is_staff"] = False
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+        res = self.client.delete(
+            "/api/auth/account/",
+            data={"confirm_email": self.user.email},
+            content_type="application/json",
+            **auth,
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(User.objects.filter(pk=self.user.pk).exists())
+
     def test_delete_requires_matching_email(self):
         res = self.client.delete(
             "/api/auth/account/",
